@@ -22,12 +22,12 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
     """Register Phase 2 tools."""
 
     @mcp.tool()  # type: ignore[attr-defined]
-    def translate_chapter(volume_id: str, chapter_id: str) -> dict:
+    def translate_chapter(volume_id: str, chapter_id: str, thinking_log: Optional[bool] = None) -> dict:
         volume_dir = resolve_volume_dir(volume_id, cfg)
         jp_dir = volume_dir / "JP"
         chapter_path = _resolve_jp_chapter(jp_dir, chapter_id)
 
-        translator = DeepSeekTranslator(work_dir=volume_dir, volume_id=volume_id)
+        translator = DeepSeekTranslator(work_dir=volume_dir, volume_id=volume_id, thinking_log_enabled=thinking_log)
         # translate_and_persist_chapter writes the EN file AND marks it
         # completed in manifest.json in one step — do not duplicate that
         # write-then-forget-the-manifest logic here again.
@@ -42,7 +42,11 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
         }
 
     @mcp.tool()  # type: ignore[attr-defined]
-    def run_translator(volume_id: str, chapters: Optional[List[str]] = None) -> dict:
+    def run_translator(
+        volume_id: str,
+        chapters: Optional[List[str]] = None,
+        thinking_log: Optional[bool] = None,
+    ) -> dict:
         volume_dir = resolve_volume_dir(volume_id, cfg)
         jp_dir = volume_dir / "JP"
         if not jp_dir.is_dir():
@@ -53,7 +57,7 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
             wanted = {str(c).strip() for c in chapters}
             chapter_files = [f for f in chapter_files if f.stem in wanted]
 
-        translator = DeepSeekTranslator(work_dir=volume_dir, volume_id=volume_id)
+        translator = DeepSeekTranslator(work_dir=volume_dir, volume_id=volume_id, thinking_log_enabled=thinking_log)
         results = translator.translate_all(chapter_files)
 
         manifest = {}

@@ -72,3 +72,11 @@ def get_post_processing_config() -> Dict[str, Any]:
     """The `translation.translator.post_processing` block."""
     translator_cfg = get_config_section("translation").get("translator", {}) or {}
     return translator_cfg.get("post_processing", {}) or {}
+
+
+def get_thinking_log_config() -> Dict[str, Any]:
+    """The `translation.thinking_log` block — note: sibling of `translator`,
+    not nested under it, since it's a translate-time behavior toggle rather
+    than a DeepSeek client parameter."""
+    translation_cfg = get_config_section("translation")
+    return translation_cfg.get("thinking_log", {}) or {}

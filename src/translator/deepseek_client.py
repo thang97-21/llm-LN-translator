@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.llm_types import LLMApiFamily, LLMContentBlock, LLMResponse, LLMUsage
 from src.translator.deepseek_conversation import DeepSeekConversationManager
+from src.translator.thinking_output import split_analysis_prelude_from_output
 
 # ── Inlined provider-capabilities declaration (main-repo common/ module) ────
 # Only the one capability instance this client actually declares — the full
@@ -76,49 +77,11 @@ DEEPSEEK_CAPABILITIES = ProviderCapabilities(
 
 # A top-level Markdown H1 (the chapter heading) — the credibility signal that a
 # salvaged reasoning_content tail is really a chapter and not a reasoning fragment.
+# split_analysis_prelude_from_output (imported above, from thinking_output.py)
+# uses its own private copy of this same H1 pattern; kept as two constants
+# rather than one shared import because this one gates the empty-content
+# salvage credibility check specifically, not general prelude-splitting.
 _TOP_LEVEL_H1_RE = re.compile(r"(?m)^#\s+.+$")
-
-# ── Inlined analysis-prelude splitter (main-repo translator/ module) ────────
-# Analysis-prelude markers that indicate a model ignored the <thinking> wrapper
-# and emitted a short translator-analysis prelude before the first H1 heading.
-_ANALYSIS_PRELUDE_RE = re.compile(
-    r"(?:"
-    r"\bI['’]ll\s+work\s+through\b|"
-    r"\bMETADATA\s+CONFLICT\b|"
-    r"\bBIBLE\s+AUDIT\b|"
-    r"\bSCENE\s+ANALYSIS\b|"
-    r"\bTRANSLATION\s+DECISIONS\b|"
-    r"\bKOJI\s+FOX\b|"
-    r"\bSELF[-\s]?CRITIQUE\b|"
-    r"\bPhase\s+0\b|"
-    r"\*\*[^*\n]+(?:SCAN|AUDIT|ANALYSIS|DECISIONS|CHECK)\*\*"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def split_analysis_prelude_from_output(text: str) -> Tuple[str, List[str]]:
-    """Return (chapter_body_without_analysis_prelude, prelude_blocks).
-
-    Some models ignore the required <thinking> wrapper and emit a short
-    translator-analysis prelude before the first top-level chapter heading.
-    Only strip it when a real H1 follows and the prelude matches analysis
-    markers, so narrative text that legitimately starts before a heading is
-    left untouched.
-    """
-    raw = text or ""
-    h1_match = _TOP_LEVEL_H1_RE.search(raw)
-    if not h1_match:
-        return raw.strip(), []
-
-    prelude = raw[: h1_match.start()].strip()
-    if not prelude:
-        return raw.strip(), []
-
-    if not _ANALYSIS_PRELUDE_RE.search(prelude):
-        return raw.strip(), []
-
-    return raw[h1_match.start():].strip(), [prelude]
 
 # One-time guard so the actual usage-object schema returned by DeepSeek's
 # Anthropic-format endpoint is logged exactly once per process (see

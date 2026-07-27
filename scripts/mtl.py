@@ -8,10 +8,14 @@ DeepSeek_MTLS/ root (or invoke via mtl.bat, which cd's there for you) so the
 
     extract <epub_path>      Phase 1: EPUB -> JP chapters (Librarian)
     prep <vol_id>            Unified DeepSeek call: fills context.xml (no Gemini)
-    translate <vol_id>       Phase 2: JP -> EN (DeepSeek V4 Pro)
+    translate <vol_id> [--no-thinking-log]
+                             Phase 2: JP -> EN (DeepSeek V4 Pro). Saves DeepSeek's
+                             per-chapter reasoning to work/<vol_id>/THINKING/ by
+                             default; --no-thinking-log skips that.
     qc <vol_id>               Filesystem-only sanity gate (zero API cost)
     build <vol_id>            Phase 4: EN -> EPUB (Builder)
-    run <epub_path>           Full pipeline: extract -> prep -> translate -> qc -> build
+    run <epub_path> [--no-thinking-log]
+                              Full pipeline: extract -> prep -> translate -> qc -> build
     list                      List volumes in work/
     status <vol_id>           Pipeline state + chapter completion summary
 
@@ -84,7 +88,11 @@ def cmd_qc(args: argparse.Namespace) -> int:
 
 
 def cmd_translate(args: argparse.Namespace) -> int:
-    results = translate_volume(args.volume_id, chapters=args.chapters)
+    results = translate_volume(
+        args.volume_id,
+        chapters=args.chapters,
+        thinking_log_enabled=False if args.no_thinking_log else None,
+    )
     print(f"\nTranslated {len(results)} chapter(s):")
     for chapter_id, output_path in sorted(results.items()):
         print(f"  {chapter_id} -> {output_path}")
@@ -120,7 +128,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
     print(f"[2/5] Prepped — {len(prep_receipt['blocks_populated'])}/15 context.xml blocks populated")
 
-    results = translate_volume(volume_id)
+    results = translate_volume(
+        volume_id,
+        thinking_log_enabled=False if args.no_thinking_log else None,
+    )
     print(f"[3/5] Translated {len(results)} chapter(s)")
 
     qc_report = run_qc(volume_id)
@@ -198,6 +209,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--chapters", "-c", type=str, nargs="+", default=None,
         help="Specific chapter IDs to translate (default: all pending)",
     )
+    p_translate.add_argument(
+        "--no-thinking-log", action="store_true",
+        help="Skip saving DeepSeek's per-chapter reasoning to work/<vol_id>/THINKING/ (on by default)",
+    )
     p_translate.set_defaults(func=cmd_translate)
 
     p_qc = subparsers.add_parser("qc", help="Filesystem-only sanity gate (zero API cost)")
@@ -213,6 +228,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("epub_path", type=str, help="Path to source EPUB file")
     p_run.add_argument("--volume-id", "-v", type=str, default=None, help="Custom volume ID")
     p_run.add_argument("--series-id", type=str, default=None, help="Explicit series bible to load for prep")
+    p_run.add_argument(
+        "--no-thinking-log", action="store_true",
+        help="Skip saving DeepSeek's per-chapter reasoning to work/<vol_id>/THINKING/ (on by default)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_list = subparsers.add_parser("list", help="List volumes in work/")

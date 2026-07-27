@@ -57,6 +57,18 @@ translation:
   # auto-selects this when context.xml contains <prior_volume_anchors>.
   master_prompt_v2: src/prompt/master_prompt_deepseek_en_v2.xml
 
+  # ── Thinking Log ────────────────────────────────────────────────────────────
+  # DeepSeek V4 Pro's reasoning_content shows WHY it made each translation
+  # choice — character voice targeting, structural constraints considered.
+  # It's already paid for (reasoning tokens are billed as output regardless);
+  # saving it per chapter is a free audit trail. ON by default. Leaked
+  # <thinking> blocks are always stripped out of the shipped EN chapter
+  # regardless of this flag — this only controls whether that reasoning gets
+  # archived to a file, not whether the chapter output itself stays clean.
+  thinking_log:
+    enabled: true                # --no-thinking-log on the CLI overrides this to false
+    output_dir: THINKING         # Relative to the volume's work dir: work/<vol_id>/THINKING/
+
   # ── DeepSeek V4 Translator Parameters ─────────────────────────────────────
   # This is THE control knob for all DeepSeek V4 translator behavior.
   # Every parameter below maps directly to deepseek_client.py,

@@ -24,13 +24,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.common.atomic_io import atomic_write_json
-from src.common.config import WORK_DIR
+from src.common.atomic_io import atomic_write_json, atomic_write_text
+from src.common.config import WORK_DIR, get_target_language
 from src.translator.config import (
     get_conversation_config,
     get_master_prompt_path,
     get_optimizations_config,
     get_post_processing_config,
+    get_thinking_log_config,
 )
 from src.translator.context_manager import load_context_xml
 from src.translator.deepseek_client import DeepSeekClient
@@ -40,6 +41,7 @@ from src.translator.deepseek_optimization import (
 )
 from src.translator.prompt_loader import build_system_instruction, build_user_message
 from src.translator.scene_break_formatter import SceneBreakFormatter
+from src.translator.thinking_output import merge_thinking_log, split_thinking_from_output
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,13 @@ _CJK_LEAK_RE = re.compile(
 class DeepSeekTranslator:
     """Bare Phase 2 client: JP markdown in, EN markdown out, via DeepSeek V4 Pro."""
 
-    def __init__(self, work_dir: Path, volume_id: str, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        work_dir: Path,
+        volume_id: str,
+        config: Optional[Dict[str, Any]] = None,
+        thinking_log_enabled: Optional[bool] = None,
+    ):
         self.work_dir = Path(work_dir)
         self.volume_id = volume_id
         self._config = config or {}
@@ -72,6 +80,15 @@ class DeepSeekTranslator:
 
         self.optimizations = get_optimizations_config()
         self.post_processing = get_post_processing_config()
+
+        thinking_log_cfg = get_thinking_log_config()
+        # `thinking_log_enabled=False` (e.g. from --no-thinking-log) always
+        # wins over config.yaml; `None` means "use whatever config.yaml says,"
+        # matching the plan's "ON by default, config-gated" framing.
+        self.thinking_log_enabled = (
+            thinking_log_cfg.get("enabled", True) if thinking_log_enabled is None else thinking_log_enabled
+        )
+        self.thinking_log_dir_name = thinking_log_cfg.get("output_dir", "THINKING")
 
         context_xml = load_context_xml(self.work_dir)
         if context_xml is None:
@@ -143,8 +160,20 @@ class DeepSeekTranslator:
             system_instruction=self.system_instruction,
         )
 
-        en_text = response.content
-        en_text = self._post_process(en_text)
+        # Strip any <thinking>...</thinking> that leaked into the content
+        # channel alongside a real chapter — a different failure mode from
+        # DeepSeekClient's own empty-content reasoning-channel salvage,
+        # which only fires when content is empty. This always runs,
+        # regardless of thinking_log_enabled: a leaked block has no business
+        # in the shipped chapter or in conversation history either way.
+        cleaned_content, leaked_blocks = split_thinking_from_output(response.content)
+        self._maybe_write_thinking_log(
+            chapter_id=chapter_id,
+            api_thinking=response.thinking_content,
+            leaked_blocks=leaked_blocks,
+        )
+
+        en_text = self._post_process(cleaned_content)
 
         self.client.commit_conversation_turn(
             response=response,
@@ -154,6 +183,34 @@ class DeepSeekTranslator:
         )
 
         return en_text
+
+    def _maybe_write_thinking_log(
+        self,
+        *,
+        chapter_id: str,
+        api_thinking: Optional[str],
+        leaked_blocks: List[str],
+    ) -> None:
+        """Archive this chapter's reasoning to THINKING/<chapter_id>_THINKING.md,
+        if thinking_log.enabled. Reasoning tokens are already paid for whether
+        or not this runs — the flag only controls whether they're kept."""
+        if not self.thinking_log_enabled:
+            return
+        merged = merge_thinking_log(api_thinking, leaked_blocks, chapter_id=chapter_id)
+        if not merged:
+            return
+
+        thinking_dir = self.work_dir / self.thinking_log_dir_name
+        thinking_dir.mkdir(parents=True, exist_ok=True)
+        header = (
+            f"# Thinking Process — {chapter_id}\n\n"
+            f"- **Chapter:** {chapter_id}\n"
+            f"- **Model:** {self.client.model}\n"
+            f"- **Target language:** {get_target_language()}\n"
+            f"- **Timestamp:** {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n\n"
+            f"## DeepSeek V4 Pro's Translation Reasoning\n\n"
+        )
+        atomic_write_text(thinking_dir / f"{chapter_id}_THINKING.md", header + merged + "\n")
 
     def _post_process(self, text: str) -> str:
         if self.post_processing.get("scene_break_formatting", True):
@@ -254,7 +311,11 @@ def _update_manifest_after_translation(work_dir: Path, translated_stems: set) ->
     atomic_write_json(manifest_path, manifest)
 
 
-def translate_volume(volume_id: str, chapters: Optional[List[str]] = None) -> Dict[str, Path]:
+def translate_volume(
+    volume_id: str,
+    chapters: Optional[List[str]] = None,
+    thinking_log_enabled: Optional[bool] = None,
+) -> Dict[str, Path]:
     """Convenience entry point: translate a volume's JP/ chapters by volume_id."""
     work_dir = WORK_DIR / volume_id
     jp_dir = work_dir / "JP"
@@ -266,5 +327,9 @@ def translate_volume(volume_id: str, chapters: Optional[List[str]] = None) -> Di
         wanted = set(chapters)
         chapter_files = [f for f in chapter_files if f.stem in wanted or f.stem.split("_")[-1] in wanted]
 
-    translator = DeepSeekTranslator(work_dir=work_dir, volume_id=volume_id)
+    translator = DeepSeekTranslator(
+        work_dir=work_dir,
+        volume_id=volume_id,
+        thinking_log_enabled=thinking_log_enabled,
+    )
     return translator.translate_all(chapter_files)
