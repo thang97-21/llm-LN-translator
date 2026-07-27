@@ -72,9 +72,10 @@ and inspector panes; it collapses to two panes at 90–119 and a breadcrumbed
 single pane below 90. `list` and `status` have been removed from the console:
 the Dashboard and Volume Workbench already read the same local data without
 the absurd detour through a Python subprocess.
-Dashboard displays the effective runtime entries from `config.yaml`; `Up`/`Down`
-select a workspace in the rail and `Enter` opens it. Inside a workspace, those
-same keys select items and `Enter` opens them.
+Dashboard displays only the effective Translator entries from `config.yaml`;
+credential metadata is omitted. `Up`/`Down` select a workspace in the rail and
+`Enter` opens it. Inside a workspace, those same keys select items and `Enter`
+opens them.
 
 Primary workflows use the canonical CLI and expose every real argument:
 

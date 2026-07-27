@@ -39,7 +39,7 @@ try {
 } finally { rmSync(fixture, { recursive: true, force: true }); }
 
 assert.equal(layoutForColumns(120), 'three-pane'); assert.equal(layoutForColumns(90), 'two-pane'); assert.equal(layoutForColumns(89), 'single-pane');
-const runtimeConfig = loadRuntimeConfigLines(); assert.ok(runtimeConfig.some((line) => line.trim() === 'project:')); assert.ok(runtimeConfig.some((line) => line.includes('deepseek-v4-pro'))); assert.ok(!runtimeConfig.some((line) => line.trim().startsWith('#')));
+const runtimeConfig = loadRuntimeConfigLines(); assert.equal(runtimeConfig[0], 'Translator runtime configuration'); assert.ok(runtimeConfig.some((line) => line.includes('Model: DeepSeek V4 Pro'))); assert.ok(!runtimeConfig.some((line) => /api[_ -]?key/i.test(line))); assert.ok(!runtimeConfig.some((line) => line.trim() === 'Prep' || line.trim() === 'Builder')); assert.ok(!runtimeConfig.some((line) => line.trim().startsWith('#')));
 let consoleState = createConsole(); for (let index = 0; index < 5_010; index += 1) consoleState = appendConsole(consoleState, `line ${index}`, 'cli');
 assert.equal(consoleState.entries.length, 5_000); assert.equal(consoleState.entries[0]?.text, 'line 10');
 consoleState = browseConsole(consoleState, 20, 20); assert.equal(consoleState.mode, 'browse'); assert.ok(consoleState.offset > 0); consoleState = setConsoleMode(consoleState, 'input'); assert.equal(consoleState.mode, 'input'); consoleState = jumpConsole(consoleState, 'end', 20); assert.equal(consoleState.mode, 'follow'); assert.equal(consoleState.offset, 0); assert.equal(visibleConsoleEntries(consoleState, 3).length, 3);

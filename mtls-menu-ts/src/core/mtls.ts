@@ -52,14 +52,84 @@ export function loadVolumesFrom(root: string): VolumeSummary[] {
 export function loadEpubs(): string[] { return listFiles(inputRoot, '.epub'); }
 export function loadRuntimeConfigLines(): string[] {
   const configPath = path.join(pipelineRoot, 'config.yaml');
-  if (!existsSync(configPath)) return ['config.yaml is unavailable.'];
+  if (!existsSync(configPath)) return ['Translator runtime configuration is unavailable.'];
   try {
     const lines = readFileSync(configPath, 'utf8').replace(/\r/g, '').split('\n');
-    const runtimeLines = lines.filter((line) => line.trim() && !line.trim().startsWith('#'));
-    return runtimeLines.length ? runtimeLines : ['config.yaml contains no runtime entries.'];
+    const runtimeLines: string[] = ['Translator runtime configuration'];
+    let inTranslator = false;
+    let translatorIndent = 0;
+    const parents: Array<{ indent: number; label: string }> = [];
+    for (const rawLine of lines) {
+      const trimmed = rawLine.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const indent = rawLine.length - rawLine.trimStart().length;
+      if (!inTranslator) {
+        if (trimmed === 'translator:') { inTranslator = true; translatorIndent = indent; }
+        continue;
+      }
+      if (indent <= translatorIndent) break;
+      const match = /^(?:[-]\s+)?([^:#]+):(?:\s*(.*))?$/.exec(trimmed);
+      if (!match) continue;
+      const key = match[1]?.trim() ?? '';
+      if (!key || key === 'api_key_env') continue;
+      const value = (match[2] ?? '').replace(/\s+#.*$/, '').trim();
+      while (parents.length && indent <= parents[parents.length - 1]!.indent) parents.pop();
+      const label = humanizeConfigKey(key);
+      if (!value) {
+        parents.push({ indent, label });
+        runtimeLines.push(label);
+      } else {
+        const prefix = parents.map((parent) => parent.label).join(' · ');
+        runtimeLines.push(`${prefix ? `${prefix} · ` : ''}${label}: ${humanizeConfigValue(value)}`);
+      }
+    }
+    return runtimeLines.length > 1 ? runtimeLines : ['Translator runtime configuration is unavailable.'];
   } catch (error) {
-    return [`Unable to read config.yaml: ${error instanceof Error ? error.message : String(error)}`];
+    return [`Unable to read Translator configuration: ${error instanceof Error ? error.message : String(error)}`];
   }
+}
+
+const CONFIG_LABELS: Readonly<Record<string, string>> = {
+  master_prompt: 'Primary translation prompt',
+  master_prompt_v2: 'Continuity translation prompt',
+  http_timeout_seconds: 'Request timeout',
+  max_output_tokens: 'Maximum output tokens',
+  top_p: 'Sampling nucleus',
+  budget_tokens: 'Thinking token budget',
+  recent_verbatim_chapters: 'Recent verbatim chapters',
+  include_exact_jp_task: 'Include exact Japanese source',
+  persistence_file: 'Conversation ledger',
+  checkpoint_trigger_ratio: 'Checkpoint trigger',
+  checkpoint_max_output_tokens: 'Checkpoint maximum output',
+  checkpoint_stuck_guard_turns: 'Checkpoint stuck guard',
+  soft_notice_ratio: 'Soft notice threshold',
+  tool_snip_ratio: 'Tool trim threshold',
+  checkpoint_force_ratio: 'Forced checkpoint threshold',
+  fail_closed_on_checkpoint_error: 'Stop on checkpoint error',
+  warn_threshold_cache_hit_ratio: 'Cache warning threshold',
+  thinking_analytics: 'Thinking analytics',
+  concurrent_chapters: 'Concurrent chapters',
+  max_concurrent: 'Maximum concurrent chapters',
+  scene_break_formatting: 'Scene-break formatting',
+  cjk_cleanup: 'CJK cleanup',
+  salvage_reasoning_leaked_answer: 'Recover leaked reasoning answers',
+  max_retries: 'Maximum retries',
+  base_delay_ms: 'Retry base delay',
+  max_delay_ms: 'Retry maximum delay',
+  jitter_factor: 'Retry jitter',
+  max_529_retries: 'Maximum overload retries',
+};
+
+function humanizeConfigKey(key: string): string {
+  return CONFIG_LABELS[key] ?? key.replace(/_/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function humanizeConfigValue(value: string): string {
+  if (value === 'true') return 'Enabled';
+  if (value === 'false') return 'Disabled';
+  if (value === 'deepseek-v4-pro') return 'DeepSeek V4 Pro';
+  if (value === 'deepseek-v4-flash') return 'DeepSeek V4 Flash';
+  return value;
 }
 function listFiles(dir: string, suffix: string): string[] { if (!existsSync(dir)) return []; try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(suffix)).map((entry) => path.join(dir, entry.name)).sort((a, b) => a.localeCompare(b)); } catch { return []; } }
 function listMarkdown(dir: string): string[] { return listFiles(dir, '.md'); }

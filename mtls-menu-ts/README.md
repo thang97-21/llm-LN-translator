@@ -28,10 +28,11 @@ The navigation rail contains Dashboard, Workflows, Volumes, Inputs, Advanced
 Toolbox, Console, and Diagnostics. Dashboard and Volumes replace the old
 `list`/`status` commands with direct read-only filesystem views.
 
-Dashboard is the runtime view: it shows the effective entries from `config.yaml`
-and can be paged without spawning Python. From Dashboard, `Up`/`Down` moves the
-workspace rail and `Enter` opens the selected workspace. Inside a workspace,
-the same keys select its items and `Enter` opens them; `Esc` returns to Dashboard.
+Dashboard is the runtime view: it shows only the effective Translator entries
+from `config.yaml`, with credential metadata omitted, and can be paged without
+spawning Python. From Dashboard, `Up`/`Down` moves the workspace rail and
+`Enter` opens the selected workspace. Inside a workspace, the same keys select
+its items and `Enter` opens them; `Esc` returns to Dashboard.
 
 ## Routed capabilities
 
