@@ -28,6 +28,7 @@ never copied into this client.
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -40,6 +41,15 @@ from src.common.config import WORK_DIR, ensure_utf8_console
 # crashes on the first non-ASCII character — see ensure_utf8_console's
 # docstring. Must run before any of this module's own print() calls.
 ensure_utf8_console()
+
+# Every phase module logs its own progress via logging.getLogger(__name__)
+# (chapter-start/chapter-done, cache-hit ratios, conversation truncation
+# warnings, ...) instead of print(). With no handler attached, the root
+# logger drops all of it — a multi-minute translate call goes completely
+# silent on stdout/stderr even though it's working. stream=stderr keeps it
+# out of the way of the plain-text summaries cmd_* functions print on
+# stdout, and out of anything that greps this CLI's stdout for output paths.
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
 
 from src.librarian.agent import run_librarian
 from src.builder.agent import run_builder
