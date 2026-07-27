@@ -252,10 +252,11 @@ Sources: [DeepSeek V4 — 1T Params, Benchmarks & Pricing](https://deepseek.ai/d
 | Thinking/reasoning mode, effort routing | `thinking.budget_tokens` / `thinking.effort` in `config.yaml`; DeepSeek has no native effort parameter at the API level, which is *why* DRDI exists at all — it's prose-injected reasoning scaffolding standing in for a routing knob the model doesn't expose |
 | No dedicated Anthropic-Messages endpoint in most public docs (DeepSeek's own docs describe an OpenAI-compatible path) | `deepseek_client.py` targets `https://api.deepseek.com/anthropic` anyway — DeepSeek also exposes an Anthropic Messages-format endpoint, which is what lets this client reuse the `anthropic` Python SDK instead of carrying a second HTTP client for one provider |
 | Pro tier vs Flash tier pricing gap | `prep.model` is hardcoded to `deepseek-v4-pro` (structured 15-block XML output isn't reliable on Flash); `translation.translator.model` defaults to Pro but Flash is a one-line config change for throughput-over-craft runs |
+| Multi-turn conversation + prefix caching, used together | `deepseek_conversation.py` isn't just a cost lever — it's the **consistency mechanism**. Every chapter's turn carries the still-cached context.xml prefix plus the last few chapters' JP+EN pairs verbatim, so character voice, locked names, and terminology from context.xml get *extended* turn-to-turn instead of re-derived from scratch each time. Caching is what makes carrying that growing history affordable; the history is what makes 1M-token context actually buy something instead of just being a bigger number |
 
-### Real cost telemetry — 5 volumes, one series
+### Real cost telemetry
 
-Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `translation_log.json` records from the main MTLS pipeline's production run of *家事代行のアルバイトを始めたら学園一の美少女の家族に気に入られちゃいました* (*The Housekeeper and the School Idol's Family*), volumes 1–5. (Volume 6 exists in that workspace but never reached the translator — Librarian-only, no cost data — so it's excluded rather than padded in as a zero.) Model was `deepseek-v4-pro` across all 48 chapters, no exceptions.
+Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `translation_log.json` records from a production run of a 5-volume light novel series in the main MTLS pipeline, averaging ~10 chapters per volume. Model was `deepseek-v4-pro` across all 48 chapters, no exceptions.
 
 | Vol | Chapters | Input tokens | Output tokens | Cache-read tokens | Cost (USD) |
 |---|---|---|---|---|---|
@@ -266,10 +267,8 @@ Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `transl
 | 5 | 9 | 1,112,635 | 88,449 | 920,448 | $0.16389 |
 | **Total** | **48** | **5,998,127** | **500,519** | **4,937,216** | **$0.91485** |
 
-(Volume 4's own `cost_audit_last_run.json` on disk only covers a 2-chapter retry after an earlier failure — its `total_cost_usd` field is *not* the volume total. The figures above for Vol. 4 are summed from `translation_log.json`'s full 11-chapter record instead, and the reconstructed aggregate cross-checks against the sum of all five volumes' reported totals to within half a cent, so the substitution didn't introduce drift.)
-
 **What that works out to:**
-- **82.3% cache hit ratio** on input tokens (4,937,216 of 5,998,127) — comfortably clear of the 70% warning threshold `cache_monitor` watches for, every volume, without hand-tuning. That's the DRDI/DOVB-in-user-turn design from the table above paying off in a real ledger, not just in theory.
+- **82.3% cache hit ratio** on input tokens (4,937,216 of 5,998,127) — comfortably clear of the 70% warning threshold `cache_monitor` watches for, every volume, without hand-tuning. That's the multi-turn-conversation-plus-caching design from the table above paying off in a real ledger, not just in theory — and the same mechanism responsible for voice/name/terminology consistency across chapters.
 - Caching cut the **input-side** bill specifically by **81.6%** — $0.4794 actually paid vs. $2.6092 it would have cost at the flat cache-miss rate for the same 5,998,127 input tokens. Output tokens aren't cacheable by nature (they're generated, not repeated), so this saving is on input only; the more chapters share a stable prefix, the more of a volume's total cost this shrinks.
 - **≈$0.183/volume**, **≈$0.019/chapter** average across all 48 chapters — a full light-novel volume translated for less than the price of a bus fare, on the Pro tier, with thinking enabled throughout.
 - Zero `cache_creation_tokens` recorded anywhere in the 5-volume run. DeepSeek doesn't bill cache writes as a separate line item the way some providers do — a cache-establishing turn (chapter 1 of a volume, or right after a compaction-ladder rung resets the prefix) is priced as an ordinary cache-miss input, not an extra surcharge on top.
