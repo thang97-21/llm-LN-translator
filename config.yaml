@@ -246,8 +246,8 @@ translation:
       # DeepSeek conversation is ordered and append-only; concurrent
       # chapters cannot share conversation state.
       concurrent_chapters:
-        enabled: false
-        max_concurrent: 1                  # forced to 1 for safety
+        enabled: true
+        max_concurrent: 3                  # forced to 1 for safety
 
     # ── Streaming ───────────────────────────────────────────────────────────
     streaming:
@@ -320,7 +320,7 @@ mcp_harness:
       max_output_tokens: 128000
 
     translator:
-      harness_managed: false   # DeepSeekClient owns its config (translation.translator)
+      harness_managed: true   # DeepSeekClient owns its config (translation.translator)
 
     qc:
       enabled: true            # Filesystem-only, no LLM call
