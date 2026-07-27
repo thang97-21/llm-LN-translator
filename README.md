@@ -105,10 +105,11 @@ python -m pip install -r requirements.txt
 
 Console output is a structured 5,000-entry ring buffer rather than a 200-line
 tail. `Tab` enters terminal focus; arrows/PageUp/PageDown/Home/End browse,
-`f` follows the tail, and `i` sends raw input only to a CLI child. `Esc` asks
-before cancelling a running action; `Ctrl+C` stops it while leaving the console
-open, then exits only when idle. The process child or MCP transport is cleaned
-up on interruption and normal exit. Legacy Python TUI launching and `--legacy`
+`f` follows the tail, and `i` sends raw input only to a CLI child. `Esc` goes
+back (and asks before cancelling a running action); `Ctrl+C` stops the active
+action while leaving the console open. Only `Ctrl+Shift+Esc` exits the TUI. The
+process child or MCP transport is cleaned up on interruption and normal exit.
+Legacy Python TUI launching and `--legacy`
 or session-wide `--mcp` modes are gone; `mtl.bat` remains the standalone CLI.
 
 ### IDE Agent (MCP Tools) — One-Line E2E

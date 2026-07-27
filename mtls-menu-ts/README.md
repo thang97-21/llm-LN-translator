@@ -72,9 +72,10 @@ even after a run completes. `Tab` enters/leaves terminal focus. In focus:
 - `f` resumes follow-tail and clears the unseen counter.
 - `i` forwards raw input to a running CLI child; MCP calls deliberately have no
   raw-input mode.
-- `Esc` leaves input mode for browse; during a run it asks before cancellation.
-- `Ctrl+C` stops the action but keeps the console open. A second idle `Ctrl+C`
-  exits.
+- `Esc` leaves input mode for browse, then backs out of a workspace; during a
+  run it asks before cancellation.
+- `Ctrl+C` stops the active action but keeps the console open.
+- `Ctrl+Shift+Esc` is the only exit gesture.
 
 The console uses real child termination for CLI actions and an `AbortController`
 that closes an in-flight MCP transport. Both routes clean up on normal exit.
