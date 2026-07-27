@@ -255,7 +255,7 @@ No database, no ChromaDB, no vector store — just three flat JSON files per ser
 
 ### Specifications
 
-DeepSeek V4 launched April 24, 2026 and goes GA (Generally Avaiable) in two tiers:
+DeepSeek V4 launched April 24th, 2026 and goes GA (Generally Avaiable) in July 24th, 2026, Deepseek ships them in two tiers:
 
 | | V4 Pro | V4 Flash |
 |---|---|---|
