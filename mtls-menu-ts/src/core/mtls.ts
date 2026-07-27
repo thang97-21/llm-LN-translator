@@ -156,7 +156,12 @@ export function fuzzyMatch(query: string, target: string): boolean { const q = q
 export function filterVolumes(volumes: readonly VolumeSummary[], query: string): VolumeSummary[] { return volumes.filter((volume) => fuzzyMatch(query, `${volume.id} ${volume.title} ${volume.author} ${volume.series}`)); }
 export function sortVolumes(volumes: readonly VolumeSummary[], mode: SortMode): VolumeSummary[] { const copy = [...volumes]; if (mode === 'series') return copy.sort((a, b) => a.series.localeCompare(b.series) || b.updatedAt - a.updatedAt); if (mode === 'progress') return copy.sort((a, b) => (a.chapterCount ? a.translatedCount / a.chapterCount : 0) - (b.chapterCount ? b.translatedCount / b.chapterCount : 0)); return copy.sort((a, b) => b.updatedAt - a.updatedAt); }
 
-export function pythonCommand(): string { const override = process.env.DEEPSEEK_MTLS_PYTHON; if (override && existsSync(override)) return override; const venv = path.join(pipelineRoot, 'venv', 'Scripts', 'python.exe'); return existsSync(venv) ? venv : 'python'; }
+// venv layout differs by platform (Scripts/python.exe on Windows,
+// bin/python everywhere else), and the bare fallback does too: PEP 394 only
+// guarantees `python3` on macOS/Linux — plenty of current distros ship no
+// `python` symlink at all — while the python.org Windows installer only
+// ever produces `python.exe`, never `python3.exe`.
+export function pythonCommand(): string { const override = process.env.DEEPSEEK_MTLS_PYTHON; if (override && existsSync(override)) return override; const venv = path.join(pipelineRoot, 'venv', process.platform === 'win32' ? 'Scripts' : 'bin', process.platform === 'win32' ? 'python.exe' : 'python'); return existsSync(venv) ? venv : process.platform === 'win32' ? 'python' : 'python3'; }
 
 export function runCliCapability(spec: CapabilitySpec, argv: readonly string[], onText: (text: string, source: 'cli', severity?: 'info' | 'warning' | 'error' | 'success') => void, onDone: (code: number | null, cancelled: boolean) => void): RunHandle {
   if (spec.route.transport !== 'cli') throw new Error(`${spec.id} is not a CLI capability.`);

@@ -5,6 +5,32 @@ Extract, prep, translate, QC, build — and remember the series for next time.
 
 ---
 
+## Navigation
+
+- [What It Is](#what-it-is)
+- [What It Is NOT](#what-it-is-not)
+- [Quick Start](#quick-start)
+  - [TypeScript Terminal UI](#typescript-terminal-ui)
+  - [IDE Agent (MCP Tools) — One-Line E2E](#ide-agent-mcp-tools--one-line-e2e)
+- [Architecture](#architecture)
+  - [The Translator — What Makes It "Bare"](#the-translator--what-makes-it-bare)
+  - [Prep — What Makes It "Unified"](#prep--what-makes-it-unified)
+  - [Series Continuity — The Bible Writer](#series-continuity--the-bible-writer)
+- [Why DeepSeek V4 Model?](#why-deepseek-v4-model)
+  - [Specifications](#specifications)
+  - [How this maps onto DeepSeek_MTLS](#how-this-maps-onto-deepseek_mtls)
+  - [Real cost telemetry](#real-cost-telemetry)
+- [Configuration](#configuration)
+  - [Key Parameters](#key-parameters)
+- [File Structure](#file-structure)
+- [CLI Reference](#cli-reference)
+- [MCP Tools](#mcp-tools)
+  - [MCP Tool Design Notes](#mcp-tool-design-notes)
+- [Requirements](#requirements)
+- [context.xml](#contextxml)
+
+---
+
 ## What It Is
 
 A self-contained translation pipeline that ingests a Japanese EPUB, builds a
@@ -44,10 +70,12 @@ pip install -r requirements.txt
 
 # 4. Set your API key
 # Edit .env or set the environment variable:
-set DEEPSEEK_API_KEY=sk-your-key-here
+set DEEPSEEK_API_KEY=sk-your-key-here      # Windows
+# export DEEPSEEK_API_KEY=sk-your-key-here   # Linux/macOS
 
 # 5. Drop an EPUB in raw/
-copy "C:\path\to\your-light-novel.epub" raw\
+copy "C:\path\to\your-light-novel.epub" raw\      # Windows
+# cp /path/to/your-light-novel.epub raw/            # Linux/macOS
 
 # 6. Run the full pipeline
 python scripts/mtl.py run raw/your-light-novel.epub
@@ -72,7 +100,8 @@ cd mtls-menu-ts
 npm install
 
 # Launch from project root
-mtl-ts.bat
+mtl-ts.bat      # Windows
+./mtl-ts.sh     # Linux/macOS
 ```
 
 The console has Dashboard, Workflows, Volumes, Inputs, Advanced Toolbox,
@@ -123,7 +152,7 @@ back (and asks before cancelling a running action); `Ctrl+C` stops the active
 action while leaving the console open. Only `Ctrl+Shift+Esc` exits the TUI. The
 process child or MCP transport is cleaned up on interruption and normal exit.
 Legacy Python TUI launching and `--legacy`
-or session-wide `--mcp` modes are gone; `mtl.bat` remains the standalone CLI.
+or session-wide `--mcp` modes are gone; `mtl.bat`/`mtl.sh` remain the standalone CLI.
 
 ### IDE Agent (MCP Tools) — One-Line E2E
 
@@ -143,7 +172,7 @@ AGENT:
   → "Done. 12 chapters, 94K EN words, QC passed, bible updated for volume 4. ~$0.20 total."
 ```
 
-The MCP server does the orchestration; the agent just calls tools in sequence. The only prerequisite is `DEEPSEEK_API_KEY` in `.env` — nothing else, no main-pipeline path to configure.
+The MCP server does the orchestration; the agent just calls tools in sequence. The only prerequisite is `DEEPSEEK_API_KEY` in `.env` — nothing else to configure.
 
 **Persona + routing resources:** the server also exposes two MCP *resources* (not tools) via `src/mcp/harness.py` — `persona://instructions` (this project's `CLAUDE.md`, verbatim, so a remote or non-Claude-Code agent connecting over MCP gets the same operating context a local session gets automatically) and `routing://phases` (the phase-name → tool-name map, e.g. `"translate" → "run_translator"`, overridable via `config.yaml`'s `phase_routing` section). Neither is required reading to use the server — they exist for agents that want to introspect it.
 
@@ -155,7 +184,7 @@ The MCP server does the orchestration; the agent just calls tools in sequence. T
 raw/                          ← Drop EPUBs here
     │
     ▼
-[Phase 1: Librarian]          ← src/librarian/          (copied verbatim from main pipeline)
+[Phase 1: Librarian]          ← src/librarian/          (deterministic, zero LLM calls)
     JP chapter .md extraction, TOC parsing, illustration export
     Writes a barebone 15-block context.xml (every block <pending/>) + manifest.json
     │
@@ -182,7 +211,7 @@ raw/                          ← Drop EPUBs here
     Cumulative cross-volume continuity — makes the NEXT volume's sequel detection possible
     │
     ▼
-[Phase 4: Builder]            ← src/builder/               (copied verbatim from main pipeline)
+[Phase 4: Builder]            ← src/builder/               (deterministic, zero LLM calls)
     Reads manifest.json["metadata"] for OPF assembly; EPUB3 packaging, XHTML, NCX/TOC
     │
     ▼
@@ -206,7 +235,7 @@ Everything else is **gone**. The DeepSeek master prompt carries all translation 
 
 Prep is a single stateless DeepSeek API call, deliberately **not** built on `DeepSeekClient` — that class is tuned for the chaptered, conversation-aware translation loop (prefix cache monitor, persistent conversation manager). Prep has none of that: `src/prep/agent.py` opens its own minimal Anthropic-SDK connection so its behavior can't silently drift whenever someone tunes translator config.
 
-It fills the exact 15-block schema the main pipeline's `scripts/build_context_xml.py` produces (same root `<mtls_project_context schema_version="1.0">`, same block names and order), with one deliberate gap: `character_attribute_anchors` stays `<pending/>` — that block belongs to a cross-volume CAA subsystem this client doesn't run. The full block-by-block spec lives in `src/prompt/prep_prompt_deepseek_en.xml`.
+It fills the 15-block `<mtls_project_context schema_version="1.0">` schema — see [context.xml](#contextxml) below — with one deliberate gap: `character_attribute_anchors` stays `<pending/>` — that block belongs to a cross-volume CAA subsystem this client doesn't run. The full block-by-block spec lives in `src/prompt/prep_prompt_deepseek_en.xml`.
 
 ### Series Continuity — The Bible Writer
 
@@ -218,7 +247,7 @@ It fills the exact 15-block schema the main pipeline's `scripts/build_context_xm
 | `verbatim_anchors.json` | Recurring signature phrases, locked wording, which volumes they appeared in | context.xml's `verbatim_anchors` |
 | `series_pack.json` | Volumes processed, merged voice fingerprints, last-known EPS band per character | context.xml's `voice_fingerprints` + `eps_arc_tracker` |
 
-No database, no ChromaDB, no vector store — this is not the main pipeline's publisher/author/anime-metadata `bibles/*.json`. On the *next* volume of a series, `prep_volume` matches the new volume's JP title against every `series_pack.json`'s `series_title_jp`; a match loads the bible and injects it into the prep call so DeepSeek reuses locked names and voices instead of reinventing them. Writing the bible is deliberately MCP/IDE-agent-only, not a CLI/TUI command — it should follow someone actually looking at the QC report, not run unconditionally on every `run`.
+No database, no ChromaDB, no vector store — just three flat JSON files per series. On the *next* volume of a series, `prep_volume` matches the new volume's JP title against every `series_pack.json`'s `series_title_jp`; a match loads the bible and injects it into the prep call so DeepSeek reuses locked names and voices instead of reinventing them. Writing the bible is deliberately MCP/IDE-agent-only, not a CLI/TUI command — it should follow someone actually looking at the QC report, not run unconditionally on every `run`.
 
 ---
 
@@ -256,7 +285,7 @@ Sources: [DeepSeek V4 — 1T Params, Benchmarks & Pricing](https://deepseek.ai/d
 
 ### Real cost telemetry
 
-Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `translation_log.json` records from a production run of a 5-volume light novel series in the main MTLS pipeline, averaging ~10 chapters per volume. Model was `deepseek-v4-pro` across all 48 chapters, no exceptions.
+Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `translation_log.json` records from a 5-volume, 48-chapter production run (averaging ~10 chapters per volume) using the identical DeepSeek client and pricing model this repo ships. Model was `deepseek-v4-pro` throughout, no exceptions.
 
 | Vol | Chapters | Input tokens | Output tokens | Cache-read tokens | Cost (USD) |
 |---|---|---|---|---|---|
@@ -273,7 +302,7 @@ Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `transl
 - **≈$0.183/volume**, **≈$0.019/chapter** average across all 48 chapters — a full light-novel volume translated for less than the price of a bus fare, on the Pro tier, with thinking enabled throughout.
 - Zero `cache_creation_tokens` recorded anywhere in the 5-volume run. DeepSeek doesn't bill cache writes as a separate line item the way some providers do — a cache-establishing turn (chapter 1 of a volume, or right after a compaction-ladder rung resets the prefix) is priced as an ordinary cache-miss input, not an extra surcharge on top.
 
-This is main-pipeline telemetry, not DeepSeek_MTLS's own — the two are separate codebases that happen to share the identical `deepseek_client.py` lineage and pricing table (`_DEEPSEEK_RATES_PER_MTOK` in `src/translator/deepseek_client.py` matches these rates exactly), so the economics transfer directly to what running this lightweight client will actually cost.
+Same client, same endpoint, same pricing table — `_DEEPSEEK_RATES_PER_MTOK` in `src/translator/deepseek_client.py` matches these rates exactly — so the economics transfer directly to what running this pipeline will actually cost.
 
 ---
 
@@ -349,8 +378,8 @@ DeepSeek_MTLS/
 ├── requirements.txt            ← Python deps (anthropic, pyyaml, lxml, bs4, Pillow, tiktoken, mcp)
 ├── PLANNING.md                 ← Full implementation plan
 ├── README.md                   ← This file
-├── mtl.bat                     ← Windows Python CLI launcher
-├── mtl-ts.bat                  ← Windows TypeScript TUI launcher
+├── mtl.bat / mtl.sh             ← CLI launcher (Windows / Linux+macOS)
+├── mtl-ts.bat / mtl-ts.sh       ← TypeScript TUI launcher (Windows / Linux+macOS)
 ├── .mcp.json                   ← MCP server definition
 │
 ├── raw/                        ← Drop input EPUBs here
@@ -360,7 +389,7 @@ DeepSeek_MTLS/
 │
 ├── src/
 │   ├── common/                 ← Shared: config.py, os_config.py, llm_types.py, atomic_io.py, interactive.py
-│   ├── librarian/              ← Phase 1: EPUB extraction (copied verbatim from main pipeline)
+│   ├── librarian/              ← Phase 1: EPUB extraction (deterministic, zero LLM calls)
 │   │   └── publisher_profiles/ ← 11 publisher JSON profiles
 │   ├── prep/                   ← Unified single-DeepSeek-call context.xml builder
 │   │   └── agent.py            ← run_prep() — its own minimal DeepSeek client, not DeepSeekClient
@@ -374,7 +403,7 @@ DeepSeek_MTLS/
 │   │   └── scene_break_formatter.py
 │   ├── qc/                     ← Filesystem-only sanity gate (run_qc())
 │   ├── bible/                  ← Bible Writer (run_write_bible())
-│   ├── builder/                ← Phase 4: EPUB assembly (copied verbatim from main pipeline)
+│   ├── builder/                ← Phase 4: EPUB assembly (deterministic, zero LLM calls)
 │   ├── prompt/                 ← master_prompt_deepseek_en(.xml/_v2.xml), prep_prompt_deepseek_en.xml, localization_policy.md
 │   └── mcp/                    ← Slim MCP server (6 tool servers, 20 tools, 2 resources)
 │       ├── server.py           ← Main MCP entry (stdio)
@@ -427,7 +456,7 @@ No `bible` CLI command — see [Series Continuity](#series-continuity--the-bible
 
 ## MCP Tools
 
-The MCP server exposes 6 tool groups (20 tools) and 2 resources for IDE-agent integration. The main MTLS skills this client would otherwise need (Prep, Translator, QC, Bible Writer) are **reified as MCP tools** — the IDE agent calls one tool per phase instead of reading a skill file and manually orchestrating sub-steps.
+The MCP server exposes 6 tool groups (20 tools) and 2 resources for IDE-agent integration. Every phase this client runs (Prep, Translator, QC, Bible Writer) is **reified as an MCP tool** — the IDE agent calls one tool per phase instead of reading a skill file and manually orchestrating sub-steps.
 
 | Server | Tools | Phase |
 |--------|-------|-------|
@@ -440,40 +469,18 @@ The MCP server exposes 6 tool groups (20 tools) and 2 resources for IDE-agent in
 
 **Resources** (`src/mcp/harness.py`): `persona://instructions` (this project's CLAUDE.md), `routing://phases` and `routing://phases/{phase}` (phase-name → tool-name map, overridable via `config.yaml`'s `phase_routing` section).
 
-### Skill → MCP Tool Mapping
+### MCP Tool Design Notes
 
-| Main MTLS Skill | DeepSeek_MTLS MCP Tool | What Changed |
-|---|---|---|
-| `mtls-prep-phase` (Phases 1→1.7, Gemini, ChromaDB) | `prep_volume` | One DeepSeek call, no Gemini, no ChromaDB, no subprocess into the main pipeline |
-| `mtls-translator` (13 RAG modules) | `run_translator` | Bare send-and-receive, prompt-inline policy |
-| `mtl-quality-evaluator` (3-model fan-out) | `qc_volume` | Filesystem-only, &lt;5 sec, zero API cost |
-| *(new — no main-pipeline equivalent)* | `write_bible` | Flat JSON continuity merge, not the main pipeline's full bible system |
+| MCP Tool | Design Note |
+|---|---|
+| `prep_volume` | One DeepSeek call, no Gemini, no ChromaDB, no subprocess |
+| `run_translator` | Bare send-and-receive, prompt-inline policy |
+| `qc_volume` | Filesystem-only, &lt;5 sec, zero API cost |
+| `write_bible` | Flat JSON continuity merge, not a database |
 
 The corresponding `.github/skills/` files are thin wrappers — they document the tool interface and workflow order; the actual execution happens server-side in the MCP tool.
 
 Start the server: `python -m src.mcp.server`
-
----
-
-## Comparison to Main MTLS Pipeline
-
-| Aspect | Main MTLS Pipeline | DeepSeek_MTLS |
-|--------|-------------------|---------------|
-| Python files | ~300 | ~55 |
-| Translation code | ~45 files, ~2500-line agent | 4 core files, ~200-line agent |
-| Providers | 6 (Anthropic, Gemini, DeepSeek, OpenAI, Kimi, MiMo) | 1 (DeepSeek V4 Pro), everywhere including prep |
-| Phases | 1 → 1.5 → 1.51 → 1.52 → 1.55 → 1.56 → 1.6 → 1.7 → 2 → 2.5 → 3 → 4 | 1 → 1.P (prep) → 2 → QC gate → 4 |
-| RAG modules | 13 (grammar, voice, EPS, bible, idiom, gap, anti-AI-ism…) | 0 (all folded into the master prompt; prep is one structured call, not RAG) |
-| Vector stores | 4 ChromaDB collections | 0 |
-| QC gates | 8 auditors + pre-translation gate + post-translation audit | 1 filesystem-only gate, zero API cost |
-| Prep | 7 metadata phases (1.5–1.7), Gemini-backed | 1 unified DeepSeek call, no Gemini |
-| Post-processing | Phase 2.5 (bible update, CJK clean, validators) | Scene break formatting + CJK cleanup only |
-| Series continuity | Cross-volume bibles, VREC anchors, term locks, publisher/author metadata | 3 flat JSON files: term_lock, verbatim_anchors, series_pack |
-| Multimodal/Visual | 22 visual analysis modules | 0 (illustration_context is text-only, marker-based) |
-| CLI commands | ~25 | 8 |
-| MCP tool servers | 8 (~42 tools) | 6 (20 tools + 2 resources) |
-| Dependencies | 30+ Python packages | 7 Python packages |
-| TypeScript TUI | 12 commands, 8 phases, subprocess-only | typed operator console: six CLI workflows, all 20 MCP tools, local status views |
 
 ---
 
