@@ -40,6 +40,11 @@ export type VolumeDetail = {
   logChapters: ChapterLog[];
 };
 
+export type ConfigLine =
+  | { kind: 'gap' }
+  | { kind: 'group'; depth: number; label: string }
+  | { kind: 'value'; depth: number; label: string; value: string; boolState: 'on' | 'off' | null };
+
 export type SortMode = 'recent' | 'series' | 'progress';
 export type CapabilityRisk = 'read' | 'write' | 'paid' | 'overwrite';
 export type FieldKind =

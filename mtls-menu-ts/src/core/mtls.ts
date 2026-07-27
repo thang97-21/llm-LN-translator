@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import type { CapabilitySpec, ChapterLog, PhaseStatus, PhaseStatusValue, RunHandle, SortMode, VolumeDetail, VolumeSummary } from './types.js';
+import type { CapabilitySpec, ChapterLog, ConfigLine, PhaseStatus, PhaseStatusValue, RunHandle, SortMode, VolumeDetail, VolumeSummary } from './types.js';
 
 // core/ lives at mtls-menu-ts/src/core. The menu package is two levels up;
 // the Python pipeline it operates is its parent, not the menu directory.
@@ -50,15 +50,22 @@ export function loadVolumesFrom(root: string): VolumeSummary[] {
 }
 
 export function loadEpubs(): string[] { return listFiles(inputRoot, '.epub'); }
-export function loadRuntimeConfigLines(): string[] {
+// Grouped instead of flattened: a "Caching · Cache Monitor · Enabled: Enabled"
+// chain repeated on every sibling line is unreadable past a dozen entries,
+// and this config has ~50. Each nesting level renders once as its own
+// section header, children just indent under it, and a gap line separates
+// top-level sections so "Retry" doesn't visually bleed into "Streaming".
+export function loadRuntimeConfigLines(): ConfigLine[] {
   const configPath = path.join(pipelineRoot, 'config.yaml');
-  if (!existsSync(configPath)) return ['Translator runtime configuration is unavailable.'];
+  const unavailable: ConfigLine[] = [{ kind: 'value', depth: 0, label: 'Translator runtime configuration', value: 'unavailable', boolState: null }];
+  if (!existsSync(configPath)) return unavailable;
   try {
     const lines = readFileSync(configPath, 'utf8').replace(/\r/g, '').split('\n');
-    const runtimeLines: string[] = ['Translator runtime configuration'];
+    const result: ConfigLine[] = [];
     let inTranslator = false;
     let translatorIndent = 0;
-    const parents: Array<{ indent: number; label: string }> = [];
+    let sawAny = false;
+    const parents: Array<{ indent: number }> = [];
     for (const rawLine of lines) {
       const trimmed = rawLine.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
@@ -72,24 +79,28 @@ export function loadRuntimeConfigLines(): string[] {
       if (!match) continue;
       const key = match[1]?.trim() ?? '';
       if (!key || key === 'api_key_env') continue;
-      const value = (match[2] ?? '').replace(/\s+#.*$/, '').trim();
+      const rawValue = (match[2] ?? '').replace(/\s+#.*$/, '').trim();
       while (parents.length && indent <= parents[parents.length - 1]!.indent) parents.pop();
+      const depth = parents.length;
       const label = humanizeConfigKey(key);
-      if (!value) {
-        parents.push({ indent, label });
-        runtimeLines.push(label);
+      if (!rawValue) {
+        if (depth === 0 && sawAny) result.push({ kind: 'gap' });
+        result.push({ kind: 'group', depth, label });
+        parents.push({ indent });
       } else {
-        const prefix = parents.map((parent) => parent.label).join(' · ');
-        runtimeLines.push(`${prefix ? `${prefix} · ` : ''}${label}: ${humanizeConfigValue(value)}`);
+        const { text, boolState } = humanizeConfigValue(key, rawValue);
+        result.push({ kind: 'value', depth, label, value: text, boolState });
       }
+      sawAny = true;
     }
-    return runtimeLines.length > 1 ? runtimeLines : ['Translator runtime configuration is unavailable.'];
+    return result.length ? result : unavailable;
   } catch (error) {
-    return [`Unable to read Translator configuration: ${error instanceof Error ? error.message : String(error)}`];
+    return [{ kind: 'value', depth: 0, label: 'Unable to read Translator configuration', value: error instanceof Error ? error.message : String(error), boolState: null }];
   }
 }
 
 const CONFIG_LABELS: Readonly<Record<string, string>> = {
+  enabled: 'Status',
   master_prompt: 'Primary translation prompt',
   master_prompt_v2: 'Continuity translation prompt',
   http_timeout_seconds: 'Request timeout',
@@ -124,12 +135,19 @@ function humanizeConfigKey(key: string): string {
   return CONFIG_LABELS[key] ?? key.replace(/_/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-function humanizeConfigValue(value: string): string {
-  if (value === 'true') return 'Enabled';
-  if (value === 'false') return 'Disabled';
-  if (value === 'deepseek-v4-pro') return 'DeepSeek V4 Pro';
-  if (value === 'deepseek-v4-flash') return 'DeepSeek V4 Flash';
-  return value;
+// `endpoint` is the one field worth collapsing rather than color-coding: the
+// full URL only ever varies on that one path segment, and the two values
+// it distinguishes (DeepSeek's Anthropic-Messages-shaped route vs. its
+// OpenAI-shaped one) are what the operator actually needs to see at a glance.
+function humanizeConfigValue(key: string, value: string): { text: string; boolState: 'on' | 'off' | null } {
+  if (key === 'endpoint') return { text: value.includes('/anthropic') ? 'Anthropic' : 'OpenAI', boolState: null };
+  if (value === 'true') return { text: 'Enabled', boolState: 'on' };
+  if (value === 'false') return { text: 'Disabled', boolState: 'off' };
+  if (value === 'on') return { text: 'On', boolState: 'on' };
+  if (value === 'off') return { text: 'Off', boolState: 'off' };
+  if (value === 'deepseek-v4-pro') return { text: 'DeepSeek V4 Pro', boolState: null };
+  if (value === 'deepseek-v4-flash') return { text: 'DeepSeek V4 Flash', boolState: null };
+  return { text: value, boolState: null };
 }
 function listFiles(dir: string, suffix: string): string[] { if (!existsSync(dir)) return []; try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(suffix)).map((entry) => path.join(dir, entry.name)).sort((a, b) => a.localeCompare(b)); } catch { return []; } }
 function listMarkdown(dir: string): string[] { return listFiles(dir, '.md'); }
