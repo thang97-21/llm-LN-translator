@@ -28,11 +28,10 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
         chapter_path = _resolve_jp_chapter(jp_dir, chapter_id)
 
         translator = DeepSeekTranslator(work_dir=volume_dir, volume_id=volume_id)
-        en_text = translator.translate_chapter(chapter_path, {"chapter_id": chapter_path.stem})
-        en_dir = volume_dir / "EN"
-        en_dir.mkdir(parents=True, exist_ok=True)
-        output_path = en_dir / f"{chapter_path.stem}_EN.md"
-        output_path.write_text(en_text, encoding="utf-8")
+        # translate_and_persist_chapter writes the EN file AND marks it
+        # completed in manifest.json in one step — do not duplicate that
+        # write-then-forget-the-manifest logic here again.
+        output_path = translator.translate_and_persist_chapter(chapter_path, {"chapter_id": chapter_path.stem})
 
         return {
             "schema": "TranslatedChapter",

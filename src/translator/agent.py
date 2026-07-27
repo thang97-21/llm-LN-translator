@@ -167,21 +167,49 @@ class DeepSeekTranslator:
         en_dir.mkdir(parents=True, exist_ok=True)
         return en_dir / f"{chapter_id}_EN.md"
 
+    def translate_and_persist_chapter(
+        self,
+        chapter_path: Path,
+        chapter_meta: Optional[Dict[str, Any]] = None,
+    ) -> Path:
+        """
+        Translate one chapter, write its EN output, and mark it completed in
+        manifest.json — all three, every time, in one place.
+
+        This is the one method every caller (the CLI's bulk loop below, the
+        MCP `run_translator` tool, and the MCP `translate_chapter` tool) goes
+        through. It used to be duplicated: `translate_all()` wrote the file
+        itself and only updated the manifest once at the very end of its
+        loop, and `translator_server.py`'s single-chapter MCP tool wrote the
+        file itself too but never touched the manifest at all. Either path
+        left manifest.json silently out of sync with real EN/ output the
+        moment anything after it failed — a crash on chapter 6 discarded
+        chapters 1-5's completed status even though their files were
+        sitting right there on disk. Updating per-chapter, immediately after
+        that chapter's file lands, means a later failure can't retroactively
+        un-persist earlier successes.
+        """
+        chapter_meta = chapter_meta or {}
+        chapter_id = chapter_meta.get("chapter_id", chapter_path.stem)
+        en_text = self.translate_chapter(chapter_path, {**chapter_meta, "chapter_id": chapter_id})
+        output_path = self._default_output_path(chapter_id)
+        output_path.write_text(en_text, encoding="utf-8")
+        _update_manifest_after_translation(self.work_dir, {chapter_id})
+        return output_path
+
     def translate_all(self, chapter_files: List[Path]) -> Dict[str, Path]:
         """
         Sequential loop over chapters. Writes each result to
-        WORK/<vol>/EN/<chapter_id>_EN.md and returns {chapter_id: output_path}.
+        WORK/<vol>/EN/<chapter_id>_EN.md, marks it completed in manifest.json
+        immediately, and returns {chapter_id: output_path}.
         """
         results: Dict[str, Path] = {}
         for chapter_path in sorted(chapter_files):
             chapter_id = chapter_path.stem
             logger.info("[TRANSLATE] %s — starting", chapter_id)
-            en_text = self.translate_chapter(chapter_path, {"chapter_id": chapter_id})
-            output_path = self._default_output_path(chapter_id)
-            output_path.write_text(en_text, encoding="utf-8")
+            output_path = self.translate_and_persist_chapter(chapter_path, {"chapter_id": chapter_id})
             results[chapter_id] = output_path
             logger.info("[TRANSLATE] %s — wrote %s", chapter_id, output_path)
-        _update_manifest_after_translation(self.work_dir, set(results.keys()))
         return results
 
 
