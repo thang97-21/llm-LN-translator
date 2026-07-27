@@ -1,4 +1,4 @@
-# Light Novel Translation Engine - DeepSeek-Powered
+# LN Translation Client - DeepSeek-Powered
 
 **Single-provider pipeline** for Japanese → English light novel translation.
 Extract, prep, translate, QC, build — and remember the series for next time.
