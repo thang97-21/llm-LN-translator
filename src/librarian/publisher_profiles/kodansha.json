@@ -1,0 +1,124 @@
+{
+  "publisher": "Kodansha",
+  "publisher_ja": "講談社",
+  "country": "JP",
+  "notes": "Kodansha LN Bunko. Minimal EPUB3 TOC (cover + TOC page + colophon only). Chapters detected by in-content heading markers. Uses p### page numbering with spreads for kuchie.",
+
+  "image_patterns": {
+    "exclude": {
+      "patterns": [
+        "^end\\.jpe?g$",
+        "^profile\\.jpe?g$"
+      ],
+      "examples": [
+        "end.jpg",
+        "profile.jpg"
+      ],
+      "notes": "Non-story end-matter images (colophon decoration, author profile photo)"
+    },
+    "cover": {
+      "patterns": [
+        "^cover\\.jpe?g$"
+      ],
+      "examples": [
+        "cover.jpg"
+      ],
+      "notes": "Standard cover image"
+    },
+    "kuchie": {
+      "patterns": [
+        "^p00[1-8]\\.jpe?g$",
+        "^p00[1-8][-_]\\d+\\.jpe?g$",
+        "^titlepage\\.jpe?g$"
+      ],
+      "examples": [
+        "p001.jpg",
+        "p002.jpg",
+        "p002-003.jpg",
+        "p004-005.jpg",
+        "p006-007.jpg",
+        "p008.jpg",
+        "titlepage.jpg"
+      ],
+      "notes": "Pages 1-8 reserved for color frontispiece (kuchie). Double-spread format common (p002-003.jpg). p008 is the title/contents page image."
+    },
+    "illustrations": {
+      "patterns": [
+        "^p0[1-9]\\d\\.jpe?g$",
+        "^p[1-9]\\d{2}\\.jpe?g$"
+      ],
+      "examples": [
+        "p013.jpg",
+        "p021.jpg",
+        "p033.jpg",
+        "p254-255.jpg",
+        "p258.jpg"
+      ],
+      "notes": "In-body illustrations numbered from p010 upward. Some volumes use double-spreads for bonus story illustrations."
+    }
+  },
+
+  "content_structure": {
+    "toc_handling": "spine_fallback",
+    "toc_min_entries": 10,
+    "chapter_merging": false,
+    "chapter_detection": {
+      "method": "content_scan",
+      "heading_patterns": [
+        "^###\\s+[１２３４５６７８９０]+$",
+        "^###\\s+\\d+$",
+        "^###\\s+[一二三四五六七八九十百千]+章.*$",
+        "^###\\s+[一二三四五六七八九十百千]+章[（(][前後][）)].*$",
+        "^###\\s+[序終]章.*$",
+        "^###\\s+プロローグ.*$",
+        "^###\\s+エピローグ.*$",
+        "^###\\s+あとがき$"
+      ],
+      "title_patterns": [
+        "^[１２３４５６７８９０]+$",
+        "^\\d+$",
+        "^[一二三四五六七八九十百千]+章",
+        "^[序終]章",
+        "^プロローグ",
+        "^エピローグ",
+        "^あとがき"
+      ],
+      "fallback_title": "Chapter {n}"
+    }
+  },
+
+  "metadata": {
+    "spine_progression": "rtl",
+    "typical_chapter_count": "6-14",
+    "typical_file_count": "40-50",
+    "average_images": 12.0
+  },
+
+  "test_cases": [
+    {
+      "title": "Innocent Looking Yandere",
+      "description": "Bare full-width numbered chapters (### １ through ### 12)",
+      "verified": true
+    },
+    {
+      "title": "Silver",
+      "description": "Kanji-numbered chapters with titles (一章　はじまりの夜)",
+      "verified": true
+    },
+    {
+      "title": "Yandere Harem V1",
+      "description": "Kanji-numbered chapters with titles (一章　ヤンデレ彼女、異世界に立つ)",
+      "verified": true
+    },
+    {
+      "title": "Yandere Stalking A Loner",
+      "description": "Half-width numbered chapters with titles (１　ナルシストvs...), bare prologue/epilogue",
+      "verified": true
+    },
+    {
+      "title": "私のこと好きになるまで告白の返事はしなくていいから。",
+      "description": "Kanji-numbered chapters with titles, split chapters (三章（前）/（後）), custom prologue, 4-entry TOC (includes bonus story)",
+      "verified": false
+    }
+  ]
+}

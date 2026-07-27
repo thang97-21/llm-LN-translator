@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    // TS7 native compiler. Shared strict + module settings for every leaf project.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "lib": ["es2023"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+
+    // Project references: build the graph incrementally, emit only declarations
+    // (tsx runs the TS source at runtime, so we never need the compiled JS).
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "types": ["node"]
+  }
+}

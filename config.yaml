@@ -1,0 +1,317 @@
+# ============================================================================
+# DeepSeek_MTLS — Master Configuration
+# Lightweight, DeepSeek V4 Pro-exclusive translation client.
+# ============================================================================
+
+# ── Project Identity ────────────────────────────────────────────────────────
+project:
+  target_language: en
+  name: DeepSeek_MTLS
+  version: 1.0.0
+
+# ── File System Paths ───────────────────────────────────────────────────────
+paths:
+  input_dir: raw/          # Source EPUBs for extraction
+  work_dir: work/           # Per-volume working directories
+  output_dir: output/       # Final assembled EPUBs
+  prompt_dir: src/prompt/   # Master translation prompts
+  log_dir: logs/            # Debug and cost logs
+
+# ── MCP Phase Routing (optional) ────────────────────────────────────────────
+# Overrides for src/mcp/harness.py's phase-name -> MCP-tool-name map, exposed
+# over MCP as the routing://phases resource. Every phase already has a
+# sensible built-in default (see harness.py::DEFAULT_PHASE_ROUTES) — this
+# section only needs entries you actually want to change, e.g. pointing
+# "translate" at a future parallel-translation tool without touching code.
+# phase_routing:
+#   translate: run_translator
+
+# ── Prep (Unified DeepSeek Context Build) ───────────────────────────────────
+# Single DeepSeek API call that fills every <pending> block in the Librarian's
+# barebone context.xml — no Gemini, no ChromaDB, no main-pipeline subprocess.
+# V4 Flash is not used here: structured 15-block XML output needs the Pro
+# tier's instruction-following, not the Flash tier's throughput.
+prep:
+  model: deepseek-v4-pro
+  endpoint: https://api.deepseek.com/anthropic
+  api_key_env: DEEPSEEK_API_KEY
+  prompt: src/prompt/prep_prompt_deepseek_en.xml
+  thinking_budget: 48000
+  max_output_tokens: 128000
+  http_timeout_seconds: 900
+  # Where cross-volume series bibles live. Sequel detection: if
+  # bible_dir/<series_id>/ exists, prep_volume loads it first and injects
+  # the accumulated term_lock/verbatim_anchors/voice_fingerprints so DeepSeek
+  # has continuity context instead of reinventing names from scratch.
+  bible_dir: bibles/
+
+# ── Translation Pipeline ────────────────────────────────────────────────────
+translation:
+  # Master prompt selection. The base prompt consolidates all 13 RAG module
+  # policies inline — no external RAG modules, ChromaDB, or vector stores
+  # are needed at runtime.
+  master_prompt: src/prompt/master_prompt_deepseek_en.xml
+
+  # Optional: Use the V2 literacy-anchor variant for sequel volumes that
+  # have prior-volume golden samples in context.xml.  The prompt loader
+  # auto-selects this when context.xml contains <prior_volume_anchors>.
+  master_prompt_v2: src/prompt/master_prompt_deepseek_en_v2.xml
+
+  # ── DeepSeek V4 Translator Parameters ─────────────────────────────────────
+  # This is THE control knob for all DeepSeek V4 translator behavior.
+  # Every parameter below maps directly to deepseek_client.py,
+  # deepseek_conversation.py, and deepseek_optimization.py.
+  translator:
+
+    # ── Model & Connection ──────────────────────────────────────────────────
+    # DeepSeek V4 Pro (~$0.435/$0.87 per MTok input/output, 75% discount).
+    # Switch to deepseek-v4-flash for ~3× cheaper throughput ($0.14/$0.28).
+    model: deepseek-v4-pro              # deepseek-v4-pro | deepseek-v4-flash
+
+    # Anthropic-compatible Messages endpoint. DeepSeek's native /anthropic
+    # path supports the full Messages API including thinking, streaming,
+    # and auto-prefix caching. Do NOT change to /v1 (OpenAI format) — the
+    # bare client exclusively uses the Anthropic SDK route.
+    endpoint: https://api.deepseek.com/anthropic
+
+    # Environment variable holding the API key.
+    api_key_env: DEEPSEEK_API_KEY
+
+    # HTTP timeout for single API call (seconds).  600 = 10 minutes,
+    # which covers the worst-case 384K-output chapter with thinking.
+    http_timeout_seconds: 600
+
+    # ── Generation ──────────────────────────────────────────────────────────
+    generation:
+      # DeepSeek V4 output ceiling: 384K tokens. The 1M context window
+      # minus a generous margin for the system prompt (~200K in the
+      # consolidated master prompt) and conversation history.
+      max_output_tokens: 384000
+
+      # Nucleus sampling.  0.95 = moderately creative; lower for more
+      # deterministic output.  Irrelevant when thinking is enabled
+      # (temperature is omitted entirely in thinking mode).
+      top_p: 0.95
+
+      # Temperature is intentionally absent from this config. DeepSeek
+      # rejects temperature when thinking mode is active. The client
+      # automatically omits it when building the API request.
+
+    # ── Thinking / Reasoning ────────────────────────────────────────────────
+    thinking:
+      # Master toggle. When disabled, the client skips the thinking
+      # budget and output_config.effort fields entirely.
+      enabled: true
+
+      # Token budget allocated per turn for DeepSeek's internal chain-
+      # of-thought (CoT). Rendered as `thinking.budget_tokens` in the
+      # Anthropic-format request.  48K is the production value; reduce
+      # to 16K for COLD-band chapters if using per-chapter budget routing
+      # (not implemented in the bare client — DRDI is the primary
+      # reasoning control instead).
+      budget_tokens: 48000
+
+      # Anthropic-format effort level. DeepSeek ignores this at the API
+      # level (it has no native effort routing), but the client still
+      # sends it in output_config for forward-compatibility if DeepSeek
+      # ever adds server-side effort support. The actual per-chapter
+      # reasoning intensity is controlled via DRDI (see below).
+      effort: max                         # max | high | medium | low
+
+    # ── Auto-Prefix Cache ───────────────────────────────────────────────────
+    caching:
+      # DeepSeek automatically caches the longest stable byte-prefix of
+      # each request — no cache_control markers needed. The system prompt
+      # + context.xml form the stable prefix; per-chapter DRDI + DOVB
+      # go into the user turn so they don't break the cache.
+      enabled: true
+
+      # Monitor prefix stability and cache hit ratio per chapter.
+      # Logs a warning when the hit ratio drops below this threshold.
+      cache_monitor:
+        enabled: true
+        warn_threshold_cache_hit_ratio: 0.70   # warn below 70% hits
+
+      # Track thinking_content token count vs EPS intensity for
+      # cost/quality analytics.  Writes per-chapter metrics to the
+      # conversation state file.
+      thinking_analytics:
+        enabled: true
+
+    # ── Persistent Conversation ─────────────────────────────────────────────
+    conversation:
+      # When enabled, the translator maintains a persistent, append-only
+      # conversation transcript across chapters. This gives DeepSeek
+      # long-context awareness of prior-chapter translation decisions,
+      # character voice consistency, and plot continuity.
+      #
+      # Disable for fully independent per-chapter translation (useful
+      # for testing or when the prompt already carries sufficient context).
+      enabled: true
+
+      # Number of most-recent chapters to include verbatim (full JP + EN
+      # pair) in each turn. Older chapters are summarized into a
+      # continuity checkpoint. 3 is the production value.
+      recent_verbatim_chapters: 3
+
+      # Include the EXACT JP source text of recent chapters in the user
+      # turn (not just the EN output). Enables DeepSeek to cross-reference
+      # its own prior translations against the source. Keep enabled.
+      include_exact_jp_task: true
+
+      # Persistence file written to <work_dir>/.context/.
+      persistence_file: .context/deepseek_conversation.json
+
+      # ── Compaction Ladder ─────────────────────────────────────────────────
+      # As the conversation grows, the prefix approaches the 1M context
+      # window. The compaction ladder applies progressively cheaper
+      # measures BEFORE the expensive checkpoint summarizer fires:
+      #
+      #   soft_notice (lowest)  → log only; no mutation, no cost.
+      #   tool_snip              → drop stale tool round-trips from old
+      #                            turns outside the recent-verbatim window.
+      #   checkpoint (trigger)   → generate a compressed continuity XML
+      #                            summary via a paid API call. Resets the
+      #                            prefix cache (cold start on next turn).
+      #   force                  → override the stuck guard. Must stay
+      #                            strictly below 1.0.
+      #
+      # Each ratio is clamped against its neighbour at load time so a bad
+      # config edit cannot invert the ladder.
+
+      # Fraction of context window at which the paid checkpoint fires.
+      # 0.85 = checkpoint when 85% full.
+      checkpoint_trigger_ratio: 0.85
+
+      # Max tokens for the checkpoint summarizer's own output.
+      checkpoint_max_output_tokens: 32000
+
+      # If the checkpoint fires on this many consecutive turns, pause
+      # automatic checkpointing so the prefix cache can warm again.
+      # A checkpoint destroys the cached prefix; back-to-back checkpoints
+      # mean the cache never recovers. 2 = standard guard; 0 = disable.
+      checkpoint_stuck_guard_turns: 2
+
+      # Compaction ladder rungs (fraction of context window):
+      soft_notice_ratio: 0.60             # log warning, no action
+      tool_snip_ratio: 0.70               # remove stale tool round-trips
+      checkpoint_force_ratio: 0.95        # override stuck guard
+
+      # If the checkpoint summarizer itself fails (API error), should the
+      # translation fail closed (abort) or continue without a checkpoint?
+      # true = abort (safe); false = continue (risks context overflow).
+      fail_closed_on_checkpoint_error: true
+
+    # ── DeepSeek-Specific Optimizations ─────────────────────────────────────
+    optimizations:
+
+      # DRDI — DeepSeek Reasoning Directive Injection.
+      # DeepSeek ignores the Anthropic `effort` parameter, so DRDI injects
+      # EPS-band CoT scaffolding directly into the user turn. Each EPS
+      # band (HOT/WARM/NEUTRAL/COOL/COLD) maps to a prose reasoning
+      # directive that tells DeepSeek how deeply to think about the scene.
+      #
+      # Disable for baseline throughput testing or when running Flash
+      # with fixed reasoning budget.
+      drdi:
+        enabled: true
+
+      # DOVB — DeepSeek-Optimized Voice Block.
+      # Generates template-style voice representations tailored to
+      # DeepSeek's reasoning style: explicit contraction rewrite rules,
+      # forbidden vocabulary lists, speech register templates, and
+      # character archetype anchors (tsundere, kuudere, etc.).
+      #
+      # When disabled, character voice guidance comes only from whatever
+      # is baked into context.xml and the master prompt.
+      dovb:
+        enabled: true
+
+      # CCT — Concurrent Chapter Translation.
+      # Async chapter processor for parallel translation. NOT wired into
+      # the default sequential flow — this is an opt-in escape hatch for
+      # users who want parallelism despite the conversation-history cost.
+      # DeepSeek conversation is ordered and append-only; concurrent
+      # chapters cannot share conversation state.
+      concurrent_chapters:
+        enabled: false
+        max_concurrent: 1                  # forced to 1 for safety
+
+    # ── Streaming ───────────────────────────────────────────────────────────
+    streaming:
+      # Stream text_delta and thinking_delta events as they arrive.
+      # When disabled, the client waits for the full response.
+      enabled: true
+
+    # ── Post-Processing ─────────────────────────────────────────────────────
+    post_processing:
+      # Format scene breaks (＊  ＊  ＊ → centered asterism, etc.).
+      scene_break_formatting: true
+
+      # Strip CJK artifact characters that leak into EN output (fullwidth
+      # parentheses, CJK punctuation, ideographic spaces).
+      cjk_cleanup: true
+
+      # Salvage chapters accidentally emitted into reasoning_content
+      # instead of content (known DeepSeek API edge case).
+      salvage_reasoning_leaked_answer: true
+
+    # ── Retry & Resilience ──────────────────────────────────────────────────
+    retry:
+      max_retries: 5
+      base_delay_ms: 500
+      max_delay_ms: 32000
+      jitter_factor: 0.25
+      # 529 Overloaded: don't retry indefinitely. 3 is production value.
+      max_529_retries: 3
+
+# ── EPUB Builder ────────────────────────────────────────────────────────────
+builder:
+  # Font embedding for CJK glyph coverage in the output EPUB.
+  # Paths relative to DeepSeek_MTLS/ root.
+  fonts:
+    enabled: true
+    # Add font paths here if you have custom CJK fonts
+    # japanese: fonts/NotoSansJP-Regular.otf
+    # english: fonts/NotoSerif-Regular.otf
+
+  # Image optimization for cover/kuchie/illustrations
+  images:
+    max_width_px: 1200
+    max_height_px: 1800
+    jpeg_quality: 85
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+logging:
+  level: INFO                           # DEBUG | INFO | WARNING | ERROR
+  file: logs/deepseek_mtls.log
+  # Log API cost per chapter (input/output/cache tokens → USD)
+  cost_tracking: true
+
+# ── MCP Harness ─────────────────────────────────────────────────────────────
+# The harness is loaded by src/mcp/harness.py and injected as the system
+# identity prefix before every LLM call the MCP server makes (prep, translate).
+mcp_harness:
+  persona:
+    # Central persona file — full port of CLAUDE.md for LLM API consumption.
+    # Loaded at MCP server startup, cached in memory, prepended to every
+    # system instruction built by harness.build_system_instruction().
+    file: .github/PERSONA.md
+    enabled: true              # ← the only knob the user touches
+
+  subagents:
+    prep:
+      enabled: true
+      model: deepseek-v4-pro
+      thinking_budget: 48000
+      effort: max
+      max_output_tokens: 128000
+
+    translator:
+      harness_managed: false   # DeepSeekClient owns its config (translation.translator)
+
+    qc:
+      enabled: true            # Filesystem-only, no LLM call
+
+    bible_writer:
+      enabled: true            # Filesystem-only, no LLM call

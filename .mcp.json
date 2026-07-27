@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "deepseek-mtls": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "src.mcp.server"],
+      "env": {
+        "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}"
+      }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+# DeepSeek_MTLS — Minimal Dependencies
+# Only what Librarian + Builder + bare DeepSeek Translator need.
+# No ChromaDB, no Google SDK, no OpenAI, no vector stores.
+
+# DeepSeek V4 Pro API (Anthropic-compatible endpoint)
+anthropic>=0.39.0
+
+# YAML configuration
+pyyaml>=6.0
+
+# Environment variables (.env files)
+python-dotenv>=1.0
+
+# EPUB parsing (Librarian)
+lxml>=5.0
+beautifulsoup4>=4.12
+
+# Image processing (Builder)
+Pillow>=10.0
+
+# Token counting for cache/pricing analytics
+tiktoken>=0.7
+
+# MCP server (Phase 6) — stdio tool server for Claude Desktop / Claude Code
+mcp>=1.0.0
+
+# Optional: smart typographic quotes in Builder output
+# smartypants>=2.0

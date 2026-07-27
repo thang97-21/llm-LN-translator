@@ -1,0 +1,20 @@
+{
+  // Solution file. `tsc -b` builds the referenced projects in dependency order
+  // (with TS7 --builders parallelism). It compiles nothing itself (files: []).
+  // The compilerOptions below are only so `tsx`, which discovers this config
+  // from the package root, still uses the automatic JSX runtime at runtime.
+  "files": [],
+  "references": [
+    { "path": "./src/core" },
+    { "path": "./src/ui" },
+    { "path": "./src/app" }
+  ],
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "esModuleInterop": true
+  }
+}
