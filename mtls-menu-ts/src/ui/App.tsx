@@ -5,7 +5,7 @@ import Spinner from 'ink-spinner';
 import { CLI_CAPABILITIES, effectiveRisk, hydrateMcpCapabilities, initialValues, previewCapability, serializeCli, serializeMcp, validateCapability } from '../core/capabilities.js';
 import { appendConsole, browseConsole, createConsole, jumpConsole, setConsoleMode, visibleConsoleEntries } from '../core/console.js';
 import { callMcpTool, closeMcpClient, listMcpTools } from '../core/mcpClient.js';
-import { filterVolumes, fuzzyMatch, listChapters, loadEpubs, loadVolumeDetail, loadVolumes, pipelineRoot, runCliCapability, sortVolumes } from '../core/mtls.js';
+import { filterVolumes, fuzzyMatch, listChapters, loadEpubs, loadRuntimeConfigLines, loadVolumeDetail, loadVolumes, pipelineRoot, runCliCapability, sortVolumes } from '../core/mtls.js';
 import { runPreflight } from '../core/preflight.js';
 import type { CapabilitySpec, ConsoleSeverity, FormValues, Preflight, RunHandle, RunState, SortMode, VolumeSummary } from '../core/types.js';
 import { Badge, PhaseStrip, ProgressBar, riskColor } from './components.js';
@@ -14,9 +14,10 @@ import { useTerminalSize } from './useTerminalSize.js';
 
 type Nav = 'dashboard' | 'workflows' | 'volumes' | 'inputs' | 'advanced' | 'console' | 'diagnostics';
 type FormState = { spec: CapabilitySpec; values: FormValues; cursor: number; confirmation: 0 | 1 | 2; issues: readonly string[] };
-type Workspace = { nav: Nav; navIndex: number; itemIndex: number; activeVolume: string | null; search: string; searching: boolean; form: FormState | null; run: RunState | null; terminalFocused: boolean; cancelConfirm: boolean; sort: SortMode };
+type Workspace = { nav: Nav; navIndex: number; itemIndex: number; configOffset: number; activeVolume: string | null; search: string; searching: boolean; form: FormState | null; run: RunState | null; terminalFocused: boolean; cancelConfirm: boolean; sort: SortMode };
 type Action =
   | { type: 'nav'; nav: Nav; navIndex: number }
+  | { type: 'navCursor'; navIndex: number }
   | { type: 'item'; index: number }
   | { type: 'search'; value: string; active?: boolean }
   | { type: 'activeVolume'; id: string | null }
@@ -27,6 +28,7 @@ type Action =
   | { type: 'consoleMode'; mode: 'follow' | 'browse' | 'input' }
   | { type: 'consoleBrowse'; delta: number; viewport: number }
   | { type: 'consoleJump'; destination: 'home' | 'end'; viewport: number }
+  | { type: 'configScroll'; delta: number; viewport: number; destination?: 'home' | 'end' }
   | { type: 'terminalFocus'; value: boolean }
   | { type: 'cancelConfirm'; value: boolean }
   | { type: 'sort'; value: SortMode };
@@ -37,7 +39,8 @@ const NAV: readonly { id: Nav; label: string }[] = [
 
 function reducer(state: Workspace, action: Action): Workspace {
   switch (action.type) {
-    case 'nav': return { ...state, nav: action.nav, navIndex: action.navIndex, itemIndex: 0, search: '', searching: false, cancelConfirm: false };
+    case 'nav': return { ...state, nav: action.nav, navIndex: action.navIndex, itemIndex: 0, configOffset: 0, search: '', searching: false, cancelConfirm: false };
+    case 'navCursor': return { ...state, navIndex: action.navIndex };
     case 'item': return { ...state, itemIndex: action.index };
     case 'search': return { ...state, search: action.value, searching: action.active ?? state.searching, itemIndex: 0 };
     case 'activeVolume': return { ...state, activeVolume: action.id };
@@ -48,6 +51,7 @@ function reducer(state: Workspace, action: Action): Workspace {
     case 'consoleMode': return state.run ? { ...state, run: { ...state.run, console: setConsoleMode(state.run.console, action.mode) } } : state;
     case 'consoleBrowse': return state.run ? { ...state, run: { ...state.run, console: browseConsole(state.run.console, action.delta, action.viewport) } } : state;
     case 'consoleJump': return state.run ? { ...state, run: { ...state.run, console: jumpConsole(state.run.console, action.destination, action.viewport) } } : state;
+    case 'configScroll': return { ...state, configOffset: action.destination === 'home' ? 0 : action.destination === 'end' ? Number.MAX_SAFE_INTEGER : Math.max(0, state.configOffset + action.delta) };
     case 'terminalFocus': return { ...state, terminalFocused: action.value };
     case 'cancelConfirm': return { ...state, cancelConfirm: action.value };
     case 'sort': return { ...state, sort: action.value, itemIndex: 0 };
@@ -57,7 +61,7 @@ function reducer(state: Workspace, action: Action): Workspace {
 function clamp(value: number, length: number): number { return Math.max(0, Math.min(Math.max(0, length - 1), value)); }
 function printable(input: string, key: Key): boolean { return input.length === 1 && input >= ' ' && !key.ctrl && !key.meta && !key.tab && !key.return; }
 function basename(value: string): string { return value.split(/[\\/]/).pop() ?? value; }
-function initialWorkspace(volumes: readonly VolumeSummary[]): Workspace { return { nav: 'dashboard', navIndex: 0, itemIndex: 0, activeVolume: volumes[0]?.id ?? null, search: '', searching: false, form: null, run: null, terminalFocused: false, cancelConfirm: false, sort: 'recent' }; }
+function initialWorkspace(volumes: readonly VolumeSummary[]): Workspace { return { nav: 'dashboard', navIndex: 0, itemIndex: 0, configOffset: 0, activeVolume: volumes[0]?.id ?? null, search: '', searching: false, form: null, run: null, terminalFocused: false, cancelConfirm: false, sort: 'recent' }; }
 
 function Header({ workspace, preflight, columns }: { workspace: Workspace; preflight: Preflight; columns: number }) {
   const active = workspace.activeVolume ?? 'none';
@@ -88,12 +92,20 @@ function ConsolePanel({ run, rows, focused, cancelConfirm }: { run: RunState | n
   return <Box flexDirection="column" borderStyle="round" borderColor={run.status === 'failed' ? 'red' : run.status === 'done' ? 'green' : focused ? 'magenta' : 'cyan'} paddingX={1}><Text bold>{run.status === 'running' ? <Text color="cyan"><Spinner type="dots" /> </Text> : null}{run.capability.label} · {run.status}</Text><Text color="gray" wrap="truncate-end">{run.preview}</Text><Text color={focused ? 'magenta' : 'gray'}>focus: {focused ? run.console.mode : 'menu'} · retained {run.console.entries.length}/5000 · {run.console.unseen ? `${run.console.unseen} unseen` : 'tail current'}</Text>{cancelConfirm ? <Text color="red">Cancel the running action? Enter confirms; Esc keeps it alive.</Text> : null}{entries.map((entry) => <Text key={entry.id} color={entry.severity === 'error' ? 'red' : entry.severity === 'warning' ? 'yellow' : entry.severity === 'success' ? 'green' : 'white'} wrap="truncate-end">[{entry.source}/{entry.stage}] {entry.text}</Text>)}<Text color="gray">Tab focus · ↑↓ scroll · PgUp/PgDn page · Home/End · f follow · i raw stdin · Esc browse</Text></Box>;
 }
 
+function RuntimeConfigPanel({ lines, offset, rows }: { lines: readonly string[]; offset: number; rows: number }) {
+  const viewport = Math.max(6, rows - 8);
+  const start = Math.max(0, Math.min(Math.max(0, lines.length - viewport), offset));
+  const visible = lines.slice(start, start + viewport);
+  return <Box flexDirection="column"><Text bold>Runtime configuration · config.yaml</Text><Text color="gray">{lines.length} effective entries · lines {start + 1}–{Math.min(lines.length, start + visible.length)} · PgUp/PgDn scroll · Home/End jump</Text>{visible.map((line, index) => <Text key={`${start + index}-${line}`} color="white" wrap="truncate-end">{String(start + index + 1).padStart(3, ' ')} {line}</Text>)}</Box>;
+}
+
 export function App() {
   const { exit } = useApp(); const { rows, columns } = useTerminalSize();
   const [volumes, setVolumes] = useState<VolumeSummary[]>(() => loadVolumes()); const [epubs, setEpubs] = useState<string[]>(() => loadEpubs());
   const [workspace, dispatch] = useReducer(reducer, volumes, initialWorkspace); const [preflight, setPreflight] = useState<Preflight>(() => runPreflight()); const [mcpCapabilities, setMcpCapabilities] = useState<CapabilitySpec[]>(() => hydrateMcpCapabilities([]));
   const runHandle = useRef<RunHandle | null>(null); const abortController = useRef<AbortController | null>(null);
   const layout = layoutForColumns(columns); const activeVolume = volumes.find((volume) => volume.id === workspace.activeVolume) ?? null;
+  const runtimeConfig = useMemo(() => loadRuntimeConfigLines(), []);
   const refresh = (): void => { const nextVolumes = loadVolumes(); setVolumes(nextVolumes); setEpubs(loadEpubs()); dispatch({ type: 'activeVolume', id: nextVolumes.some((item) => item.id === workspace.activeVolume) ? workspace.activeVolume : nextVolumes[0]?.id ?? null }); };
 
   useEffect(() => { const result = runPreflight(); setPreflight(result); if (result.importsStatus !== 'ready') return; const controller = new AbortController(); void listMcpTools(controller.signal).then((tools) => { setMcpCapabilities(hydrateMcpCapabilities(tools)); setPreflight((current) => ({ ...current, mcpStatus: 'ready', detail: `${tools.length} MCP tools available.` })); }).catch((error: unknown) => setPreflight((current) => ({ ...current, mcpStatus: 'missing', detail: error instanceof Error ? error.message : String(error) }))); return () => controller.abort(); }, []);
@@ -153,8 +165,16 @@ export function App() {
     }
     if (input === '/') { dispatch({ type: 'search', value: '', active: true }); return; }
     if (workspace.searching) { if (key.backspace || key.delete) dispatch({ type: 'search', value: workspace.search.slice(0, -1), active: true }); else if (printable(input, key)) dispatch({ type: 'search', value: workspace.search + input, active: true }); else if (key.return) dispatch({ type: 'search', value: workspace.search, active: false }); return; }
-    if (key.leftArrow || input === '[') { dispatch({ type: 'nav', nav: NAV[clamp(workspace.navIndex - 1, NAV.length)]!.id, navIndex: clamp(workspace.navIndex - 1, NAV.length) }); return; }
-    if (key.rightArrow || input === ']') { dispatch({ type: 'nav', nav: NAV[clamp(workspace.navIndex + 1, NAV.length)]!.id, navIndex: clamp(workspace.navIndex + 1, NAV.length) }); return; }
+    if (workspace.nav === 'dashboard') {
+      if (key.upArrow) dispatch({ type: 'navCursor', navIndex: clamp(workspace.navIndex - 1, NAV.length) });
+      else if (key.downArrow) dispatch({ type: 'navCursor', navIndex: clamp(workspace.navIndex + 1, NAV.length) });
+      else if (special.pageUp) dispatch({ type: 'configScroll', delta: -(rows - 8), viewport: rows - 8 });
+      else if (special.pageDown) dispatch({ type: 'configScroll', delta: rows - 8, viewport: rows - 8 });
+      else if (special.home) dispatch({ type: 'configScroll', delta: 0, viewport: rows - 8, destination: 'home' });
+      else if (special.end) dispatch({ type: 'configScroll', delta: 0, viewport: rows - 8, destination: 'end' });
+      else if (key.return) { const item = NAV[workspace.navIndex] ?? NAV[0]!; dispatch({ type: 'nav', nav: item.id, navIndex: workspace.navIndex }); }
+      return;
+    }
     if (key.upArrow) { dispatch({ type: 'item', index: Math.max(0, workspace.itemIndex - 1) }); return; }
     if (key.downArrow) { const length = workspace.nav === 'volumes' ? volumeItems.length : workspace.nav === 'inputs' ? epubs.length : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? filteredItems.length : NAV.length; dispatch({ type: 'item', index: clamp(workspace.itemIndex + 1, length) }); return; }
     if (input === 'r') { refresh(); return; }
@@ -166,8 +186,9 @@ export function App() {
     }
   });
 
-  const dashboard = <Box flexDirection="column"><Text bold>Operator dashboard</Text><Text color="gray">{volumes.length} volume(s), {epubs.length} EPUB input(s). `list` and `status` are views now; spawning Python to read a directory was never a feature.</Text><Text color="gray">Use ←/→ or [/] to switch workspaces. The rail already does navigation; duplicating it here would just waste vertical space.</Text></Box>;
+  const dashboard = <RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} />;
   const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'inputs' ? <Box flexDirection="column"><Text bold>Project EPUB inputs</Text>{epubs.map((file, index) => <Text key={file} inverse={workspace.itemIndex === index}>{' '}{basename(file)}{' '}</Text>) || <Text color="yellow">raw/ is empty. Put an EPUB there; the picker only exposes project-scoped inputs.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
   const inspector = <Inspector volume={activeVolume} />;
-  return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header workspace={workspace} preflight={preflight} columns={columns} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && <Navigation workspace={workspace} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' ? 0 : 1}>{layout === 'single-pane' && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">↑↓ move · Enter select · / search · r refresh · Esc back · Ctrl+C abort · Ctrl+Shift+Esc exit</Text></Box>;
+  const footer = workspace.nav === 'dashboard' ? '↑↓ workspaces · Enter open · PgUp/PgDn config · Esc back · Ctrl+Shift+Esc exit' : '↑↓ move · Enter select · / search · r refresh · Esc back · Ctrl+C abort · Ctrl+Shift+Esc exit';
+  return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header workspace={workspace} preflight={preflight} columns={columns} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && <Navigation workspace={workspace} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' ? 0 : 1}>{layout === 'single-pane' && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">{footer}</Text></Box>;
 }

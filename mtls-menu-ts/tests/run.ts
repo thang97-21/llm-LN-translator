@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { CLI_CAPABILITIES, MCP_TOOL_OVERLAY, effectiveRisk, hydrateMcpCapabilities, serializeCli, serializeMcp, validateCapability } from '../src/core/capabilities.js';
 import { appendConsole, browseConsole, createConsole, jumpConsole, setConsoleMode, visibleConsoleEntries } from '../src/core/console.js';
-import { loadVolumeDetailFrom, loadVolumesFrom } from '../src/core/mtls.js';
+import { loadRuntimeConfigLines, loadVolumeDetailFrom, loadVolumesFrom } from '../src/core/mtls.js';
 import { layoutForColumns } from '../src/ui/layout.js';
 
 function capability(id: string) { const found = [...CLI_CAPABILITIES, ...MCP_TOOL_OVERLAY].find((item) => item.id === id); assert.ok(found, `missing capability ${id}`); return found; }
@@ -39,9 +39,10 @@ try {
 } finally { rmSync(fixture, { recursive: true, force: true }); }
 
 assert.equal(layoutForColumns(120), 'three-pane'); assert.equal(layoutForColumns(90), 'two-pane'); assert.equal(layoutForColumns(89), 'single-pane');
+const runtimeConfig = loadRuntimeConfigLines(); assert.ok(runtimeConfig.some((line) => line.trim() === 'project:')); assert.ok(runtimeConfig.some((line) => line.includes('deepseek-v4-pro'))); assert.ok(!runtimeConfig.some((line) => line.trim().startsWith('#')));
 let consoleState = createConsole(); for (let index = 0; index < 5_010; index += 1) consoleState = appendConsole(consoleState, `line ${index}`, 'cli');
 assert.equal(consoleState.entries.length, 5_000); assert.equal(consoleState.entries[0]?.text, 'line 10');
 consoleState = browseConsole(consoleState, 20, 20); assert.equal(consoleState.mode, 'browse'); assert.ok(consoleState.offset > 0); consoleState = setConsoleMode(consoleState, 'input'); assert.equal(consoleState.mode, 'input'); consoleState = jumpConsole(consoleState, 'end', 20); assert.equal(consoleState.mode, 'follow'); assert.equal(consoleState.offset, 0); assert.equal(visibleConsoleEntries(consoleState, 3).length, 3);
 
-const packagePath = path.resolve('package.json'); const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as { scripts: Record<string, string> }; assert.equal(packageJson.scripts.legacy, undefined); assert.equal(existsSync(path.resolve('src/legacy-launcher.cjs')), false); const entry = readFileSync(path.resolve('src/app/index.tsx'), 'utf8'); assert.ok(!entry.includes('--legacy') && !entry.includes('--mcp')); const app = readFileSync(path.resolve('src/ui/App.tsx'), 'utf8'); assert.ok(app.includes("key.ctrl && key.shift && key.escape")); assert.ok(app.includes("workspace.nav !== 'dashboard'")); assert.ok(!app.includes('capability{visible.length'));
+const packagePath = path.resolve('package.json'); const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as { scripts: Record<string, string> }; assert.equal(packageJson.scripts.legacy, undefined); assert.equal(existsSync(path.resolve('src/legacy-launcher.cjs')), false); const entry = readFileSync(path.resolve('src/app/index.tsx'), 'utf8'); assert.ok(!entry.includes('--legacy') && !entry.includes('--mcp')); const app = readFileSync(path.resolve('src/ui/App.tsx'), 'utf8'); assert.ok(app.includes("key.ctrl && key.shift && key.escape")); assert.ok(app.includes("workspace.nav !== 'dashboard'")); assert.ok(app.includes("type: 'navCursor'")); assert.ok(!app.includes('capability{visible.length'));
 console.log('operator-console tests passed');

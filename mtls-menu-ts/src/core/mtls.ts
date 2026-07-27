@@ -50,6 +50,17 @@ export function loadVolumesFrom(root: string): VolumeSummary[] {
 }
 
 export function loadEpubs(): string[] { return listFiles(inputRoot, '.epub'); }
+export function loadRuntimeConfigLines(): string[] {
+  const configPath = path.join(pipelineRoot, 'config.yaml');
+  if (!existsSync(configPath)) return ['config.yaml is unavailable.'];
+  try {
+    const lines = readFileSync(configPath, 'utf8').replace(/\r/g, '').split('\n');
+    const runtimeLines = lines.filter((line) => line.trim() && !line.trim().startsWith('#'));
+    return runtimeLines.length ? runtimeLines : ['config.yaml contains no runtime entries.'];
+  } catch (error) {
+    return [`Unable to read config.yaml: ${error instanceof Error ? error.message : String(error)}`];
+  }
+}
 function listFiles(dir: string, suffix: string): string[] { if (!existsSync(dir)) return []; try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(suffix)).map((entry) => path.join(dir, entry.name)).sort((a, b) => a.localeCompare(b)); } catch { return []; } }
 function listMarkdown(dir: string): string[] { return listFiles(dir, '.md'); }
 
