@@ -1,20 +1,6 @@
-// Normalized pipeline/phase status. Raw manifest strings are collapsed to this
-// closed set at the parse boundary (see normalizePhaseStatus in mtls.ts) so the
-// view layer can switch on it exhaustively instead of doing stringly-typed scans.
-export type PhaseStatusValue =
-  | 'pending'
-  | 'running'
-  | 'completed'
-  | 'reviewed'
-  | 'built'
-  | 'failed'
-  | 'unknown';
+export type PhaseStatusValue = 'pending' | 'running' | 'completed' | 'reviewed' | 'built' | 'failed' | 'unknown';
 
-export type PhaseStatus = {
-  key: string;
-  label: string;
-  status: PhaseStatusValue;
-};
+export type PhaseStatus = { key: string; label: string; status: PhaseStatusValue };
 
 export type VolumeSummary = {
   id: string;
@@ -28,7 +14,6 @@ export type VolumeSummary = {
   phases: PhaseStatus[];
 };
 
-// Per-chapter row parsed from translation_log.json.
 export type ChapterLog = {
   chapterId: string;
   inputTokens: number;
@@ -39,7 +24,6 @@ export type ChapterLog = {
   aiIsmCount: number | null;
 };
 
-// Lazily loaded, richer per-volume view mined from on-disk artifacts.
 export type VolumeDetail = {
   id: string;
   loaded: boolean;
@@ -57,49 +41,85 @@ export type VolumeDetail = {
 };
 
 export type SortMode = 'recent' | 'series' | 'progress';
+export type CapabilityRisk = 'read' | 'write' | 'paid' | 'overwrite';
+export type FieldKind =
+  | 'volume'
+  | 'epub'
+  | 'chapter-list'
+  | 'project-path'
+  | 'text'
+  | 'multiline'
+  | 'integer'
+  | 'boolean'
+  | 'enum'
+  | 'string-list'
+  | 'json-object'
+  | 'json-array';
 
-export type CommandKind = 'volume' | 'epub' | 'none' | 'legacy';
-export type CommandRisk = 'low' | 'medium' | 'high';
-
-// A boolean CLI flag a command can be launched with (value-flags are out of scope).
-export type CommandFlag = {
-  flag: string;
+export type FieldSpec = {
+  key: string;
   label: string;
-  default: boolean;
+  kind: FieldKind;
+  required?: boolean;
+  description?: string;
+  defaultValue?: string | boolean;
+  choices?: readonly string[];
+  cliFlag?: string;
+  positional?: boolean;
+  min?: number;
+  projectScoped?: boolean;
 };
 
-type CommandBase = {
+export type CliRoute = { transport: 'cli'; command: string };
+export type McpRoute = { transport: 'mcp'; tool: string };
+export type LocalRoute = { transport: 'local'; view: 'dashboard' | 'volumes' | 'inputs' | 'diagnostics' };
+export type CapabilityRoute = CliRoute | McpRoute | LocalRoute;
+
+export type CapabilitySpec = {
   id: string;
   label: string;
   detail: string;
-  argv: readonly string[];
-  risk: CommandRisk;
-  flags?: readonly CommandFlag[];
+  group: string;
+  route: CapabilityRoute;
+  fields: readonly FieldSpec[];
+  risk: CapabilityRisk;
+  available?: boolean;
+  unavailableReason?: string;
 };
 
-// Discriminated on `kind`. Each variant is its own type so dispatch sites can be
-// made exhaustive with an assertNever fallback, and so kinds can grow distinct
-// payloads later without touching the others.
-export type VolumeCommand = CommandBase & { kind: 'volume' };
-export type EpubCommand = CommandBase & { kind: 'epub' };
-export type NoneCommand = CommandBase & { kind: 'none' };
-export type LegacyCommand = CommandBase & { kind: 'legacy' };
+export type FormValues = Record<string, string | boolean>;
+export type ValidationIssue = { field?: string; message: string };
 
-export type CommandSpec = VolumeCommand | EpubCommand | NoneCommand | LegacyCommand;
+export type ConsoleSeverity = 'info' | 'warning' | 'error' | 'success';
+export type ConsoleSource = 'cli' | 'mcp' | 'system';
+export type ConsoleEntry = {
+  id: number;
+  timestamp: number;
+  source: ConsoleSource;
+  severity: ConsoleSeverity;
+  stage: string;
+  text: string;
+};
+export type ConsoleMode = 'follow' | 'browse' | 'input';
+export type ConsoleState = { entries: readonly ConsoleEntry[]; mode: ConsoleMode; offset: number; unseen: number };
 
-export type RunStatus = 'running' | 'done' | 'failed';
-
+export type RunStatus = 'running' | 'done' | 'failed' | 'cancelled';
 export type RunState = {
-  command: CommandSpec;
-  argv: string[];
+  capability: CapabilitySpec;
+  preview: string;
   status: RunStatus;
   exitCode: number | null;
-  lines: string[];
+  console: ConsoleState;
 };
 
-// Handle returned by runMtlCommand so the caller can tear the child process down
-// when the user leaves the run screen or exits the app.
-export type RunHandle = {
-  cancel: () => void;
-  write: (data: string) => void;
+export type RunHandle = { cancel: () => void; write: (data: string) => void };
+export type PreflightStatus = 'ready' | 'missing' | 'checking';
+export type Preflight = {
+  python: string;
+  pythonStatus: PreflightStatus;
+  importsStatus: PreflightStatus;
+  mcpStatus: PreflightStatus;
+  apiKeyPresent: boolean;
+  repairCommand: string;
+  detail: string;
 };

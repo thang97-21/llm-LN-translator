@@ -9,7 +9,8 @@
     "typecheck": "tsc -b",
     "typecheck:watch": "tsc -b --watch",
     "clean": "tsc -b --clean",
-    "legacy": "node src/legacy-launcher.cjs"
+    "test": "tsx --tsconfig ./tsconfig.base.json tests/run.ts",
+    "test:smoke": "tsx --tsconfig ./tsconfig.base.json tests/mcp-smoke.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

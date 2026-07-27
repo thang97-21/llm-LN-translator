@@ -1,5 +1,5 @@
 import { Box, Text } from 'ink';
-import type { CommandRisk, PhaseStatus, PhaseStatusValue } from '../core/types.js';
+import type { CapabilityRisk, PhaseStatus, PhaseStatusValue } from '../core/types.js';
 
 export type Color = 'green' | 'yellow' | 'red' | 'gray' | 'cyan' | 'white' | 'magenta';
 
@@ -25,17 +25,18 @@ const PHASE_GLYPH: Record<PhaseStatusValue, string> = {
   unknown: '?',
 };
 
-const RISK_COLOR: Record<CommandRisk, Color> = {
-  low: 'green',
-  medium: 'yellow',
-  high: 'red',
+const RISK_COLOR: Record<CapabilityRisk, Color> = {
+  read: 'green',
+  write: 'yellow',
+  paid: 'red',
+  overwrite: 'red',
 };
 
 export function statusColor(status: PhaseStatusValue): Color {
   return PHASE_STATUS_COLOR[status];
 }
 
-export function riskColor(risk: CommandRisk): Color {
+export function riskColor(risk: CapabilityRisk): Color {
   return RISK_COLOR[risk];
 }
 

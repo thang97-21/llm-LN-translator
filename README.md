@@ -55,7 +55,7 @@ Writing the series bible (so the *next* volume in the series detects the sequel 
 
 ### TypeScript Terminal UI
 
-A richer way to run the pipeline — an Ink/React terminal dashboard:
+A responsive Ink/React operator console for the pipeline:
 
 ```bash
 # Install Node.js deps (one-time)
@@ -66,17 +66,50 @@ npm install
 mtl-ts.bat
 ```
 
-The TUI provides a navigable dashboard: volume browser, 9-command palette (Extract, Prep, Translate, QC, Build, Full Pipeline, List, Status, Legacy CLI), a 4-entry phase strip, live run output, and fuzzy search.
+The console has Dashboard, Workflows, Volumes, Inputs, Advanced Toolbox,
+Console, and Diagnostics views. At 120 columns it uses navigation, workspace,
+and inspector panes; it collapses to two panes at 90–119 and a breadcrumbed
+single pane below 90. `list` and `status` have been removed from the console:
+the Dashboard and Volume Workbench already read the same local data without
+the absurd detour through a Python subprocess.
 
-**Two transport modes:**
+Primary workflows use the canonical CLI and expose every real argument:
+
+| Workflow | Fields |
+|---|---|
+| Extract | EPUB, optional volume ID |
+| Prep | volume, optional series ID |
+| Translate | volume, optional chapter multi-select |
+| QC | volume |
+| Build | volume, optional output name |
+| Full Pipeline | EPUB, optional volume ID and series ID |
+
+Advanced Toolbox uses MCP `listTools()` plus a static safety/UI overlay to
+cover all 20 MCP tools. The console never guesses an executable route for an
+unknown tool, and a known tool missing from the live handshake remains visibly
+disabled. Each capability owns exactly one transport—CLI, MCP, or read-only
+local view—so a failed MCP call cannot quietly fall back to a mutating CLI run.
+
+Every form shows its exact CLI command or MCP JSON payload before launch.
+Writes and paid DeepSeek calls need confirmation; overwrite/bypass paths such
+as image optimization, `apply_manifest`, and `skip_qc` need a second warning.
+There is intentionally no arbitrary “extra flags” field.
+
+Diagnostics checks interpreter discovery, required imports, MCP readiness, and
+API-key presence without showing the key. If a dependency such as `lxml` is
+missing, Advanced Toolbox is disabled and the repair command is shown instead:
 
 ```bash
-mtl-ts.bat                  # Default: spawn `python scripts/mtl.py <cmd>`, stream stdout live
-mtl-ts.bat --mcp            # MCP mode: real JSON-RPC client over stdio -> python -m src.mcp.server
-mtl-ts.bat --legacy         # Fallback to Python's legacy TUI
+python -m pip install -r requirements.txt
 ```
 
-Both modes run the exact same Python code underneath — `--mcp` just addresses it as typed tool calls (`src/core/mcpClient.ts`, built on `@modelcontextprotocol/sdk`) instead of parsing CLI stdout. `list` and `status` are always local filesystem reads regardless of transport — there's no tool to call for either, they already run without spawning anything. The `--mcp` client process (and the Python server it spawns) is closed cleanly on exit or Ctrl+C. Either way, the TUI never mutates manifests or calls the DeepSeek API directly — that always happens inside the Python side.
+Console output is a structured 5,000-entry ring buffer rather than a 200-line
+tail. `Tab` enters terminal focus; arrows/PageUp/PageDown/Home/End browse,
+`f` follows the tail, and `i` sends raw input only to a CLI child. `Esc` asks
+before cancelling a running action; `Ctrl+C` stops it while leaving the console
+open, then exits only when idle. The process child or MCP transport is cleaned
+up on interruption and normal exit. Legacy Python TUI launching and `--legacy`
+or session-wide `--mcp` modes are gone; `mtl.bat` remains the standalone CLI.
 
 ### IDE Agent (MCP Tools) — One-Line E2E
 
@@ -290,12 +323,13 @@ DeepSeek_MTLS/
 │   └── mtl.py                  ← CLI: extract, prep, translate, qc, build, run, list, status
 │
 ├── mtls-menu-ts/                ← TypeScript Ink/React TUI
-│   ├── package.json             ← ink, react, tsx, @modelcontextprotocol/sdk (for --mcp mode)
-│   ├── src/core/mtls.ts         ← Pipeline bridge: volume scan, subprocess dispatch, manifest parsing
-│   ├── src/core/mcpClient.ts    ← --mcp transport: real JSON-RPC client over stdio
-│   ├── src/core/types.ts        ← PhaseStatus, VolumeSummary, CommandSpec
-│   ├── src/ui/App.tsx           ← Main screen router; picks subprocess vs MCP transport per run
-│   └── src/app/index.tsx        ← Entry point; detects --mcp/--legacy, alt-screen buffer
+│   ├── package.json             ← ink, react, tsx, @modelcontextprotocol/sdk
+│   ├── src/core/capabilities.ts ← typed CLI/MCP capability registry and validation
+│   ├── src/core/console.ts      ← 5,000-entry structured terminal ring buffer
+│   ├── src/core/mcpClient.ts    ← per-capability JSON-RPC client over stdio
+│   ├── src/core/preflight.ts    ← interpreter/import/key/MCP readiness checks
+│   ├── src/ui/App.tsx           ← reducer-driven responsive operator workspace
+│   └── src/app/index.tsx        ← alternate-screen entry point and cleanup
 │
 └── .github/
     ├── AGENTS.md
@@ -370,7 +404,7 @@ Start the server: `python -m src.mcp.server`
 | CLI commands | ~25 | 8 |
 | MCP tool servers | 8 (~42 tools) | 6 (20 tools + 2 resources) |
 | Dependencies | 30+ Python packages | 7 Python packages |
-| TypeScript TUI | 12 commands, 8 phases, subprocess-only | 9 commands, 4-phase strip, subprocess or real MCP transport |
+| TypeScript TUI | 12 commands, 8 phases, subprocess-only | typed operator console: six CLI workflows, all 20 MCP tools, local status views |
 
 ---
 

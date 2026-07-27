@@ -17,11 +17,7 @@ if not exist "%MENU_DIR%\node_modules" (
 )
 
 pushd "%MENU_DIR%" >nul
-if "%~1"=="--legacy" (
-    call npm run legacy
-) else (
-    call npm start -- %*
-)
+call npm start
 set "EXIT_CODE=%ERRORLEVEL%"
 popd >nul
 

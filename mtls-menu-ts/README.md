@@ -1,91 +1,80 @@
-# MTLS TypeScript Menu
+# DeepSeek_MTLS Operator Console
 
-Experimental TypeScript 7 / Ink operator shell for MTL Studio.
+The Ink console is the keyboard-first operator surface for the standalone
+DeepSeek pipeline. Python and MCP remain authoritative; this package supplies
+typed forms, preview/confirmation, local status views, and retained execution
+logs. A terminal menu that invents pipeline behavior would be worse than no
+menu, obviously.
 
-This is intentionally separate from the legacy Python TUI:
-
-- Legacy TUI: `pipeline/mtl.bat` or `python scripts/mtl.py`
-- TypeScript shell: `pipeline/mtl-ts.bat` or `npm start` from this directory
-
-The shell delegates pipeline work to the canonical Python entrypoint at
-`pipeline/scripts/mtl.py`. It reads `WORK/*/manifest.json` for dashboard and
-volume context, but it does not mutate manifests directly.
-
-## Commands
-
-```bash
+```powershell
 npm install
-npm run typecheck        # tsc -b: build the project-reference graph (TS7 --builders)
-npm run typecheck:watch  # native TS7 watch over the whole graph
-npm run clean            # tsc -b --clean: drop dist/ declaration cache
+npm run typecheck
+npm test
 npm start
-npm run legacy
 ```
 
-## Workspace layout
+`mtl-ts.bat` starts this console. `mtl.bat` remains the standalone Python CLI.
+There is no legacy launcher or session-wide transport switch: each capability
+owns its route.
 
-Split into three composite TypeScript projects along the dependency graph, so
-TS7's `tsc -b` builds them in parallel and incrementally:
+## Console layout
 
+- 120+ columns: navigation rail, workspace, and inspector.
+- 90–119: navigation rail plus workspace; volume inspection drills into the
+  second pane.
+- Under 90: one workspace pane with breadcrumbs.
+
+The navigation rail contains Dashboard, Workflows, Volumes, Inputs, Advanced
+Toolbox, Console, and Diagnostics. Dashboard and Volumes replace the old
+`list`/`status` commands with direct read-only filesystem views.
+
+## Routed capabilities
+
+The primary workflows use the canonical CLI and expose every actual option:
+
+| Workflow | Exact CLI fields |
+|---|---|
+| Extract | EPUB, `--volume-id` |
+| Prep | volume, `--series-id` |
+| Translate | volume, `--chapters` multi-select |
+| QC | volume |
+| Build | volume, `--output` |
+| Full Pipeline | EPUB, `--volume-id`, `--series-id` |
+
+Advanced Toolbox gets its input shape from MCP `listTools()` and overlays the
+operator-only metadata the schema cannot know: grouping, form widget, risk, and
+semantic validation. It covers all 20 current tools. A missing known tool stays
+visible but unavailable; an unknown tool is never made executable merely because
+it appeared in a handshake.
+
+Before a run, the console shows the exact CLI command or MCP JSON payload.
+Read-only calls still require review; writes and paid calls require confirmation;
+image optimization and bypass flags such as `apply_manifest` or `skip_qc` get a
+second acknowledgement. No free-form extra-flags escape hatch exists.
+
+## Preflight and diagnostics
+
+Startup checks the selected Python interpreter, required imports, MCP handshake,
+and whether a DeepSeek key is present without displaying it. If the default
+interpreter lacks `lxml` or another requirement, Advanced Toolbox remains
+disabled and Diagnostics prints the exact repair command:
+
+```powershell
+python -m pip install -r requirements.txt
 ```
-tsconfig.json        solution file (files: [], references core/ui/app)
-tsconfig.base.json   shared strict compilerOptions
-src/core/            types + Node/FS/process logic   (no React)   → declares dist/core
-src/ui/              Ink components (App.tsx)          refs core   → declares dist/ui
-src/app/             entry point (index.tsx)           refs core+ui
-src/legacy-launcher.cjs   standalone CJS launcher (not part of the graph)
-```
 
-Projects are `composite` + `emitDeclarationOnly`: `tsc -b` emits only `.d.ts`
-into `dist/` (gitignored) for cross-project checking — `tsx` runs the TS source
-directly, so no compiled JS is ever needed.
+## Terminal focus
 
-## TypeScript 7 usage
+The Console keeps 5,000 structured log entries (time, source, severity, stage),
+even after a run completes. `Tab` enters/leaves terminal focus. In focus:
 
-TS7 is the native (Go) compiler — its value here is fast `tsc`/LSP and stricter
-defaults, not new syntax. This package leans on that in three ways:
+- `Up`/`Down`, `PageUp`/`PageDown`, and `Home`/`End` browse retained output.
+- `f` resumes follow-tail and clears the unseen counter.
+- `i` forwards raw input to a running CLI child; MCP calls deliberately have no
+  raw-input mode.
+- `Esc` leaves input mode for browse; during a run it asks before cancellation.
+- `Ctrl+C` stops the action but keeps the console open. A second idle `Ctrl+C`
+  exits.
 
-- **Toolchain:** `typecheck` runs `tsc -b` over the reference graph (native
-  `tsgo`, parallel `--builders`, incremental via `dist/*/.tsbuildinfo`).
-  `tsconfig.base.json` targets TS7-era strictness: `noUncheckedIndexedAccess`,
-  `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`,
-  `noUnusedLocals`/`noUnusedParameters`, `noFallthroughCasesInSwitch`,
-  `noImplicitOverride`.
-  (`noPropertyAccessFromIndexSignature` is intentionally off — it fights the
-  `asRecord` dynamic-JSON boundary in `core/mtls.ts` with no added safety.)
-- **Type system:** the menu is fully typed end to end. `MenuList<T>` is generic
-  (no `unknown` erasure, no `as` casts at call sites); `CommandSpec` is a
-  discriminated union dispatched exhaustively via `assertNever`; `commands` is
-  declared `as const satisfies readonly CommandSpec[]`; raw manifest status
-  strings are collapsed to a closed `PhaseStatusValue` union at the parse
-  boundary and colored through an exhaustive `Record`.
-- **Runtime:** `start`/`dev` pass `--tsconfig ./tsconfig.base.json` to `tsx`.
-  The root `tsconfig.json` is a solution file (`files: []`), which `tsx` won't
-  read `jsx` settings from — the explicit flag pins the automatic JSX runtime.
-
-## Features
-
-- **Dashboard & rows** — block-char progress bars, a compact per-phase glyph
-  strip (`1✓ 1.5✓ 1.55· 2◐ 4✗`), an inverse-video selection bar, one-line
-  CJK-safe title truncation, and a `·JP` badge on volumes whose metadata isn't
-  translated yet. List/log windows size to the live terminal height.
-- **Search & navigation** — `/` fuzzy-filters the current list; `s` cycles the
-  volume sort (recent / series / progress); `g`/`G` jump to ends. The Volume
-  Workbench is a two-pane view: list on the left, a detail panel on the right.
-- **Detail panel (read-only artifact mining)** — for the highlighted volume,
-  `core/loadVolumeDetail` reads `translation_log.json` (token totals, ok/fail
-  counts, AI-ism totals, last error) and counts `JP/`, `EN/` (with word count),
-  and `QC/` files. No `cost_audit.json` exists on disk, so no USD is shown.
-- **Launch & safety** — commands with flags (e.g. `phase2` → `--force`,
-  `--batch`) open a launch screen: toggle flags (Space), preview the exact
-  `python mtl.py …` command, and confirm. High-risk commands (`phase2`) require
-  a second Enter to confirm before spawning.
-- **Live run panel** — `ink-spinner` while running, an elapsed timer, and
-  content-colored stdout/stderr. Leaving or exiting the run screen kills the
-  child process.
-
-## Notes
-
-The MTLS pipeline remains Python-owned; this package is only a richer terminal
-operator surface. It reads `WORK/*/manifest.json` (and, on demand, per-volume
-artifacts) and never mutates them.
+The console uses real child termination for CLI actions and an `AbortController`
+that closes an in-flight MCP transport. Both routes clean up on normal exit.

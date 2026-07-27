@@ -1,856 +1,168 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import type { Key } from 'ink';
 import Spinner from 'ink-spinner';
-import {
-  buildFullArgv,
-  commands,
-  filterEpubs,
-  filterVolumes,
-  fuzzyMatch,
-  loadEpubs,
-  loadVolumeDetail,
-  loadVolumes,
-  runMtlCommand,
-  sortVolumes,
-} from '../core/mtls.js';
-import { hasMcpRoute, runMtlCommandMcp } from '../core/mcpClient.js';
-import type {
-  CommandSpec,
-  RunHandle,
-  RunState,
-  SortMode,
-  VolumeDetail,
-  VolumeSummary,
-} from '../core/types.js';
+import { CLI_CAPABILITIES, effectiveRisk, hydrateMcpCapabilities, initialValues, previewCapability, serializeCli, serializeMcp, validateCapability } from '../core/capabilities.js';
+import { appendConsole, browseConsole, createConsole, jumpConsole, setConsoleMode, visibleConsoleEntries } from '../core/console.js';
+import { callMcpTool, closeMcpClient, listMcpTools } from '../core/mcpClient.js';
+import { filterVolumes, fuzzyMatch, listChapters, loadEpubs, loadVolumeDetail, loadVolumes, pipelineRoot, runCliCapability, sortVolumes } from '../core/mtls.js';
+import { runPreflight } from '../core/preflight.js';
+import type { CapabilitySpec, ConsoleSeverity, FormValues, Preflight, RunHandle, RunState, SortMode, VolumeSummary } from '../core/types.js';
+import { Badge, PhaseStrip, ProgressBar, riskColor } from './components.js';
+import { layoutForColumns } from './layout.js';
 import { useTerminalSize } from './useTerminalSize.js';
-import {
-  Badge,
-  Breadcrumb,
-  ProgressBar,
-  PhaseStrip,
-  formatTokens,
-  riskColor,
-  type Color,
-} from './components.js';
 
-type Screen = 'home' | 'commands' | 'volumes' | 'epubs' | 'launch' | 'run';
+type Nav = 'dashboard' | 'workflows' | 'volumes' | 'inputs' | 'advanced' | 'console' | 'diagnostics';
+type FormState = { spec: CapabilitySpec; values: FormValues; cursor: number; confirmation: 0 | 1 | 2; issues: readonly string[] };
+type Workspace = { nav: Nav; navIndex: number; itemIndex: number; activeVolume: string | null; search: string; searching: boolean; form: FormState | null; run: RunState | null; terminalFocused: boolean; cancelConfirm: boolean; sort: SortMode };
+type Action =
+  | { type: 'nav'; nav: Nav; navIndex: number }
+  | { type: 'item'; index: number }
+  | { type: 'search'; value: string; active?: boolean }
+  | { type: 'activeVolume'; id: string | null }
+  | { type: 'form'; form: FormState | null }
+  | { type: 'run'; run: RunState | null }
+  | { type: 'console'; text: string; source: 'cli' | 'mcp' | 'system'; severity?: ConsoleSeverity; stage?: string }
+  | { type: 'runDone'; code: number | null; cancelled: boolean }
+  | { type: 'consoleMode'; mode: 'follow' | 'browse' | 'input' }
+  | { type: 'consoleBrowse'; delta: number; viewport: number }
+  | { type: 'consoleJump'; destination: 'home' | 'end'; viewport: number }
+  | { type: 'terminalFocus'; value: boolean }
+  | { type: 'cancelConfirm'; value: boolean }
+  | { type: 'sort'; value: SortMode };
 
-type AppProps = {
-  onRequestLegacy: () => void;
-  // 'subprocess' (default): spawn `python scripts/mtl.py <argv>`, parse stdout.
-  // 'mcp': connect to `python -m src.mcp.server` over stdio, call tools directly.
-  // Same Python code either way — see core/mcpClient.ts's module doc.
-  transport?: 'subprocess' | 'mcp';
-};
+const NAV: readonly { id: Nav; label: string }[] = [
+  { id: 'dashboard', label: 'Dashboard' }, { id: 'workflows', label: 'Workflows' }, { id: 'volumes', label: 'Volumes' }, { id: 'inputs', label: 'Inputs' }, { id: 'advanced', label: 'Advanced Toolbox' }, { id: 'console', label: 'Console' }, { id: 'diagnostics', label: 'Diagnostics' },
+];
 
-type LaunchState = {
-  command: CommandSpec;
-  selectedValue: string | null;
-  flags: boolean[];
-  cursor: number;
-  confirm: boolean;
-};
-
-const homeItems = [
-  { id: 'commands', label: 'Command Palette', detail: 'Run canonical MTLS commands through the richer shell.' },
-  { id: 'volumes', label: 'Volume Workbench', detail: 'Inspect recent WORK volumes and choose the active target.' },
-  { id: 'refresh', label: 'Refresh Dashboard', detail: 'Reload manifests and EPUB candidates from disk.' },
-  { id: 'legacy', label: 'Legacy Python TUI', detail: 'Leave this shell and launch the existing menu.' },
-  { id: 'exit', label: 'Exit', detail: 'Close the TypeScript menu.' },
-] as const;
-
-const SORT_ORDER: readonly SortMode[] = ['recent', 'series', 'progress'];
-const SORT_LABEL: Record<SortMode, string> = {
-  recent: 'recent',
-  series: 'series',
-  progress: 'progress ↑',
-};
-
-function clamp(index: number, length: number): number {
-  if (length <= 0) {
-    return 0;
-  }
-  return Math.max(0, Math.min(index, length - 1));
-}
-
-function windowStart(selected: number, length: number, size: number): number {
-  if (length <= size) {
-    return 0;
-  }
-  const half = Math.floor(size / 2);
-  return Math.max(0, Math.min(selected - half, length - size));
-}
-
-function isPrintable(input: string, key: Key): boolean {
-  return input.length === 1 && input >= ' ' && !key.ctrl && !key.meta && !key.return && !key.tab;
-}
-
-function terminalInput(input: string, key: Key): string | null {
-  if (key.return) {
-    return '\r';
-  }
-  if (key.backspace || key.delete) {
-    return '\x7f';
-  }
-  if (key.upArrow) {
-    return '\x1b[A';
-  }
-  if (key.downArrow) {
-    return '\x1b[B';
-  }
-  if (key.rightArrow) {
-    return '\x1b[C';
-  }
-  if (key.leftArrow) {
-    return '\x1b[D';
-  }
-  if (input && !key.ctrl && !key.meta) {
-    return input;
-  }
-  return null;
-}
-
-function basename(filePath: string): string {
-  const parts = filePath.split(/[\\/]/);
-  return parts[parts.length - 1] ?? filePath;
-}
-
-function formatElapsed(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
-}
-
-// Heuristic coloring for the run log — stdout/stderr are merged, so we tag by content.
-function lineColor(line: string): Color {
-  const value = line.toLowerCase();
-  if (line.startsWith('$ ')) {
-    return 'cyan';
-  }
-  if (/(error|failed|traceback|exception)/.test(value)) {
-    return 'red';
-  }
-  if (/(warn|warning)/.test(value)) {
-    return 'yellow';
-  }
-  if (/(done|success|completed|✓)/.test(value)) {
-    return 'green';
-  }
-  return 'white';
-}
-
-// Generic windowed list with scroll indicators. Keeps full item typing at call sites.
-function ScrollList<T>({
-  items,
-  selected,
-  render,
-  windowSize,
-}: {
-  items: readonly T[];
-  selected: number;
-  render: (item: T, active: boolean, index: number) => ReactNode;
-  windowSize: number;
-}) {
-  const size = Math.max(1, windowSize);
-  const start = windowStart(selected, items.length, size);
-  const end = Math.min(items.length, start + size);
-  const visible = items.slice(start, end);
-  if (items.length === 0) {
-    return <Text color="yellow">No items.</Text>;
-  }
-  return (
-    <>
-      {start > 0 && <Text color="gray">  ↑ {start} more</Text>}
-      {visible.map((item, offset) => render(item, selected === start + offset, start + offset))}
-      {end < items.length && <Text color="gray">  ↓ {items.length - end} more</Text>}
-    </>
-  );
-}
-
-function Header({ selectedVolume, trail }: { selectedVolume: VolumeSummary | null; trail: readonly string[] }) {
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-      <Box justifyContent="space-between">
-        <Text bold color="cyan">DeepSeek_MTLS · TS7 Shell</Text>
-        <Breadcrumb trail={trail} />
-      </Box>
-      <Text>
-        Active volume:{' '}
-        <Text color={selectedVolume ? 'green' : 'yellow'} wrap="truncate-end">
-          {selectedVolume ? `${selectedVolume.title} (${selectedVolume.id})` : 'none selected'}
-        </Text>
-      </Text>
-    </Box>
-  );
-}
-
-function Dashboard({ volumes }: { volumes: VolumeSummary[] }) {
-  const latest = volumes[0] ?? null;
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginTop={1}>
-      <Text bold>Dashboard <Text color="gray">· {volumes.length} WORK volumes</Text></Text>
-      {latest ? (
-        <Box flexDirection="column">
-          <Text wrap="truncate-end">
-            Latest: <Text color="green">{latest.title}</Text> <Text color="gray">({latest.id})</Text>
-          </Text>
-          <Box>
-            <Text>Chapters </Text>
-            <ProgressBar value={latest.translatedCount} total={latest.chapterCount} />
-          </Box>
-          <Box>
-            <Text>Phases  </Text>
-            <PhaseStrip phases={latest.phases} />
-          </Box>
-        </Box>
-      ) : (
-        <Text color="gray">No manifests found.</Text>
-      )}
-    </Box>
-  );
-}
-
-function FilterLine({
-  filtering,
-  filter,
-  count,
-  sort,
-}: {
-  filtering: boolean;
-  filter: string;
-  count: number;
-  sort?: SortMode;
-}) {
-  if (!filtering && !filter && !sort) {
-    return null;
-  }
-  return (
-    <Box>
-      <Text color={filtering ? 'cyan' : 'gray'}>
-        {filtering || filter ? `filter: ${filter}${filtering ? '▌' : ''}  ` : ''}
-      </Text>
-      <Text color="gray">
-        {filter ? `${count} match${count === 1 ? '' : 'es'}  ` : ''}
-        {sort ? `sort: ${SORT_LABEL[sort]}` : ''}
-      </Text>
-    </Box>
-  );
-}
-
-function DetailPanel({ volume, detail }: { volume: VolumeSummary | null; detail: VolumeDetail | null }) {
-  if (!volume) {
-    return (
-      <Box borderStyle="round" borderColor="gray" paddingX={1} marginTop={1} marginLeft={1}>
-        <Text color="gray">No volume selected.</Text>
-      </Box>
-    );
-  }
-  const d = detail && detail.id === volume.id ? detail : null;
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginTop={1} marginLeft={1}>
-      <Text bold wrap="truncate-end">
-        {volume.title} {!volume.hasEnTitle && <Badge label="JP" color="magenta" />}
-      </Text>
-      <Text color="gray" wrap="truncate-end">series: {volume.series}</Text>
-      <Text color="gray" wrap="truncate-end">author: {volume.author}</Text>
-      <Box marginTop={1}>
-        <ProgressBar value={volume.translatedCount} total={volume.chapterCount} />
-      </Box>
-      <Box>
-        <PhaseStrip phases={volume.phases} />
-      </Box>
-      <Box marginTop={1} flexDirection="column">
-        {d && d.loaded ? (
-          <>
-            <Text color="gray">
-              JP {d.jpChapters}ch · EN {d.enChapters}ch · {formatTokens(d.enWords)} words · QC {d.qcReports}
-            </Text>
-            <Text color="gray">
-              tokens: {formatTokens(d.totalInputTokens)} in / {formatTokens(d.totalOutputTokens)} out
-            </Text>
-            <Text color="gray">
-              logged {d.successCount + d.failCount}ch ·{' '}
-              <Text color={d.failCount > 0 ? 'red' : 'green'}>{d.successCount} ok</Text>
-              {d.failCount > 0 ? <Text color="red"> · {d.failCount} fail</Text> : null}
-              {' · '}<Text color={d.aiIsmTotal > 0 ? 'yellow' : 'gray'}>{d.aiIsmTotal} AI-isms</Text>
-            </Text>
-            {d.lastError && <Text color="red" wrap="truncate-end">err: {d.lastError}</Text>}
-          </>
-        ) : (
-          <Text color="gray">No translation artifacts on disk yet.</Text>
-        )}
-      </Box>
-    </Box>
-  );
-}
-
-function LaunchView({ launch, python }: { launch: LaunchState; python: string }) {
-  const cmd = launch.command;
-  const flags = cmd.flags ?? [];
-  const enabled = flags.filter((_, i) => launch.flags[i] === true).map((f) => f.flag);
-  const preview = buildFullArgv(cmd, launch.selectedValue, enabled);
-  const flagCount = flags.length;
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor={cmd.risk === 'high' ? 'red' : 'cyan'} paddingX={1} marginTop={1}>
-      <Text bold>
-        Launch: {cmd.label} <Text color={riskColor(cmd.risk)}>[{cmd.risk}]</Text>
-      </Text>
-      {launch.selectedValue && <Text color="gray" wrap="truncate-end">target: {launch.selectedValue}</Text>}
-      <Box marginTop={1}>
-        <Text color="gray" wrap="truncate-end">
-          $ {python} mtl.py {preview.join(' ')}
-        </Text>
-      </Box>
-      {flagCount > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          {flags.map((flag, index) => {
-            const active = launch.cursor === index;
-            const on = launch.flags[index] === true;
-            return (
-              <Text key={flag.flag} inverse={active} color={active ? 'cyan' : 'white'}>
-                {' '}{on ? '[x]' : '[ ]'} {flag.label} <Text color="gray">({flag.flag})</Text>{' '}
-              </Text>
-            );
-          })}
-        </Box>
-      )}
-      <Box marginTop={1}>
-        <Text inverse={launch.cursor >= flagCount} color={cmd.risk === 'high' ? 'red' : 'green'}>
-          {' '}▶ {launch.confirm ? 'Press Enter again to CONFIRM' : cmd.risk === 'high' ? 'Run (high risk)' : 'Run'}{' '}
-        </Text>
-      </Box>
-    </Box>
-  );
-}
-
-function RunView({
-  runState,
-  elapsedMs,
-  logRows,
-  terminalFocused,
-}: {
-  runState: RunState;
-  elapsedMs: number;
-  logRows: number;
-  terminalFocused: boolean;
-}) {
-  const running = runState.status === 'running';
-  const border: Color = runState.status === 'failed' ? 'red' : runState.status === 'done' ? 'green' : terminalFocused ? 'magenta' : 'cyan';
-  return (
-    <Box flexDirection="column" borderStyle="round" borderColor={border} paddingX={1} marginTop={1}>
-      <Box justifyContent="space-between">
-        <Text bold>
-          {running ? <Text color="cyan"><Spinner type="dots" /> </Text> : null}
-          {runState.command.label}{' '}
-          <Text color={border}>{runState.status}</Text>
-          {runState.exitCode !== null ? <Text color="gray"> (exit {runState.exitCode})</Text> : null}
-        </Text>
-        <Text color="gray">⏱ {formatElapsed(elapsedMs)}</Text>
-      </Box>
-      <Text color={terminalFocused ? 'magenta' : 'gray'}>
-        focus: {terminalFocused ? 'terminal input' : 'menu'} · Tab toggles focus
-      </Text>
-      <Text color="gray" wrap="truncate-end">args: {runState.argv.join(' ') || '(none)'}</Text>
-      <Box flexDirection="column" marginTop={1}>
-        {runState.lines.slice(-Math.max(4, logRows)).map((line, index) => (
-          <Text key={`${index}-${line.slice(0, 16)}`} color={lineColor(line)} wrap="truncate-end">
-            {line}
-          </Text>
-        ))}
-      </Box>
-    </Box>
-  );
-}
-
-function Footer({ hint }: { hint: string }) {
-  return (
-    <Box marginTop={1}>
-      <Text color="gray">{hint}</Text>
-    </Box>
-  );
-}
-
-function trailFor(screen: Screen, launch: LaunchState | null): string[] {
-  switch (screen) {
-    case 'home':
-      return ['Home'];
-    case 'commands':
-      return ['Home', 'Commands'];
-    case 'volumes':
-      return ['Home', 'Volumes'];
-    case 'epubs':
-      return ['Home', 'EPUB Inputs'];
-    case 'launch':
-      return ['Home', 'Launch', launch?.command.label ?? ''];
-    case 'run':
-      return ['Home', 'Run'];
-    default:
-      return ['Home'];
+function reducer(state: Workspace, action: Action): Workspace {
+  switch (action.type) {
+    case 'nav': return { ...state, nav: action.nav, navIndex: action.navIndex, itemIndex: 0, search: '', searching: false, cancelConfirm: false };
+    case 'item': return { ...state, itemIndex: action.index };
+    case 'search': return { ...state, search: action.value, searching: action.active ?? state.searching, itemIndex: 0 };
+    case 'activeVolume': return { ...state, activeVolume: action.id };
+    case 'form': return { ...state, form: action.form };
+    case 'run': return { ...state, run: action.run, nav: 'console', navIndex: NAV.findIndex((item) => item.id === 'console'), terminalFocused: false, cancelConfirm: false };
+    case 'console': return state.run ? { ...state, run: { ...state.run, console: appendConsole(state.run.console, action.text, action.source, action.severity, action.stage) } } : state;
+    case 'runDone': return state.run?.status === 'running' ? { ...state, run: { ...state.run, status: action.cancelled ? 'cancelled' : action.code === 0 ? 'done' : 'failed', exitCode: action.code, console: appendConsole(state.run.console, action.cancelled ? 'Action cancelled.' : `Action finished with code ${action.code ?? 'unknown'}.`, 'system', action.cancelled ? 'warning' : action.code === 0 ? 'success' : 'error', 'complete') } } : state;
+    case 'consoleMode': return state.run ? { ...state, run: { ...state.run, console: setConsoleMode(state.run.console, action.mode) } } : state;
+    case 'consoleBrowse': return state.run ? { ...state, run: { ...state.run, console: browseConsole(state.run.console, action.delta, action.viewport) } } : state;
+    case 'consoleJump': return state.run ? { ...state, run: { ...state.run, console: jumpConsole(state.run.console, action.destination, action.viewport) } } : state;
+    case 'terminalFocus': return { ...state, terminalFocused: action.value };
+    case 'cancelConfirm': return { ...state, cancelConfirm: action.value };
+    case 'sort': return { ...state, sort: action.value, itemIndex: 0 };
   }
 }
 
-function hintFor(screen: Screen, filtering: boolean): string {
-  if (filtering) {
-    return 'Type to filter · ↑↓ move · Enter select · Esc clear';
-  }
-  switch (screen) {
-    case 'volumes':
-      return '↑↓ move · / filter · s sort · g/G ends · Enter select · Esc back';
-    case 'commands':
-    case 'epubs':
-      return '↑↓ move · / filter · Enter select · Esc back';
-    case 'launch':
-      return '↑↓ move · Space toggle · Enter run · Esc back';
-    case 'run':
-      return 'Tab terminal focus · Esc back/cancel · Ctrl+C exit';
-    default:
-      return '↑↓ move · Enter select · Esc back/exit';
-  }
+function clamp(value: number, length: number): number { return Math.max(0, Math.min(Math.max(0, length - 1), value)); }
+function printable(input: string, key: Key): boolean { return input.length === 1 && input >= ' ' && !key.ctrl && !key.meta && !key.tab && !key.return; }
+function basename(value: string): string { return value.split(/[\\/]/).pop() ?? value; }
+function initialWorkspace(volumes: readonly VolumeSummary[]): Workspace { return { nav: 'dashboard', navIndex: 0, itemIndex: 0, activeVolume: volumes[0]?.id ?? null, search: '', searching: false, form: null, run: null, terminalFocused: false, cancelConfirm: false, sort: 'recent' }; }
+
+function Header({ workspace, preflight, columns }: { workspace: Workspace; preflight: Preflight; columns: number }) {
+  const active = workspace.activeVolume ?? 'none';
+  return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+    <Box justifyContent="space-between"><Text bold color="cyan">DeepSeek_MTLS · Operator Console</Text><Text color="gray">{layoutForColumns(columns)}</Text></Box>
+    <Text wrap="truncate-end">volume: <Text color={workspace.activeVolume ? 'green' : 'yellow'}>{active}</Text> · python <Badge label={preflight.pythonStatus} color={preflight.pythonStatus === 'ready' ? 'green' : 'red'} /> · MCP <Badge label={preflight.mcpStatus} color={preflight.mcpStatus === 'ready' ? 'green' : preflight.mcpStatus === 'checking' ? 'yellow' : 'red'} /> · API key <Badge label={preflight.apiKeyPresent ? 'present' : 'missing'} color={preflight.apiKeyPresent ? 'green' : 'yellow'} /></Text>
+  </Box>;
 }
 
-export function App({ onRequestLegacy, transport = 'subprocess' }: AppProps) {
-  const { exit } = useApp();
-  const { rows, columns } = useTerminalSize();
-  const [screen, setScreen] = useState<Screen>('home');
-  const [volumes, setVolumes] = useState<VolumeSummary[]>(() => loadVolumes());
-  const [epubs, setEpubs] = useState<string[]>(() => loadEpubs());
-  const [selectedVolumeId, setSelectedVolumeId] = useState<string | null>(volumes[0]?.id ?? null);
-  const [homeIndex, setHomeIndex] = useState(0);
-  const [commandIndex, setCommandIndex] = useState(0);
-  const [volumeIndex, setVolumeIndex] = useState(0);
-  const [epubIndex, setEpubIndex] = useState(0);
-  const [filter, setFilter] = useState('');
-  const [filtering, setFiltering] = useState(false);
-  const [sortMode, setSortMode] = useState<SortMode>('recent');
-  const [pendingCommand, setPendingCommand] = useState<CommandSpec | null>(null);
-  const [launch, setLaunch] = useState<LaunchState | null>(null);
-  const [runState, setRunState] = useState<RunState | null>(null);
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const [detail, setDetail] = useState<VolumeDetail | null>(null);
-  const [terminalFocused, setTerminalFocused] = useState(false);
-  const runHandleRef = useRef<RunHandle | null>(null);
-  const runStartRef = useRef<number>(0);
-  const detailCache = useRef<Map<string, VolumeDetail>>(new Map());
+function Navigation({ workspace }: { workspace: Workspace }) { return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} width={22}>{NAV.map((item, index) => <Text key={item.id} inverse={workspace.navIndex === index} color={workspace.navIndex === index ? 'cyan' : 'white'}>{' '}{item.label}{' '}</Text>)}</Box>; }
 
-  // Windowed list sizes derived from the viewport. Volume rows are two lines each.
-  const listRows = Math.max(4, rows - 12);
-  const volumeRows = Math.max(3, Math.floor((rows - 12) / 2));
-  const logRows = Math.max(6, rows - 10);
+function CapabilityList({ items, index, query }: { items: readonly CapabilitySpec[]; index: number; query: string }) {
+  const visible = items.filter((item) => fuzzyMatch(query, `${item.group} ${item.label} ${item.detail}`));
+  return <Box flexDirection="column"><Text bold>{visible.length} capability{visible.length === 1 ? '' : 'ies'}{query ? <Text color="cyan"> · search: {query}</Text> : null}</Text>{visible.length ? visible.map((item, position) => <Box key={item.id} flexDirection="column"><Text inverse={position === index} color={position === index ? 'cyan' : item.available === false ? 'gray' : 'white'}>{' '}{item.label} <Text color={riskColor(item.risk)}>[{item.risk}]</Text>{' '}</Text>{position === index && <Text color="gray" wrap="truncate-end">  {item.group}: {item.detail}{item.unavailableReason ? ` — ${item.unavailableReason}` : ''}</Text>}</Box>) : <Text color="yellow">Nothing matches.</Text>}</Box>;
+}
 
-  const visibleVolumes = useMemo(
-    () => sortVolumes(filterVolumes(volumes, filter), sortMode),
-    [volumes, filter, sortMode],
-  );
-  const visibleCommands = useMemo(
-    () => (filter ? commands.filter((command) => fuzzyMatch(filter, `${command.label} ${command.id}`)) : [...commands]),
-    [filter],
-  );
-  const visibleEpubs = useMemo(() => filterEpubs(epubs, filter), [epubs, filter]);
+function Inspector({ volume }: { volume: VolumeSummary | null }) { if (!volume) return <Box borderStyle="round" borderColor="gray" paddingX={1}><Text color="gray">Select a volume to inspect it.</Text></Box>; const detail = loadVolumeDetail(volume.id); return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}><Text bold wrap="truncate-end">{volume.title}</Text><Text color="gray">{volume.author} · {volume.series}</Text><ProgressBar value={volume.translatedCount} total={volume.chapterCount} /><PhaseStrip phases={volume.phases} /><Text color="gray">JP {detail.jpChapters} · EN {detail.enChapters} · QC {detail.qcReports}</Text>{detail.lastError ? <Text color="red" wrap="truncate-end">{detail.lastError}</Text> : null}</Box>; }
 
-  const highlightedVolume = visibleVolumes[clamp(volumeIndex, visibleVolumes.length)] ?? null;
-  const highlightedId = highlightedVolume?.id ?? null;
+function FormPanel({ form, activeVolume, preflight }: { form: FormState; activeVolume: string | null; preflight: Preflight }) {
+  const risk = effectiveRisk(form.spec, form.values); let preview = '(complete required fields to preview)'; try { preview = previewCapability(form.spec, form.values, preflight.python); } catch { /* validation gives the useful error */ }
+  const chapters = activeVolume ? listChapters(activeVolume) : [];
+  return <Box flexDirection="column" borderStyle="round" borderColor={risk === 'overwrite' ? 'red' : 'cyan'} paddingX={1}><Text bold>{form.spec.label} <Text color={riskColor(risk)}>[{risk}]</Text></Text><Text color="gray" wrap="truncate-end">{form.spec.detail}</Text>{form.spec.fields.map((field, index) => <Box key={field.key} flexDirection="column"><Text inverse={form.cursor === index} color={form.cursor === index ? 'cyan' : 'white'}>{' '}{field.label}: <Text color="yellow">{String(form.values[field.key] ?? '') || '—'}</Text>{field.required ? ' *' : ''}</Text>{form.cursor === index && field.kind === 'chapter-list' && chapters.length > 0 ? <Text color="gray">  JP: {chapters.join(', ')} · press a for all, or type comma-separated IDs</Text> : null}</Box>)}<Text color="gray" wrap="truncate-end">review: {preview}</Text>{form.issues.map((issue) => <Text key={issue} color="red">! {issue}</Text>)}<Text inverse={form.cursor === form.spec.fields.length} color={risk === 'overwrite' ? 'red' : 'green'}>{' '}▶ {form.confirmation === 0 ? 'Review and confirm' : form.confirmation === 1 ? risk === 'overwrite' ? 'Press Enter for overwrite warning' : 'Press Enter to launch' : 'Press Enter to acknowledge overwrite'}{' '}</Text><Text color="gray">Up/Down fields · type to edit · Space toggles booleans · Enter advances · Esc closes</Text></Box>;
+}
 
-  const selectedVolume = useMemo(
-    () => volumes.find((volume) => volume.id === selectedVolumeId) ?? volumes[0] ?? null,
-    [selectedVolumeId, volumes],
-  );
+function ConsolePanel({ run, rows, focused, cancelConfirm }: { run: RunState | null; rows: number; focused: boolean; cancelConfirm: boolean }) {
+  if (!run) return <Box borderStyle="round" borderColor="gray" paddingX={1}><Text color="gray">No action yet. Runs stay here after completion instead of evaporating into a 200-line lie.</Text></Box>;
+  const entries = visibleConsoleEntries(run.console, Math.max(4, rows - 9));
+  return <Box flexDirection="column" borderStyle="round" borderColor={run.status === 'failed' ? 'red' : run.status === 'done' ? 'green' : focused ? 'magenta' : 'cyan'} paddingX={1}><Text bold>{run.status === 'running' ? <Text color="cyan"><Spinner type="dots" /> </Text> : null}{run.capability.label} · {run.status}</Text><Text color="gray" wrap="truncate-end">{run.preview}</Text><Text color={focused ? 'magenta' : 'gray'}>focus: {focused ? run.console.mode : 'menu'} · retained {run.console.entries.length}/5000 · {run.console.unseen ? `${run.console.unseen} unseen` : 'tail current'}</Text>{cancelConfirm ? <Text color="red">Cancel the running action? Enter confirms; Esc keeps it alive.</Text> : null}{entries.map((entry) => <Text key={entry.id} color={entry.severity === 'error' ? 'red' : entry.severity === 'warning' ? 'yellow' : entry.severity === 'success' ? 'green' : 'white'} wrap="truncate-end">[{entry.source}/{entry.stage}] {entry.text}</Text>)}<Text color="gray">Tab focus · ↑↓ scroll · PgUp/PgDn page · Home/End · f follow · i raw stdin · Esc browse</Text></Box>;
+}
 
-  const cancelRun = (): void => {
-    runHandleRef.current?.cancel();
-    runHandleRef.current = null;
-  };
+export function App() {
+  const { exit } = useApp(); const { rows, columns } = useTerminalSize();
+  const [volumes, setVolumes] = useState<VolumeSummary[]>(() => loadVolumes()); const [epubs, setEpubs] = useState<string[]>(() => loadEpubs());
+  const [workspace, dispatch] = useReducer(reducer, volumes, initialWorkspace); const [preflight, setPreflight] = useState<Preflight>(() => runPreflight()); const [mcpCapabilities, setMcpCapabilities] = useState<CapabilitySpec[]>(() => hydrateMcpCapabilities([]));
+  const runHandle = useRef<RunHandle | null>(null); const abortController = useRef<AbortController | null>(null);
+  const layout = layoutForColumns(columns); const activeVolume = volumes.find((volume) => volume.id === workspace.activeVolume) ?? null;
+  const refresh = (): void => { const nextVolumes = loadVolumes(); setVolumes(nextVolumes); setEpubs(loadEpubs()); dispatch({ type: 'activeVolume', id: nextVolumes.some((item) => item.id === workspace.activeVolume) ? workspace.activeVolume : nextVolumes[0]?.id ?? null }); };
 
-  const refresh = (): void => {
-    const nextVolumes = loadVolumes();
-    const nextEpubs = loadEpubs();
-    detailCache.current.clear();
-    setVolumes(nextVolumes);
-    setEpubs(nextEpubs);
-    setSelectedVolumeId((current) =>
-      current && nextVolumes.some((volume) => volume.id === current) ? current : nextVolumes[0]?.id ?? null,
-    );
-  };
+  useEffect(() => { const result = runPreflight(); setPreflight(result); if (result.importsStatus !== 'ready') return; const controller = new AbortController(); void listMcpTools(controller.signal).then((tools) => { setMcpCapabilities(hydrateMcpCapabilities(tools)); setPreflight((current) => ({ ...current, mcpStatus: 'ready', detail: `${tools.length} MCP tools available.` })); }).catch((error: unknown) => setPreflight((current) => ({ ...current, mcpStatus: 'missing', detail: error instanceof Error ? error.message : String(error) }))); return () => controller.abort(); }, []);
+  useEffect(() => () => { runHandle.current?.cancel(); abortController.current?.abort(); void closeMcpClient(); }, []);
 
-  const enterScreen = (target: Screen): void => {
-    setFilter('');
-    setFiltering(false);
-    setScreen(target);
-  };
+  const contentItems = useMemo(() => workspace.nav === 'workflows' ? [...CLI_CAPABILITIES] : workspace.nav === 'advanced' ? mcpCapabilities : [], [workspace.nav, mcpCapabilities]);
+  const filteredItems = useMemo(() => contentItems.filter((item) => fuzzyMatch(workspace.search, `${item.label} ${item.group} ${item.detail}`)), [contentItems, workspace.search]);
+  const volumeItems = useMemo(() => sortVolumes(filterVolumes(volumes, workspace.search), workspace.sort), [volumes, workspace.search, workspace.sort]);
 
-  const startCommand = (command: CommandSpec, selectedValue: string | null, enabledFlags: readonly string[]): void => {
-    if (command.kind === 'legacy') {
-      onRequestLegacy();
-      return;
-    }
-    cancelRun();
-    const argv = buildFullArgv(command, selectedValue, enabledFlags);
-    runStartRef.current = Date.now();
-    setElapsedMs(0);
-    setRunState({ command, argv, status: 'running', exitCode: null, lines: ['Starting...'] });
-    setTerminalFocused(false);
-    setScreen('run');
-    runHandleRef.current =
-      transport === 'mcp' && hasMcpRoute(command.id)
-        ? runMtlCommandMcp(command, argv, selectedValue, setRunState)
-        : runMtlCommand(command, argv, setRunState);
-  };
-
-  const prepareLaunch = (command: CommandSpec, selectedValue: string | null): void => {
-    if (command.kind === 'legacy') {
-      onRequestLegacy();
-      return;
-    }
-    const flags = command.flags ?? [];
-    if (flags.length === 0 && command.risk !== 'high') {
-      startCommand(command, selectedValue, []);
-      return;
-    }
-    setFiltering(false);
-    setLaunch({ command, selectedValue, flags: flags.map((flag) => flag.default), cursor: 0, confirm: false });
-    setScreen('launch');
-  };
-
-  const executeLaunch = (state: LaunchState): void => {
-    const enabled = (state.command.flags ?? []).filter((_, i) => state.flags[i] === true).map((flag) => flag.flag);
-    setLaunch(null);
-    startCommand(state.command, state.selectedValue, enabled);
-  };
-
-  const selectCurrent = (): void => {
-    if (screen === 'commands') {
-      const command = visibleCommands[commandIndex];
-      if (!command) {
-        return;
-      }
-      switch (command.kind) {
-        case 'volume':
-          setPendingCommand(command);
-          enterScreen('volumes');
-          break;
-        case 'epub':
-          setPendingCommand(command);
-          enterScreen('epubs');
-          break;
-        case 'none':
-        case 'legacy':
-          prepareLaunch(command, null);
-          break;
-      }
-      return;
-    }
-    if (screen === 'volumes') {
-      const volume = visibleVolumes[volumeIndex];
-      if (!volume) {
-        return;
-      }
-      setSelectedVolumeId(volume.id);
-      if (pendingCommand) {
-        const command = pendingCommand;
-        setPendingCommand(null);
-        prepareLaunch(command, volume.id);
-      } else {
-        enterScreen('home');
-      }
-      return;
-    }
-    if (screen === 'epubs') {
-      const file = visibleEpubs[epubIndex];
-      if (!file || !pendingCommand) {
-        return;
-      }
-      const command = pendingCommand;
-      setPendingCommand(null);
-      prepareLaunch(command, file);
+  const openForm = (spec: CapabilitySpec, values?: FormValues): void => { if (spec.available === false) return; dispatch({ type: 'form', form: { spec, values: values ?? initialValues(spec, workspace.activeVolume), cursor: 0, confirmation: 0, issues: [] } }); };
+  const stopRun = (): void => { runHandle.current?.cancel(); abortController.current?.abort(); runHandle.current = null; abortController.current = null; dispatch({ type: 'runDone', code: null, cancelled: true }); dispatch({ type: 'cancelConfirm', value: false }); };
+  const launch = (form: FormState): void => {
+    const issues = validateCapability(form.spec, form.values, pipelineRoot); if (issues.length) { dispatch({ type: 'form', form: { ...form, issues: issues.map((issue) => issue.message) } }); return; }
+    const preview = previewCapability(form.spec, form.values, preflight.python); const run: RunState = { capability: form.spec, preview, status: 'running', exitCode: null, console: appendConsole(createConsole(), preview, 'system', 'info', 'review') }; dispatch({ type: 'form', form: null }); dispatch({ type: 'run', run });
+    if (form.spec.route.transport === 'cli') {
+      runHandle.current = runCliCapability(form.spec, serializeCli(form.spec, form.values), (text, source, severity) => dispatch({ type: 'console', text, source, ...(severity ? { severity } : {}), stage: 'cli' }), (code, cancelled) => dispatch({ type: 'runDone', code, cancelled }));
+    } else if (form.spec.route.transport === 'mcp') {
+      const controller = new AbortController(); const tool = form.spec.route.tool; abortController.current = controller;
+      void callMcpTool(tool, serializeMcp(form.spec, form.values), controller.signal).then((result) => { dispatch({ type: 'console', text: result.structured ? JSON.stringify(result.structured, null, 2) : result.text || '(empty response)', source: 'mcp', severity: result.ok ? 'success' : 'error', stage: tool }); dispatch({ type: 'runDone', code: result.ok ? 0 : 1, cancelled: false }); }).catch((error: unknown) => { dispatch({ type: 'console', text: error instanceof Error ? error.message : String(error), source: 'mcp', severity: 'error', stage: tool }); dispatch({ type: 'runDone', code: 1, cancelled: controller.signal.aborted }); });
     }
   };
-
-  // Lazily load + cache the detail panel for whichever volume is highlighted.
-  useEffect(() => {
-    if (screen !== 'volumes' || !highlightedId) {
-      return;
-    }
-    const cached = detailCache.current.get(highlightedId);
-    if (cached) {
-      setDetail(cached);
-      return;
-    }
-    const loaded = loadVolumeDetail(highlightedId);
-    detailCache.current.set(highlightedId, loaded);
-    setDetail(loaded);
-  }, [screen, highlightedId]);
-
-  // Tick the elapsed timer while a run is in flight.
-  useEffect(() => {
-    if (screen === 'run' && runState?.status === 'running') {
-      const id = setInterval(() => setElapsedMs(Date.now() - runStartRef.current), 250);
-      return () => clearInterval(id);
-    }
-    return undefined;
-  }, [screen, runState?.status]);
-
-  useEffect(() => {
-    if (runState?.status !== 'running') {
-      setTerminalFocused(false);
-    }
-  }, [runState?.status]);
-
-  // Volumes/epubs are already loaded in useState initializers; just ensure the
-  // child process is torn down on unmount. (No reload here — that caused an
-  // immediate second render.)
-  useEffect(() => () => cancelRun(), []);
 
   useInput((input, key) => {
-    if (key.ctrl && input === 'c') {
-      cancelRun();
-      exit();
+    const special = key as Key & { pageUp?: boolean; pageDown?: boolean; home?: boolean; end?: boolean };
+    if (key.ctrl && input === 'c') { if (workspace.run?.status === 'running') stopRun(); else exit(); return; }
+    if (workspace.cancelConfirm) { if (key.return) stopRun(); else if (key.escape) dispatch({ type: 'cancelConfirm', value: false }); return; }
+    if (workspace.form) {
+      const form = workspace.form; const field = form.spec.fields[form.cursor]; const setForm = (next: FormState): void => dispatch({ type: 'form', form: next });
+      if (key.escape) { dispatch({ type: 'form', form: null }); return; }
+      if (key.upArrow) { setForm({ ...form, cursor: clamp(form.cursor - 1, form.spec.fields.length + 1), confirmation: 0, issues: [] }); return; }
+      if (key.downArrow) { setForm({ ...form, cursor: clamp(form.cursor + 1, form.spec.fields.length + 1), confirmation: 0, issues: [] }); return; }
+      if (form.cursor === form.spec.fields.length) {
+        if (key.return) { const risk = effectiveRisk(form.spec, form.values); if (form.confirmation === 0) setForm({ ...form, confirmation: 1, issues: [] }); else if (risk === 'overwrite' && form.confirmation === 1) setForm({ ...form, confirmation: 2 }); else launch(form); } return;
+      }
+      if (!field) return;
+      const value = form.values[field.key];
+      if ((field.kind === 'boolean' && (input === ' ' || key.return))) { setForm({ ...form, values: { ...form.values, [field.key]: value !== true }, confirmation: 0, issues: [] }); return; }
+      if (field.kind === 'enum' && (input === ' ' || key.return)) { const choices = field.choices ?? []; const current = choices.indexOf(String(value ?? '')); setForm({ ...form, values: { ...form.values, [field.key]: choices[(current + 1) % Math.max(1, choices.length)] ?? '' }, confirmation: 0, issues: [] }); return; }
+      if (field.kind === 'chapter-list' && input === 'a' && workspace.activeVolume) { setForm({ ...form, values: { ...form.values, [field.key]: listChapters(workspace.activeVolume).join(',') }, confirmation: 0, issues: [] }); return; }
+      if (key.backspace || key.delete) { setForm({ ...form, values: { ...form.values, [field.key]: String(value ?? '').slice(0, -1) }, confirmation: 0, issues: [] }); return; }
+      if (printable(input, key)) setForm({ ...form, values: { ...form.values, [field.key]: String(value ?? '') + input }, confirmation: 0, issues: [] });
       return;
     }
-
-    if (screen === 'run' && key.tab) {
-      setTerminalFocused((value) => !value);
+    if (workspace.terminalFocused && workspace.nav === 'console') {
+      if (key.tab) { dispatch({ type: 'terminalFocus', value: false }); return; }
+      if (key.escape) { if (workspace.run?.console.mode === 'input') dispatch({ type: 'consoleMode', mode: 'browse' }); else if (workspace.run?.status === 'running') dispatch({ type: 'cancelConfirm', value: true }); else dispatch({ type: 'terminalFocus', value: false }); return; }
+      if (key.upArrow) dispatch({ type: 'consoleBrowse', delta: 1, viewport: rows - 9 }); else if (key.downArrow) dispatch({ type: 'consoleBrowse', delta: -1, viewport: rows - 9 }); else if (special.pageUp) dispatch({ type: 'consoleBrowse', delta: rows - 9, viewport: rows - 9 }); else if (special.pageDown) dispatch({ type: 'consoleBrowse', delta: -(rows - 9), viewport: rows - 9 }); else if (special.home) dispatch({ type: 'consoleJump', destination: 'home', viewport: rows - 9 }); else if (special.end || input === 'f') dispatch({ type: 'consoleJump', destination: 'end', viewport: rows - 9 }); else if (input === 'i' && workspace.run?.capability.route.transport === 'cli') dispatch({ type: 'consoleMode', mode: 'input' }); else if (workspace.run?.console.mode === 'input') { if (key.return) runHandle.current?.write('\r'); else if (key.backspace) runHandle.current?.write('\x7f'); else if (printable(input, key)) runHandle.current?.write(input); }
       return;
     }
-
-    if (screen === 'run' && terminalFocused) {
-      const data = terminalInput(input, key);
-      if (data !== null) {
-        runHandleRef.current?.write(data);
-      }
-      return;
-    }
-
-    if (key.escape) {
-      if (filtering) {
-        setFiltering(false);
-        setFilter('');
-        return;
-      }
-      if (filter) {
-        setFilter('');
-        return;
-      }
-      if (screen === 'home') {
-        exit();
-        return;
-      }
-      if (screen === 'run') {
-        cancelRun();
-        setTerminalFocused(false);
-      }
-      if (screen === 'launch') {
-        setLaunch(null);
-      }
-      setPendingCommand(null);
-      setScreen('home');
-      return;
-    }
-
-    if (screen === 'home') {
-      if (key.upArrow) {
-        setHomeIndex((value) => clamp(value - 1, homeItems.length));
-      } else if (key.downArrow) {
-        setHomeIndex((value) => clamp(value + 1, homeItems.length));
-      } else if (key.return) {
-        const item = homeItems[homeIndex];
-        if (!item) {
-          return;
-        }
-        switch (item.id) {
-          case 'commands':
-            enterScreen('commands');
-            break;
-          case 'volumes':
-            enterScreen('volumes');
-            break;
-          case 'refresh':
-            refresh();
-            break;
-          case 'legacy':
-            onRequestLegacy();
-            break;
-          case 'exit':
-            exit();
-            break;
-        }
-      }
-      return;
-    }
-
-    if (screen === 'launch' && launch) {
-      const flagCount = launch.command.flags?.length ?? 0;
-      const rowCount = flagCount + 1;
-      if (key.upArrow) {
-        setLaunch({ ...launch, cursor: clamp(launch.cursor - 1, rowCount) });
-      } else if (key.downArrow) {
-        setLaunch({ ...launch, cursor: clamp(launch.cursor + 1, rowCount) });
-      } else if (input === ' ' && launch.cursor < flagCount) {
-        setLaunch({ ...launch, flags: launch.flags.map((v, i) => (i === launch.cursor ? !v : v)), confirm: false });
-      } else if (key.return) {
-        if (launch.cursor < flagCount) {
-          setLaunch({ ...launch, flags: launch.flags.map((v, i) => (i === launch.cursor ? !v : v)), confirm: false });
-        } else if (launch.command.risk === 'high' && !launch.confirm) {
-          setLaunch({ ...launch, confirm: true });
-        } else {
-          executeLaunch(launch);
-        }
-      }
-      return;
-    }
-
-    const isListScreen = screen === 'commands' || screen === 'volumes' || screen === 'epubs';
-    if (isListScreen) {
-      const length =
-        screen === 'commands' ? visibleCommands.length : screen === 'volumes' ? visibleVolumes.length : visibleEpubs.length;
-      const setIndex =
-        screen === 'commands' ? setCommandIndex : screen === 'volumes' ? setVolumeIndex : setEpubIndex;
-
-      if (filtering) {
-        if (key.backspace || key.delete) {
-          setFilter((value) => value.slice(0, -1));
-          setIndex(0);
-        } else if (key.return) {
-          selectCurrent();
-        } else if (key.upArrow) {
-          setIndex((value) => clamp(value - 1, length));
-        } else if (key.downArrow) {
-          setIndex((value) => clamp(value + 1, length));
-        } else if (isPrintable(input, key)) {
-          setFilter((value) => value + input);
-          setIndex(0);
-        }
-        return;
-      }
-
-      if (input === '/') {
-        setFiltering(true);
-      } else if (key.upArrow) {
-        setIndex((value) => clamp(value - 1, length));
-      } else if (key.downArrow) {
-        setIndex((value) => clamp(value + 1, length));
-      } else if (input === 'g') {
-        setIndex(0);
-      } else if (input === 'G') {
-        setIndex(clamp(length - 1, length));
-      } else if (input === 's' && screen === 'volumes') {
-        setSortMode((mode) => SORT_ORDER[(SORT_ORDER.indexOf(mode) + 1) % SORT_ORDER.length] ?? 'recent');
-        setVolumeIndex(0);
-      } else if (key.return) {
-        selectCurrent();
-      }
+    if (key.tab && workspace.nav === 'console') { dispatch({ type: 'terminalFocus', value: true }); return; }
+    if (key.escape) { if (workspace.run?.status === 'running' && workspace.nav === 'console') dispatch({ type: 'cancelConfirm', value: true }); else if (workspace.searching || workspace.search) dispatch({ type: 'search', value: '', active: false }); else exit(); return; }
+    if (input === '/') { dispatch({ type: 'search', value: '', active: true }); return; }
+    if (workspace.searching) { if (key.backspace || key.delete) dispatch({ type: 'search', value: workspace.search.slice(0, -1), active: true }); else if (printable(input, key)) dispatch({ type: 'search', value: workspace.search + input, active: true }); else if (key.return) dispatch({ type: 'search', value: workspace.search, active: false }); return; }
+    if (key.leftArrow || input === '[') { dispatch({ type: 'nav', nav: NAV[clamp(workspace.navIndex - 1, NAV.length)]!.id, navIndex: clamp(workspace.navIndex - 1, NAV.length) }); return; }
+    if (key.rightArrow || input === ']') { dispatch({ type: 'nav', nav: NAV[clamp(workspace.navIndex + 1, NAV.length)]!.id, navIndex: clamp(workspace.navIndex + 1, NAV.length) }); return; }
+    if (key.upArrow) { dispatch({ type: 'item', index: Math.max(0, workspace.itemIndex - 1) }); return; }
+    if (key.downArrow) { const length = workspace.nav === 'volumes' ? volumeItems.length : workspace.nav === 'inputs' ? epubs.length : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? filteredItems.length : NAV.length; dispatch({ type: 'item', index: clamp(workspace.itemIndex + 1, length) }); return; }
+    if (input === 'r') { refresh(); return; }
+    if (input === 's' && workspace.nav === 'volumes') { dispatch({ type: 'sort', value: workspace.sort === 'recent' ? 'series' : workspace.sort === 'series' ? 'progress' : 'recent' }); return; }
+    if (key.return) {
+      if (workspace.nav === 'dashboard') { const item = NAV[workspace.itemIndex] ?? NAV[0]!; dispatch({ type: 'nav', nav: item.id, navIndex: NAV.findIndex((candidate) => candidate.id === item.id) }); }
+      else if (workspace.nav === 'workflows' || workspace.nav === 'advanced') { const item = filteredItems[workspace.itemIndex]; if (item) openForm(item); }
+      else if (workspace.nav === 'volumes') { const item = volumeItems[workspace.itemIndex]; if (item) dispatch({ type: 'activeVolume', id: item.id }); }
+      else if (workspace.nav === 'inputs') { const item = epubs[workspace.itemIndex]; const extract = CLI_CAPABILITIES.find((capability) => capability.id === 'extract'); if (item && extract) openForm(extract, { ...initialValues(extract, workspace.activeVolume), epub_path: item }); }
     }
   });
 
-  const trail = trailFor(screen, launch);
-  const hint = hintFor(screen, filtering);
-
-  return (
-    <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden">
-      <Header selectedVolume={selectedVolume} trail={trail} />
-
-      <Box flexDirection="column" flexGrow={1} overflow="hidden">
-      {screen === 'home' && (
-        <>
-          <Dashboard volumes={volumes} />
-          <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginTop={1}>
-            <Text bold>Home</Text>
-            <ScrollList
-              items={homeItems}
-              selected={homeIndex}
-              windowSize={homeItems.length}
-              render={(item, active) => (
-                <Box key={item.id} flexDirection="column">
-                  <Text inverse={active} color={active ? 'cyan' : 'white'}>
-                    {' '}{item.label}{' '}
-                  </Text>
-                  {active && <Text color="gray">   {item.detail}</Text>}
-                </Box>
-              )}
-            />
-          </Box>
-        </>
-      )}
-
-      {screen === 'commands' && (
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginTop={1}>
-          <Text bold>Command Palette</Text>
-          <FilterLine filtering={filtering} filter={filter} count={visibleCommands.length} />
-          <ScrollList
-            items={visibleCommands}
-            selected={commandIndex}
-            windowSize={listRows}
-            render={(command, active) => (
-              <Box key={command.id} flexDirection="column">
-                <Text inverse={active} color={active ? 'cyan' : 'white'} wrap="truncate-end">
-                  {' '}{command.label} <Text color={riskColor(command.risk)}>[{command.risk}]</Text>{' '}
-                </Text>
-                {active && <Text color="gray" wrap="truncate-end">   {command.detail}</Text>}
-              </Box>
-            )}
-          />
-        </Box>
-      )}
-
-      {screen === 'volumes' && (
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginTop={1}>
-          <Text bold>{pendingCommand ? `Select Volume · ${pendingCommand.label}` : 'Volume Workbench'}</Text>
-          <FilterLine filtering={filtering} filter={filter} count={visibleVolumes.length} sort={sortMode} />
-          <Box flexDirection="row">
-            <Box flexDirection="column" width="55%">
-              <ScrollList
-                items={visibleVolumes}
-                selected={volumeIndex}
-                windowSize={volumeRows}
-                render={(volume, active) => (
-                  <Box key={volume.id} flexDirection="column">
-                    <Text inverse={active} color={active ? 'cyan' : 'white'} wrap="truncate-end">
-                      {' '}{volume.title} {!volume.hasEnTitle ? '·JP' : ''}
-                    </Text>
-                    <Text color="gray" wrap="truncate-end">
-                      {'   '}{volume.translatedCount}/{volume.chapterCount} ch · {volume.author}
-                    </Text>
-                  </Box>
-                )}
-              />
-            </Box>
-            <Box flexDirection="column" width="45%">
-              <DetailPanel volume={highlightedVolume} detail={detail} />
-            </Box>
-          </Box>
-        </Box>
-      )}
-
-      {screen === 'epubs' && (
-        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginTop={1}>
-          <Text bold>{pendingCommand ? `Select EPUB · ${pendingCommand.label}` : 'EPUB Inputs'}</Text>
-          <FilterLine filtering={filtering} filter={filter} count={visibleEpubs.length} />
-          <ScrollList
-            items={visibleEpubs}
-            selected={epubIndex}
-            windowSize={listRows}
-            render={(file, active) => (
-              <Text key={file} inverse={active} color={active ? 'cyan' : 'white'} wrap="truncate-end">
-                {' '}{basename(file)}{' '}
-              </Text>
-            )}
-          />
-        </Box>
-      )}
-
-      {screen === 'launch' && launch && <LaunchView launch={launch} python="python" />}
-
-      {screen === 'run' && runState && (
-        <RunView
-          runState={runState}
-          elapsedMs={elapsedMs}
-          logRows={logRows}
-          terminalFocused={terminalFocused}
-        />
-      )}
-      </Box>
-
-      <Footer hint={hint} />
-    </Box>
-  );
+  const dashboard = <Box flexDirection="column"><Text bold>Operator dashboard</Text><Text color="gray">{volumes.length} volume(s), {epubs.length} EPUB input(s). `list` and `status` are views now; spawning Python to read a directory was never a feature.</Text>{NAV.map((item, index) => <Text key={item.id} inverse={workspace.itemIndex === index}>{' '}{item.label}{' '}</Text>)}</Box>;
+  const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'inputs' ? <Box flexDirection="column"><Text bold>Project EPUB inputs</Text>{epubs.map((file, index) => <Text key={file} inverse={workspace.itemIndex === index}>{' '}{basename(file)}{' '}</Text>) || <Text color="yellow">raw/ is empty. Put an EPUB there; the picker only exposes project-scoped inputs.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
+  const inspector = <Inspector volume={activeVolume} />;
+  return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header workspace={workspace} preflight={preflight} columns={columns} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && <Navigation workspace={workspace} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' ? 0 : 1}>{layout === 'single-pane' && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">↑↓ move · Enter select · / search · r refresh · Tab terminal focus · Ctrl+C abort/exit</Text></Box>;
 }
