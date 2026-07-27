@@ -3532,7 +3532,15 @@ def run_librarian(
 # CLI interface
 if __name__ == "__main__":
     import argparse
+    from src.common.config import ensure_utf8_console
     from .config import get_target_language
+
+    # Runs as its own subprocess (see mcp/servers/librarian_server.py's
+    # run_module) with the same Windows charmap-stdout crash risk as
+    # scripts/mtl.py — this print()s JP titles too. Safe to touch stdout
+    # here: this module is never imported in-process by the MCP server,
+    # only ever run standalone via `-m src.librarian.agent`.
+    ensure_utf8_console()
 
     # Get default target language from config.yaml
     default_target = get_target_language()

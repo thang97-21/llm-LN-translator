@@ -8,8 +8,9 @@ feature flags, no grammar RAG / vector store / world policy references.
 """
 
 import os
+import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Sequence
 import yaml
 
 from dotenv import load_dotenv
@@ -103,6 +104,31 @@ REMOVE_RUBY_TAGS = True
 def get_target_language() -> str:
     """Always 'en' — DeepSeek_MTLS is an English-only lightweight client."""
     return "en"
+
+
+def ensure_utf8_console(streams: Sequence[str] = ("stdout", "stderr")) -> None:
+    """
+    Force the named std stream(s) to UTF-8.
+
+    Windows hands a redirected/piped stdout the console's ANSI codepage
+    ('charmap') by default, which crashes the instant a print() call hits a
+    JP character — chapter titles, character names, anything the Librarian
+    or Builder logs. `errors="replace"` is belt-and-suspenders only; UTF-8
+    itself covers the full JP text these processes ever print.
+
+    NOT applied automatically at import time. `src/mcp/server.py`'s stdout
+    is a JSON-RPC channel that must never be touched — only entry points
+    that print plain human-readable text (scripts/mtl.py, the librarian/
+    builder `__main__` subprocess entry points) should call this, and the
+    MCP server should only ever pass `("stderr",)` for its own logging.
+    """
+    for name in streams:
+        stream = getattr(sys, name, None)
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
 
 
 def get_language_config(target_language: str = None) -> Dict[str, Any]:

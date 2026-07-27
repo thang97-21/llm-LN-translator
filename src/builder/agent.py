@@ -2658,6 +2658,15 @@ def run_builder(
 if __name__ == "__main__":
     import argparse
 
+    from src.common.config import ensure_utf8_console
+
+    # Runs as its own subprocess (see mcp/servers/builder_server.py's
+    # run_module) with the same Windows charmap-stdout crash risk as
+    # scripts/mtl.py — chapter titles and error text can carry JP. Safe to
+    # touch stdout here: never imported in-process by the MCP server, only
+    # ever run standalone via `-m src.builder.agent`.
+    ensure_utf8_console()
+
     parser = argparse.ArgumentParser(
         description="Builder Agent - Assemble EPUB from translated content"
     )

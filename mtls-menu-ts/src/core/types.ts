@@ -72,7 +72,7 @@ export type FieldSpec = {
 
 export type CliRoute = { transport: 'cli'; command: string };
 export type McpRoute = { transport: 'mcp'; tool: string };
-export type LocalRoute = { transport: 'local'; view: 'dashboard' | 'volumes' | 'inputs' | 'diagnostics' };
+export type LocalRoute = { transport: 'local'; view: 'dashboard' | 'volumes' | 'diagnostics' };
 export type CapabilityRoute = CliRoute | McpRoute | LocalRoute;
 
 export type CapabilitySpec = {

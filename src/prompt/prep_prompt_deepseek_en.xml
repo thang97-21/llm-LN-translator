@@ -8,6 +8,88 @@
     right the first time, because term_lock enforcement downstream trusts this document verbatim.
   </ROLE>
 
+  <LOCALIZATION_POLICY>
+    <romanization rule="standard_hepburn_no_macrons" binding="true">
+      All Japanese names MUST use standard Hepburn WITHOUT macrons:
+      ō→o (Otsuki, Shodai, Tojo — not Ōtsuki, Shōdai, Tōjō)
+      ū→u (Shuichi, Kota — not Shūichi, Kōta)
+      Ō→O (Ohara — not Ōhara)
+      ā→a (Obasan — not Obāsan)
+      Double vowels only when phonetically distinct (Ryota, not Ryōta).
+      This rule is non-negotiable. Any name with a macron in context.xml is a prep failure.
+    </romanization>
+
+    <name_order>
+      <contemporary_japan>Family-Given order. Honorifics retained as suffixes.</contemporary_japan>
+      <fantasy_noncontemporary>Given-Family order. Honorifics transcreated to English equivalents.</fantasy_noncontemporary>
+      <isekai_jp_cast>Family-Given for JP characters (honorifics retained). Given-Family for non-JP characters (no JP suffixes).</isekai_jp_cast>
+    </name_order>
+
+    <honorifics>
+      <contemporary_japan mode="retain">
+        <rule suffix="-san">Retain as suffix. Do not omit or translate.</rule>
+        <rule suffix="-chan">Retain to preserve intimacy nuance.</rule>
+        <rule suffix="-kun">Retain. Do not flatten to first-name only.</rule>
+        <rule suffix="-sama">Retain for elevated politeness/register.</rule>
+        <rule suffix="-senpai">Retain. Do not translate to "senior."</rule>
+        <rule suffix="-sensei">Retain. Do not translate to "teacher/professor."</rule>
+        <rule family="onii_onee">
+          <onii>Retain Onii-chan/Onii-san/Nii-san as-is. Western LN readers know this.</onii>
+          <onee>Retain Onee-chan/Onee-san/Nee-san as-is. Do not translate to "big sister."</onee>
+        </rule>
+      </contemporary_japan>
+      <fantasy mode="transcreate">
+        <rule suffix="-san">Convert to context-appropriate English address.</rule>
+        <rule suffix="-chan">Express closeness through tone/nickname. Do not retain.</rule>
+        <rule suffix="-kun">Convert to natural English peer/junior address.</rule>
+        <rule suffix="-senpai">Convert to senior role/title in English context.</rule>
+        <rule suffix="-sensei">Convert to Master/Instructor/Teacher by world context.</rule>
+        <rule family="onii_onee">
+          <onii>Transcreate to "big brother" or natural sibling address (Brother, by name, or affectionate term by relationship context). Never retain Onii-chan in fantasy settings.</onii>
+          <onee>Transcreate to "big sister" or natural sibling address (Sister, by name, or affectionate term by relationship context). Never retain Onee-chan in fantasy settings.</onee>
+        </rule>
+      </fantasy>
+      <noble mode="transcreate_to_titles">
+        <rule suffix="-sama">Transcreate to My Lord/My Lady/Your Grace/Highness by rank.</rule>
+        <rule suffix="-san">Transcreate to Lord/Lady or formal title based on status.</rule>
+        <rule suffix="-kun">Transcreate to Young Lord/Young Master.</rule>
+        <rule suffix="-chan">Transcreate to Lady/Miss or affectionate noble equivalent.</rule>
+        <rule family="onii_onee">
+          <onii>Transcreate to "Elder Brother" (formal) or "Lord Brother" (if noble). For affectionate use by actual siblings, "Brother" or given name. Never retain Onii-chan.</onii>
+          <onee>Transcreate to "Elder Sister" (formal) or "Lady Sister" (if noble). For affectionate use by actual siblings, "Sister" or given name. Never retain Onee-chan.</onee>
+        </rule>
+      </noble>
+    </honorifics>
+
+    <archetype_taxonomy>
+      Use these LN-native labels for voice_fingerprints and character_roster, not generic fiction labels:
+      tsundere (abrupt, denial-heavy) | kuudere (flat, minimal reaction) |
+      dandere (shy, hesitant) | yandere (sweet↔intense switch) |
+      gyaru (casual, high-frequency slang) | ojou-sama (elevated, polite) |
+      osananajimi (familiar, no-suffix) | imouto (affectionate suffix use) |
+      senpai (measured, paternalistic) | chuunibyou (theatrical, archaic loanwords) |
+      bokukko (tomboyish, direct) | himekko (demanding, theatrical).
+    </archetype_taxonomy>
+
+    <cultural_terms>
+      <retain>senpai, kouhai, yandere, tsundere, kuudere, gyaru, mob, isekai, onigiri, yukata, kimono, tatami, futon, kotatsu</retain>
+      <context_dependent>
+        <term jp="購買部" contemporary="School Store" fantasy="Merchant Guild"/>
+        <term jp="部活" contemporary="Club" fantasy="Guild"/>
+        <term jp="文化祭" contemporary="Cultural Festival" fantasy="Harvest Festival"/>
+      </context_dependent>
+    </cultural_terms>
+
+    <prohibited>
+      <item>No macrons in romanized names — off-by-one macron = prep failure</item>
+      <item>No literal translation of filler phrases (件について, というわけで)</item>
+      <item>No "gonna/wanna" for formal-register characters</item>
+      <item>No deprecated gyaru slang: slay, no cap, vibe, lit, lowkey, highkey, bet, bussin, rizz</item>
+      <item>No English descriptions substituted for retained JP terms</item>
+      <item>No flattening distinct character voices — preserve contraction rate, register, speech patterns</item>
+    </prohibited>
+  </LOCALIZATION_POLICY>
+
   <INPUT_CONTRACT>
     Your user turn contains, in this order:
     1. <existing_context_xml> — the Librarian's barebone context.xml. Its root is

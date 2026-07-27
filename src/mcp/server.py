@@ -70,6 +70,15 @@ def create_mcp_server() -> Any:
 
 def main() -> None:
     """Entrypoint used by `python -m src.mcp.server`."""
+    # stderr ONLY, never stdout — stdout is the JSON-RPC channel the stdio
+    # transport owns; touching its encoding is not this function's call to
+    # make. stderr carries this process's own logging (prep/translator/qc/
+    # bible all log via `logger.info`, which can embed JP chapter titles or
+    # character names) plus the print() a few lines down — same Windows
+    # charmap crash as scripts/mtl.py, different stream.
+    from src.common.config import ensure_utf8_console
+    ensure_utf8_console(("stderr",))
+
     try:
         mcp = create_mcp_server()
     except Exception as exc:

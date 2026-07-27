@@ -1,7 +1,4 @@
-# DeepSeek_MTLS — Lightweight LN Translation Client
-
-> *"A stripped-down pipeline is still a pipeline. Do try to keep up."*
-> — **Tennouji Mirei**, Heiress of the Tennouji Group
+# DeepSeek MTLS — Lightweight LN Translation Client
 
 **DeepSeek V4 Pro-exclusive** Japanese → English light novel translator. Extract, prep, translate, QC, build — and remember the series for next time. That's it.
 
@@ -14,7 +11,6 @@ A minimal, single-provider translation pipeline for Japanese light novels. It ta
 ## What It Is NOT
 
 - It does **not** depend on Gemini, Anthropic, OpenAI, Kimi, or any provider except DeepSeek V4 — extraction and EPUB assembly are deterministic (no LLM at all); prep, translation, and everything else that touches an LLM runs on DeepSeek and nothing but DeepSeek
-- It does **not** require the main MTLS pipeline — no subprocess delegation into `pipeline/pipeline/`, no ChromaDB dependency, no shared config with the main pipeline
 - It does **not** require vector stores or RAG modules at runtime — the DeepSeek master prompt carries all translation policy inline, and prep is one structured API call, not a 7-phase metadata pipeline
 - It does **not** do multi-model QC fan-out — QC is filesystem-only sanity checks, zero API cost
 - It does **not** run a full publisher/author/anime-metadata bible system — the series bible here is three flat JSON files (term_lock, verbatim_anchors, series_pack), a continuity aid, not a database
@@ -131,7 +127,7 @@ AGENT:
   write_bible("HKR03", series_id="hikari") → merges into bibles/hikari/{term_lock,verbatim_anchors,series_pack}.json
   package_epub("HKR03")                    → output/hikari-vol3.epub
 
-  → "Done. 12 chapters, 94K EN words, QC passed, bible updated for volume 4. ~$9.40 total."
+  → "Done. 12 chapters, 94K EN words, QC passed, bible updated for volume 4. ~$0.20 total."
 ```
 
 The MCP server does the orchestration; the agent just calls tools in sequence. The only prerequisite is `DEEPSEEK_API_KEY` in `.env` — nothing else, no main-pipeline path to configure.
@@ -182,7 +178,7 @@ output/<vol_id>.epub          ← Finished English light novel
 
 ### The Translator — What Makes It "Bare"
 
-The original Phase 2 translator is ~2500 lines of orchestration across 45+ files. This one is ~200 lines across 4 core files:
+This one is ~200 lines across 4 core files:
 
 | File | Purpose |
 |------|---------|
@@ -191,7 +187,7 @@ The original Phase 2 translator is ~2500 lines of orchestration across 45+ files
 | `deepseek_optimization.py` | DRDI (EPS→CoT injection), DOVB (voice templates), CCT (parallel opt-in) |
 | `agent.py` | Orchestrator: load prompt → inject context.xml → per-chapter send → receive → write |
 
-Everything else — 13 RAG modules, 5 translation tools, LCI Draft-Revise loop, VREC enforcement, Koji Fox validator, ADN gate, pronoun checker, hallucination guard, cost audit, schema extraction, volume context aggregation — is **gone**. The DeepSeek master prompt carries all translation policy inline.
+Everything else is **gone**. The DeepSeek master prompt carries all translation policy inline.
 
 ### Prep — What Makes It "Unified"
 
@@ -311,7 +307,7 @@ DeepSeek_MTLS/
 │   ├── qc/                     ← Filesystem-only sanity gate (run_qc())
 │   ├── bible/                  ← Bible Writer (run_write_bible())
 │   ├── builder/                ← Phase 4: EPUB assembly (copied verbatim from main pipeline)
-│   ├── prompt/                 ← master_prompt_deepseek_en(.xml/_v2.xml), prep_prompt_deepseek_en.xml
+│   ├── prompt/                 ← master_prompt_deepseek_en(.xml/_v2.xml), prep_prompt_deepseek_en.xml, localization_policy.md
 │   └── mcp/                    ← Slim MCP server (6 tool servers, 20 tools, 2 resources)
 │       ├── server.py           ← Main MCP entry (stdio)
 │       ├── harness.py          ← Persona propagation (CLAUDE.md) + phase->tool routing (config.yaml)

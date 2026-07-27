@@ -29,7 +29,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.common.config import WORK_DIR
+from src.common.config import WORK_DIR, ensure_utf8_console
+
+# Every command here prints JP titles/names straight to stdout. On Windows,
+# a piped/redirected stdout defaults to the console's ANSI codepage, which
+# crashes on the first non-ASCII character — see ensure_utf8_console's
+# docstring. Must run before any of this module's own print() calls.
+ensure_utf8_console()
+
 from src.librarian.agent import run_librarian
 from src.builder.agent import run_builder
 from src.translator.agent import translate_volume
