@@ -63,6 +63,21 @@ function clamp(value: number, length: number): number { return Math.max(0, Math.
 function printable(input: string, key: Key): boolean { return input.length === 1 && input >= ' ' && !key.ctrl && !key.meta && !key.tab && !key.return; }
 function basename(value: string): string { return value.split(/[\\/]/).pop() ?? value; }
 function initialWorkspace(volumes: readonly VolumeSummary[]): Workspace { return { nav: 'dashboard', navIndex: 0, itemIndex: 0, configOffset: 0, activeVolume: volumes[0]?.id ?? null, search: '', searching: false, form: null, run: null, terminalFocused: false, cancelConfirm: false, sort: 'recent' }; }
+// Every capability (Prep Volume included) opens the same FormPanel, and a
+// form can be open on top of ANY nav bucket (workflows, advanced, ...) — it
+// is orthogonal to workspace.nav. The old footer only switched on nav, so
+// filling out a form still advertised list-browsing keys ('/' search,
+// 'r' refresh, 'Enter select') that don't do anything while a field has
+// focus, plus an unconditional "Ctrl+C abort" even with no run to abort.
+// FormPanel already prints its own accurate field-editing hint inline, so
+// the footer here only needs to add what that line doesn't cover.
+function footerText(workspace: Workspace): string {
+  const runHint = workspace.run?.status === 'running' ? ' · Ctrl+C abort background run' : '';
+  if (workspace.form) return `Esc closes${runHint} · Ctrl+Shift+Esc exit`;
+  if (workspace.nav === 'dashboard') return `↑↓ workspaces · Enter open · PgUp/PgDn config · Esc back${runHint} · Ctrl+Shift+Esc exit`;
+  if (workspace.nav === 'console') return workspace.run?.status === 'running' ? 'Esc back · Ctrl+C cancel run · Ctrl+Shift+Esc exit' : 'Esc back · Ctrl+Shift+Esc exit';
+  return `↑↓ move · Enter select · / search · r refresh · Esc back${runHint} · Ctrl+Shift+Esc exit`;
+}
 
 function Header({ workspace, preflight, columns, compact }: { workspace: Workspace; preflight: Preflight; columns: number; compact?: boolean }) {
   const active = workspace.activeVolume ?? 'none';
@@ -229,6 +244,6 @@ export function App() {
   const dashboard = <RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} />;
   const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} epubs={epubs} recentVolumes={recentVolumes} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
   const inspector = <Inspector volume={activeVolume} />;
-  const footer = workspace.nav === 'dashboard' ? '↑↓ workspaces · Enter open · PgUp/PgDn config · Esc back · Ctrl+Shift+Esc exit' : workspace.nav === 'console' ? (workspace.run?.status === 'running' ? 'Esc back · Ctrl+C cancel run · Ctrl+Shift+Esc exit' : 'Esc back · Ctrl+Shift+Esc exit') : '↑↓ move · Enter select · / search · r refresh · Esc back · Ctrl+C abort · Ctrl+Shift+Esc exit';
+  const footer = footerText(workspace);
   return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header workspace={workspace} preflight={preflight} columns={columns} compact={maximized} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && !maximized && <Navigation workspace={workspace} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' || maximized ? 0 : 1}>{layout === 'single-pane' && !maximized && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{!maximized && layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{!maximized && layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">{footer}</Text></Box>;
 }
