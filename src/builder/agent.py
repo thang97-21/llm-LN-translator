@@ -28,6 +28,18 @@ from .image_analyzer import get_image_dimensions, is_horizontal, analyze_kuchie_
 from .merge_translated_shards_to_spine import merge_translated_shards_to_spine
 import re
 
+# The leading H1 line every translated chapter emits ("# Chapter Title") —
+# a single '#' only, so a stray '## subheading' at the top of a chapter
+# never gets mistaken for the title.
+_CHAPTER_H1_RE = re.compile(r'^#(?!#)\s+(.+?)\s*$')
+
+# <volume_identity> fields context.xml is expected to carry for every
+# volume once prep has run — see src/prompt/prep_prompt_deepseek_en.xml's
+# volume_identity block spec. No JP fallback on any of these: an empty
+# value means prep didn't populate it, and OPF assembly should stop, not
+# guess in Japanese.
+_REQUIRED_VOLUME_IDENTITY_FIELDS = ("title_en", "series_en", "author_en", "publisher")
+
 
 # Industry-standard CSS for EPUB
 DEFAULT_CSS = '''/* Industry Standard EPUB Stylesheet */
@@ -343,24 +355,6 @@ class BuilderAgent:
             return " / ".join(parts) if parts else fallback
         text = str(value).strip()
         return text if text else fallback
-
-    @staticmethod
-    def _is_placeholder_title(value: str) -> bool:
-        """Detect metadata placeholder markers that should not be surfaced in EPUB TOC."""
-        token = str(value or "").strip().lower()
-        if not token:
-            return True
-        placeholders = {
-            "[to be filled]",
-            "to be filled",
-            "[todo]",
-            "todo",
-            "[tbd]",
-            "tbd",
-            "[placeholder]",
-            "placeholder",
-        }
-        return token in placeholders
 
     def _resolve_book_title(
         self,
@@ -690,7 +684,7 @@ class BuilderAgent:
                         print(f"     [COVER] Using kuchie as cover: {item.id}")
                         break
 
-            self._generate_opf(manifest, paths, all_items, chapter_info, cover_image_id, actual_language_code, actual_target_lang)
+            self._generate_opf(manifest, work_dir, paths, all_items, chapter_info, cover_image_id, actual_language_code)
 
             # Generate output filename
             if output_filename is None:
@@ -746,6 +740,87 @@ class BuilderAgent:
                 output_path=None,
                 error=str(e)
             )
+
+    def _load_volume_identity(self, work_dir: Path) -> Dict[str, Any]:
+        """
+        Load OPF-level book metadata from context.xml's <volume_identity>
+        block — title_en, series_en, author_en, publisher. This is the
+        block DeepSeek prep actually writes to; manifest.json's
+        metadata/metadata_en keys are, at best, a partial mirror of it
+        (prep never even copies series_en there) and are not read here.
+
+        Hard failure by design: no Japanese fallback and no placeholder
+        text. A missing context.xml or an empty required field means prep
+        hasn't produced usable metadata for this volume, and the build
+        should stop rather than ship an EPUB titled "Unknown".
+        """
+        context_path = work_dir / "context.xml"
+        if not context_path.exists():
+            raise FileNotFoundError(
+                f"context.xml not found: {context_path} — run prep before build; "
+                "OPF metadata no longer falls back to manifest.json"
+            )
+
+        try:
+            root = ET.parse(context_path).getroot()
+        except ET.ParseError as exc:
+            raise ValueError(f"context.xml at {context_path} is not valid XML: {exc}") from exc
+
+        volume_identity = root.find("volume_identity")
+        if volume_identity is None:
+            raise ValueError(f"context.xml at {context_path} has no <volume_identity> block")
+
+        resolved: Dict[str, Any] = {}
+        for field_name in _REQUIRED_VOLUME_IDENTITY_FIELDS:
+            node = volume_identity.find(field_name)
+            text = (node.text or "").strip() if node is not None else ""
+            if not text:
+                raise ValueError(
+                    f"context.xml <volume_identity>/<{field_name}> is missing or empty at "
+                    f"{context_path} — prep must populate this before build can run"
+                )
+            resolved[field_name] = text
+
+        # volume_number backs series_index (OPF <meta name="calibre:series_index">),
+        # which the user's spec didn't name as a required field — parse it on a
+        # best-effort basis rather than hard-failing the whole build over it.
+        volume_number_node = volume_identity.find("volume_number")
+        volume_number_text = (volume_number_node.text or "").strip() if volume_number_node is not None else ""
+        try:
+            resolved["volume_number"] = int(volume_number_text) if volume_number_text else None
+        except ValueError:
+            resolved["volume_number"] = None
+
+        return resolved
+
+    def _extract_chapter_h1_title(self, md_content: str, source_label: str) -> str:
+        """
+        The chapter's EN title is the leading '# Title' line DeepSeek now
+        emits at the top of every translated chapter, not a manifest.json
+        chapter field. Leading blank lines are tolerated; once real body
+        content starts, a later '#' is body text, not a title marker.
+
+        Hard failure by design: no Japanese fallback and no "Chapter N"
+        placeholder. A missing H1 means the translated output is malformed
+        and the build should stop, not silently mislabel the chapter.
+        """
+        for line in md_content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            match = _CHAPTER_H1_RE.match(stripped)
+            if not match:
+                break
+            title = match.group(1).strip()
+            if title:
+                return title
+            break
+
+        raise ValueError(
+            f"{source_label}: no leading H1 chapter title ('# Title') found in the "
+            "translated markdown — required now that chapter titles come from EN "
+            "output instead of manifest.json"
+        )
 
     def _load_manifest(self, work_dir: Path) -> dict:
         """Load manifest.json from work directory."""
@@ -955,16 +1030,6 @@ class BuilderAgent:
         translated_dir = work_dir / target_language.upper()
         jp_dir = work_dir / "JP"  # Fallback if translated dir not available
 
-        # Optional richer chapter metadata map (metadata_en.chapters.*) for
-        # volumes where chapter-level title_en was omitted from manifest.chapters.
-        translated_meta_chapters: Dict[str, Dict[str, Any]] = {}
-        if isinstance(metadata_translated, dict):
-            raw_meta_chapters = metadata_translated.get("chapters", {})
-            if isinstance(raw_meta_chapters, dict):
-                for meta_id, meta_entry in raw_meta_chapters.items():
-                    if isinstance(meta_entry, dict):
-                        translated_meta_chapters[str(meta_id).strip()] = meta_entry
-
         manifest_items = []
         chapter_info = []  # For navigation
 
@@ -1001,26 +1066,6 @@ class BuilderAgent:
             chapter_id = self._coerce_text(primary.get('id', f'chapter_{i+1:02d}'), f'chapter_{i+1:02d}')
             source_file = self._coerce_text(primary.get('source_file', ''), '')
 
-            # Prioritize language-specific chapter title
-            chapter_title_key = f'title_{target_language}'
-            chapter_meta = translated_meta_chapters.get(chapter_id, {})
-            metadata_title = self._coerce_text(
-                chapter_meta.get(chapter_title_key)
-                or chapter_meta.get('title_english')
-                or chapter_meta.get('title_en')
-                or chapter_meta.get('title'),
-                '',
-            )
-            raw_title = (
-                primary.get(chapter_title_key)
-                or primary.get('title_english')
-                or primary.get('title_en')
-                or (metadata_title if not self._is_placeholder_title(metadata_title) else '')
-                or primary.get('title')
-                or f'Chapter {i+1}'
-            )
-            title = self._coerce_text(raw_title, f'Chapter {i+1}')
-
             # Skip non-content entries (cover/kuchie placeholders)
             if not source_file:
                 continue
@@ -1044,6 +1089,13 @@ class BuilderAgent:
                 continue
 
             md_content = '\n\n'.join(chunk for chunk in merged_markdown_chunks if chunk)
+
+            # Chapter title comes from the translated output itself, not
+            # manifest.json — DeepSeek now emits a consistent leading H1 on
+            # every chapter, so that line is the title.
+            title = self._extract_chapter_h1_title(
+                md_content, source_label=f"{chapter_id} ({source_file or 'merged batch'})"
+            )
 
             # Use pre-detected header from lookup (auto-detected in build_epub)
             # Fall back to extraction only if no pre-detected headers provided
@@ -2386,111 +2438,23 @@ class BuilderAgent:
     def _generate_opf(
         self,
         manifest: dict,
+        work_dir: Path,
         paths: EPUBPaths,
         all_items: List[ManifestItem],
         chapter_info: List[dict],
         cover_image_id: Optional[str],
         language_code: str,
-        target_language: str
     ) -> None:
         """Generate package.opf file."""
-        metadata_jp = manifest.get('metadata', {})
-        # Get language-specific metadata
-        metadata_key = f'metadata_{target_language}'
-        metadata_translated = manifest.get(metadata_key) or manifest.get('metadata_en', {})
+        volume_identity = self._load_volume_identity(work_dir)
 
-        # Get series field in target language
-        series_key = f'series_{target_language}'
-        
-        # Support v3.5/v3.7 nested schema for author/publisher/title
-        series_data = metadata_jp.get('series', {})
-        if isinstance(series_data, dict) and ('author' in series_data or 'title' in series_data or 'title_english' in series_data):
-            # v3.5/v3.7 schema with nested series dict
-            
-            # Extract author (handle both string and dict formats for v3.7)
-            author_data = series_data.get('author', '')
-            if isinstance(author_data, dict):
-                # v3.7 format: author is a dict with name_english, name_japanese, etc.
-                jp_author = author_data.get('name_english') or author_data.get('name_romaji') or author_data.get('name_japanese') or ''
-            else:
-                # v3.5 format: author is a string
-                jp_author = author_data
-            
-            # Extract publisher (handle both string and dict formats for v3.7)
-            publisher_data = series_data.get('publisher', '')
-            if isinstance(publisher_data, dict):
-                # v3.7 format: publisher is a dict with name_english, etc.
-                jp_publisher = publisher_data.get('name_english') or publisher_data.get('name_japanese') or ''
-            else:
-                # v3.5 format: publisher is a string
-                jp_publisher = publisher_data
-            
-            # Extract title - check v3.7 format first (title_english directly in series)
-            if 'title_english' in series_data:
-                # v3.7 format: title fields directly in series
-                if target_language == 'en':
-                    jp_title = series_data.get('title_english') or series_data.get('title_romaji') or 'Unknown'
-                else:
-                    jp_title = series_data.get(f'title_{target_language}') or series_data.get('title_english') or 'Unknown'
-                jp_series = series_data.get('title_japanese', '')
-            else:
-                # v3.5 nested format or v3.6 string format
-                series_title = series_data.get('title', {})
-                if isinstance(series_title, dict) and series_title:  # Non-empty dict
-                    if target_language == 'en':
-                        jp_title = series_title.get('english') or series_title.get('romaji') or 'Unknown'
-                    else:
-                        jp_title = series_title.get(target_language) or series_title.get('english') or series_title.get('romaji') or 'Unknown'
-                    jp_series = series_title.get('japanese', '')
-                else:
-                    # series_title is a string
-                    jp_title = metadata_jp.get('title', '')
-                    jp_series = series_data if isinstance(series_data, str) else ''
-        else:
-            # v3.0 schema or series is a string
-            jp_author = metadata_jp.get('author', '')
-            jp_publisher = metadata_jp.get('publisher', '')
-            jp_title = metadata_jp.get('title', '')
-            jp_series = series_data if isinstance(series_data, str) else metadata_jp.get('series', '')
-        
-        # Build BookMetadata using target language fields
-        # Handle series_index from either v3.0 or v3.5 schema
-        series_index = metadata_jp.get('series_index')
-        if not series_index and isinstance(series_data, dict):
-            series_index = series_data.get('volume_number')
-        
-        # Extract series string from metadata, handling both string and dict formats
-        series_value = metadata_translated.get(series_key) or metadata_translated.get('series_en') or jp_series
-        # If series is still a dict (from metadata or metadata_en), extract the appropriate language
-        if isinstance(series_value, dict):
-            if target_language == 'en':
-                series_value = series_value.get('title_english') or series_value.get('english') or series_value.get('title_romaji') or series_value.get('romaji') or ''
-            else:
-                series_value = series_value.get(f'title_{target_language}') or series_value.get(target_language) or series_value.get('title_english') or series_value.get('english') or ''
-        
         book_metadata = BookMetadata(
-            title=self._resolve_book_title(
-                manifest=manifest,
-                metadata_jp=metadata_jp,
-                metadata_translated=metadata_translated,
-                target_language=target_language,
-                fallback='Unknown',
-            ),
-            author=self._resolve_translated_book_field(
-                metadata_translated=metadata_translated,
-                target_language=target_language,
-                field_name='author',
-                jp_fallback=self._coerce_text(jp_author, ''),
-            ),
+            title=volume_identity['title_en'],
+            author=volume_identity['author_en'],
             language=language_code,
-            publisher=self._resolve_translated_book_field(
-                metadata_translated=metadata_translated,
-                target_language=target_language,
-                field_name='publisher',
-                jp_fallback=self._coerce_text(jp_publisher, ''),
-            ),
-            series=self._coerce_text(series_value, ''),
-            series_index=series_index,
+            publisher=volume_identity['publisher'],
+            series=volume_identity['series_en'],
+            series_index=volume_identity['volume_number'],
             identifier=self._coerce_text(manifest.get('volume_id', ''), '')
         )
 
