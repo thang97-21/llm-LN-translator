@@ -10,6 +10,7 @@ import { runPreflight } from '../core/preflight.js';
 import type { CapabilitySpec, ConsoleSeverity, FormValues, Preflight, RunHandle, RunState, SortMode, VolumeSummary } from '../core/types.js';
 import { Badge, PhaseStrip, ProgressBar, riskColor } from './components.js';
 import { layoutForColumns } from './layout.js';
+import { useMouseScroll } from './useMouseScroll.js';
 import { useTerminalSize } from './useTerminalSize.js';
 
 type Nav = 'dashboard' | 'workflows' | 'volumes' | 'advanced' | 'console' | 'diagnostics';
@@ -63,11 +64,16 @@ function printable(input: string, key: Key): boolean { return input.length === 1
 function basename(value: string): string { return value.split(/[\\/]/).pop() ?? value; }
 function initialWorkspace(volumes: readonly VolumeSummary[]): Workspace { return { nav: 'dashboard', navIndex: 0, itemIndex: 0, configOffset: 0, activeVolume: volumes[0]?.id ?? null, search: '', searching: false, form: null, run: null, terminalFocused: false, cancelConfirm: false, sort: 'recent' }; }
 
-function Header({ workspace, preflight, columns }: { workspace: Workspace; preflight: Preflight; columns: number }) {
+function Header({ workspace, preflight, columns, compact }: { workspace: Workspace; preflight: Preflight; columns: number; compact?: boolean }) {
   const active = workspace.activeVolume ?? 'none';
+  const status = <Text wrap="truncate-end">volume: <Text color={workspace.activeVolume ? 'green' : 'yellow'}>{active}</Text> · python <Badge label={preflight.pythonStatus} color={preflight.pythonStatus === 'ready' ? 'green' : 'red'} /> · MCP <Badge label={preflight.mcpStatus} color={preflight.mcpStatus === 'ready' ? 'green' : preflight.mcpStatus === 'checking' ? 'yellow' : 'red'} /> · API key <Badge label={preflight.apiKeyPresent ? 'present' : 'missing'} color={preflight.apiKeyPresent ? 'green' : 'yellow'} /></Text>;
+  // The Console screen only ever shows the console — 3 chrome rows saved
+  // here (title row + both borders) is 3 more lines of scrollback visible
+  // without touching ConsolePanel itself. Same status line either way.
+  if (compact) return status;
   return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
     <Box justifyContent="space-between"><Text bold color="cyan">DeepSeek_MTLS · Operator Console</Text><Text color="gray">{layoutForColumns(columns)}</Text></Box>
-    <Text wrap="truncate-end">volume: <Text color={workspace.activeVolume ? 'green' : 'yellow'}>{active}</Text> · python <Badge label={preflight.pythonStatus} color={preflight.pythonStatus === 'ready' ? 'green' : 'red'} /> · MCP <Badge label={preflight.mcpStatus} color={preflight.mcpStatus === 'ready' ? 'green' : preflight.mcpStatus === 'checking' ? 'yellow' : 'red'} /> · API key <Badge label={preflight.apiKeyPresent ? 'present' : 'missing'} color={preflight.apiKeyPresent ? 'green' : 'yellow'} /></Text>
+    {status}
   </Box>;
 }
 
@@ -89,7 +95,7 @@ function FormPanel({ form, activeVolume, preflight, epubs, recentVolumes }: { fo
 function ConsolePanel({ run, rows, focused, cancelConfirm }: { run: RunState | null; rows: number; focused: boolean; cancelConfirm: boolean }) {
   if (!run) return <Box borderStyle="round" borderColor="gray" paddingX={1}><Text color="gray">No action yet. Runs stay here after completion instead of evaporating into a 200-line lie.</Text></Box>;
   const entries = visibleConsoleEntries(run.console, Math.max(4, rows - 9));
-  return <Box flexDirection="column" borderStyle="round" borderColor={run.status === 'failed' ? 'red' : run.status === 'done' ? 'green' : focused ? 'magenta' : 'cyan'} paddingX={1}><Text bold>{run.status === 'running' ? <Text color="cyan"><Spinner type="dots" /> </Text> : null}{run.capability.label} · {run.status}</Text><Text color="gray" wrap="truncate-end">{run.preview}</Text><Text color={focused ? 'magenta' : 'gray'}>focus: {focused ? run.console.mode : 'menu'} · retained {run.console.entries.length}/5000 · {run.console.unseen ? `${run.console.unseen} unseen` : 'tail current'}</Text>{cancelConfirm ? <Text color="red">Cancel the running action? Enter confirms; Esc keeps it alive.</Text> : null}{entries.map((entry) => <Text key={entry.id} color={entry.severity === 'error' ? 'red' : entry.severity === 'warning' ? 'yellow' : entry.severity === 'success' ? 'green' : 'white'} wrap="truncate-end">[{entry.source}/{entry.stage}] {entry.text}</Text>)}<Text color="gray">Tab focus · ↑↓ scroll · PgUp/PgDn page · Home/End · f follow · i raw stdin · Esc browse</Text></Box>;
+  return <Box flexDirection="column" borderStyle="round" borderColor={run.status === 'failed' ? 'red' : run.status === 'done' ? 'green' : focused ? 'magenta' : 'cyan'} paddingX={1}><Text bold>{run.status === 'running' ? <Text color="cyan"><Spinner type="dots" /> </Text> : null}{run.capability.label} · {run.status}</Text><Text color="gray" wrap="truncate-end">{run.preview}</Text><Text color={focused ? 'magenta' : 'gray'}>focus: {focused ? run.console.mode : 'menu'} · retained {run.console.entries.length}/5000 · {run.console.unseen ? `${run.console.unseen} unseen` : 'tail current'}</Text>{cancelConfirm ? <Text color="red">Cancel the running action? Enter confirms; Esc keeps it alive.</Text> : null}{entries.map((entry) => <Text key={entry.id} color={entry.severity === 'error' ? 'red' : entry.severity === 'warning' ? 'yellow' : entry.severity === 'success' ? 'green' : 'white'} wrap="truncate-end">[{entry.source}/{entry.stage}] {entry.text}</Text>)}<Text color="gray">wheel scrolls anytime · Tab focus · ↑↓ scroll · PgUp/PgDn page · Home/End · f follow · i raw stdin · Esc browse</Text></Box>;
 }
 
 function RuntimeConfigPanel({ lines, offset, rows }: { lines: readonly string[]; offset: number; rows: number }) {
@@ -105,6 +111,12 @@ export function App() {
   const [workspace, dispatch] = useReducer(reducer, volumes, initialWorkspace); const [preflight, setPreflight] = useState<Preflight>(() => runPreflight()); const [mcpCapabilities, setMcpCapabilities] = useState<CapabilitySpec[]>(() => hydrateMcpCapabilities([]));
   const runHandle = useRef<RunHandle | null>(null); const abortController = useRef<AbortController | null>(null);
   const layout = layoutForColumns(columns); const activeVolume = volumes.find((volume) => volume.id === workspace.activeVolume) ?? null;
+  // Console is the only screen ConsolePanel ever renders on — no reason to
+  // keep paying for the bordered Header, the Navigation sidebar, and (in
+  // three-pane) the Inspector while looking at it. Reclaiming that chrome
+  // is the actual "bigger canvas" fix; the viewport math below already
+  // assumed roughly this much room and was quietly overflowing without it.
+  const maximized = workspace.nav === 'console';
   const runtimeConfig = useMemo(() => loadRuntimeConfigLines(), []);
   // `volumes` is loaded via loadVolumes(), which sorts by updatedAt descending
   // at the source — independent of whatever sort mode the Volumes screen is
@@ -116,6 +128,18 @@ export function App() {
 
   useEffect(() => { const result = runPreflight(); setPreflight(result); if (result.importsStatus !== 'ready') return; const controller = new AbortController(); void listMcpTools(controller.signal).then((tools) => { setMcpCapabilities(hydrateMcpCapabilities(tools)); setPreflight((current) => ({ ...current, mcpStatus: 'ready', detail: `${tools.length} MCP tools available.` })); }).catch((error: unknown) => setPreflight((current) => ({ ...current, mcpStatus: 'missing', detail: error instanceof Error ? error.message : String(error) }))); return () => controller.abort(); }, []);
   useEffect(() => () => { runHandle.current?.cancel(); abortController.current?.abort(); void closeMcpClient(); }, []);
+  // Wheel scroll: touchpad/mouse, not keyboard — see useMouseScroll.ts for why
+  // this needs its own tap into Ink's input stream. Direction signs mirror
+  // whatever the arrow/page keys already do in each screen: consoleBrowse's
+  // offset counts backward-from-newest (up = +delta, matching key.upArrow
+  // below), configScroll's offset counts forward-from-top (up = -delta,
+  // matching PageUp below) — copying one sign convention for both would
+  // scroll one of the two screens backwards.
+  useMouseScroll((direction, notches) => {
+    const step = notches * 3;
+    if (workspace.nav === 'console') dispatch({ type: 'consoleBrowse', delta: direction === 'up' ? step : -step, viewport: rows - 9 });
+    else if (workspace.nav === 'dashboard') dispatch({ type: 'configScroll', delta: direction === 'up' ? -step : step, viewport: rows - 8 });
+  }, !workspace.form);
 
   const contentItems = useMemo(() => workspace.nav === 'workflows' ? [...CLI_CAPABILITIES] : workspace.nav === 'advanced' ? mcpCapabilities : [], [workspace.nav, mcpCapabilities]);
   const filteredItems = useMemo(() => contentItems.filter((item) => fuzzyMatch(workspace.search, `${item.label} ${item.group} ${item.detail}`)), [contentItems, workspace.search]);
@@ -206,5 +230,5 @@ export function App() {
   const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} epubs={epubs} recentVolumes={recentVolumes} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
   const inspector = <Inspector volume={activeVolume} />;
   const footer = workspace.nav === 'dashboard' ? '↑↓ workspaces · Enter open · PgUp/PgDn config · Esc back · Ctrl+Shift+Esc exit' : '↑↓ move · Enter select · / search · r refresh · Esc back · Ctrl+C abort · Ctrl+Shift+Esc exit';
-  return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header workspace={workspace} preflight={preflight} columns={columns} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && <Navigation workspace={workspace} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' ? 0 : 1}>{layout === 'single-pane' && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">{footer}</Text></Box>;
+  return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header workspace={workspace} preflight={preflight} columns={columns} compact={maximized} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && !maximized && <Navigation workspace={workspace} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' || maximized ? 0 : 1}>{layout === 'single-pane' && !maximized && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{!maximized && layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{!maximized && layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">{footer}</Text></Box>;
 }

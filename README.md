@@ -1,19 +1,32 @@
-# DeepSeek MTLS — Lightweight LN Translation Client
+# Light Novel Translation Engine - DeepSeek-Powered
 
-**DeepSeek V4 Pro-exclusive** Japanese → English light novel translator. Extract, prep, translate, QC, build — and remember the series for next time. That's it.
+**Single-provider pipeline** for Japanese → English light novel translation.
+Extract, prep, translate, QC, build — and remember the series for next time.
 
 ---
 
 ## What It Is
 
-A minimal, single-provider translation pipeline for Japanese light novels. It takes an EPUB in, runs a single DeepSeek API call to build full character/voice/continuity context, translates every chapter through DeepSeek V4 Pro's Anthropic-compatible endpoint with auto-prefix caching, runs a zero-cost sanity gate, and outputs a finished English EPUB. On a sequel, it remembers the last volume's names and voices without being told twice.
+A self-contained translation pipeline that ingests a Japanese EPUB, builds a
+full character/voice/continuity reference in a single structured API call,
+translates every chapter through a high-capacity language model with automatic
+prefix caching, runs a zero-cost sanity gate, and outputs a finished English
+EPUB. On a sequel volume, it recalls the previous volume's names and voices
+without being told twice.
 
 ## What It Is NOT
 
-- It does **not** depend on Gemini, Anthropic, OpenAI, Kimi, or any provider except DeepSeek V4 — extraction and EPUB assembly are deterministic (no LLM at all); prep, translation, and everything else that touches an LLM runs on DeepSeek and nothing but DeepSeek
-- It does **not** require vector stores or RAG modules at runtime — the DeepSeek master prompt carries all translation policy inline, and prep is one structured API call, not a 7-phase metadata pipeline
-- It does **not** do multi-model QC fan-out — QC is filesystem-only sanity checks, zero API cost
-- It does **not** run a full publisher/author/anime-metadata bible system — the series bible here is three flat JSON files (term_lock, verbatim_anchors, series_pack), a continuity aid, not a database
+- It does **not** require vector stores or retrieval-augmented modules at
+  runtime — the translation prompt carries all policy inline, and preparation
+  is a single structured call, not a multi-phase metadata pipeline
+- It does **not** run multi-model quality-evaluation fan-out — the post-
+  translation gate is filesystem-only sanity checks with zero API cost
+- It does **not** maintain a publisher/author/anime-metadata database — the
+  series continuity layer is three flat JSON files (name locks, recurring
+  phrase anchors, and cross-volume state), a continuity aid, not a database
+- It does **not** depend on multiple AI providers — extraction and EPUB
+  assembly are deterministic, and every API call in between uses the same
+  single provider
 
 ## Quick Start
 
@@ -206,6 +219,62 @@ It fills the exact 15-block schema the main pipeline's `scripts/build_context_xm
 | `series_pack.json` | Volumes processed, merged voice fingerprints, last-known EPS band per character | context.xml's `voice_fingerprints` + `eps_arc_tracker` |
 
 No database, no ChromaDB, no vector store — this is not the main pipeline's publisher/author/anime-metadata `bibles/*.json`. On the *next* volume of a series, `prep_volume` matches the new volume's JP title against every `series_pack.json`'s `series_title_jp`; a match loads the bible and injects it into the prep call so DeepSeek reuses locked names and voices instead of reinventing them. Writing the bible is deliberately MCP/IDE-agent-only, not a CLI/TUI command — it should follow someone actually looking at the QC report, not run unconditionally on every `run`.
+
+---
+
+## Why DeepSeek V4 Model?
+
+### Specifications
+
+DeepSeek V4 launched April 24, 2026 in two tiers, both text-only:
+
+| | V4 Pro | V4 Flash |
+|---|---|---|
+| Total parameters | 1.6T | 284B |
+| Active parameters/token (MoE) | ~49B | ~13B |
+| Context window | 1M tokens | 1M tokens |
+| Input, cache miss | $0.435 / MTok | $0.14 / MTok |
+| Input, cache hit | $0.003625 / MTok | $0.0028 / MTok |
+| Output | $0.87 / MTok | $0.28 / MTok |
+
+Architecturally, V4 pairs **DeepSeek Sparse Attention** (compressed sparse attention + hierarchical/coarse-grained attention — context gets compressed into summaries, relevant regions selected, full attention applied only there) with **Manifold-Constrained Hyper-Connections**, a training-stabilization framework that caps signal amplification under 2x at ~6.7% compute overhead. Net effect: near-linear rather than quadratic cost growth against context length, which is what makes a 1M-token window economically viable per call instead of a marketing number nobody actually fills. Prompt caching is automatic on DeepSeek's side — no cache-control headers, no opt-in flag, no SDK changes; the server caches the longest stable byte-prefix of each request on its own.
+
+Sources: [DeepSeek V4 — 1T Params, Benchmarks & Pricing](https://deepseek.ai/deepseek-v4), [DeepSeek API Pricing](https://deepseek.ai/pricing), [DeepSeek V4 Pro — OpenRouter](https://openrouter.ai/deepseek/deepseek-v4-pro)
+
+### How this maps onto DeepSeek_MTLS
+
+| V4 characteristic | Where it lands in this codebase |
+|---|---|
+| Automatic server-side prefix caching | `translation.translator.caching` in `config.yaml`; `deepseek_client.py`'s `cache_monitor` warns below a 70% hit ratio — see the real number below |
+| DRDI/DOVB placed in the *user* turn, not the system prompt | `deepseek_optimization.py` — keeps the system prompt + context.xml prefix byte-stable across chapters so the cache actually hits; moving them into the system instruction would invalidate the prefix every single chapter |
+| 1M context window | `deepseek_conversation.py`'s compaction ladder (`checkpoint_trigger_ratio: 0.85`) exists because the window is large but not infinite — it fires *before* a volume's accumulated conversation would blow past it, not preemptively on every chapter |
+| 384K max output ceiling | `translation.translator.generation.max_output_tokens` in `config.yaml` |
+| Thinking/reasoning mode, effort routing | `thinking.budget_tokens` / `thinking.effort` in `config.yaml`; DeepSeek has no native effort parameter at the API level, which is *why* DRDI exists at all — it's prose-injected reasoning scaffolding standing in for a routing knob the model doesn't expose |
+| No dedicated Anthropic-Messages endpoint in most public docs (DeepSeek's own docs describe an OpenAI-compatible path) | `deepseek_client.py` targets `https://api.deepseek.com/anthropic` anyway — DeepSeek also exposes an Anthropic Messages-format endpoint, which is what lets this client reuse the `anthropic` Python SDK instead of carrying a second HTTP client for one provider |
+| Pro tier vs Flash tier pricing gap | `prep.model` is hardcoded to `deepseek-v4-pro` (structured 15-block XML output isn't reliable on Flash); `translation.translator.model` defaults to Pro but Flash is a one-line config change for throughput-over-craft runs |
+
+### Real cost telemetry — 5 volumes, one series
+
+Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `translation_log.json` records from the main MTLS pipeline's production run of *家事代行のアルバイトを始めたら学園一の美少女の家族に気に入られちゃいました* (*The Housekeeper and the School Idol's Family*), volumes 1–5. (Volume 6 exists in that workspace but never reached the translator — Librarian-only, no cost data — so it's excluded rather than padded in as a zero.) Model was `deepseek-v4-pro` across all 48 chapters, no exceptions.
+
+| Vol | Chapters | Input tokens | Output tokens | Cache-read tokens | Cost (USD) |
+|---|---|---|---|---|---|
+| 1 | 8 | 1,053,277 | 96,919 | 834,688 | $0.18243 |
+| 2 | 9 | 1,243,934 | 95,441 | 1,023,232 | $0.18275 |
+| 3 | 11 | 1,397,403 | 105,354 | 1,192,320 | $0.18519 |
+| 4 | 11 | 1,190,878 | 114,356 | 966,528 | $0.20059 |
+| 5 | 9 | 1,112,635 | 88,449 | 920,448 | $0.16389 |
+| **Total** | **48** | **5,998,127** | **500,519** | **4,937,216** | **$0.91485** |
+
+(Volume 4's own `cost_audit_last_run.json` on disk only covers a 2-chapter retry after an earlier failure — its `total_cost_usd` field is *not* the volume total. The figures above for Vol. 4 are summed from `translation_log.json`'s full 11-chapter record instead, and the reconstructed aggregate cross-checks against the sum of all five volumes' reported totals to within half a cent, so the substitution didn't introduce drift.)
+
+**What that works out to:**
+- **82.3% cache hit ratio** on input tokens (4,937,216 of 5,998,127) — comfortably clear of the 70% warning threshold `cache_monitor` watches for, every volume, without hand-tuning. That's the DRDI/DOVB-in-user-turn design from the table above paying off in a real ledger, not just in theory.
+- Caching cut the **input-side** bill specifically by **81.6%** — $0.4794 actually paid vs. $2.6092 it would have cost at the flat cache-miss rate for the same 5,998,127 input tokens. Output tokens aren't cacheable by nature (they're generated, not repeated), so this saving is on input only; the more chapters share a stable prefix, the more of a volume's total cost this shrinks.
+- **≈$0.183/volume**, **≈$0.019/chapter** average across all 48 chapters — a full light-novel volume translated for less than the price of a bus fare, on the Pro tier, with thinking enabled throughout.
+- Zero `cache_creation_tokens` recorded anywhere in the 5-volume run. DeepSeek doesn't bill cache writes as a separate line item the way some providers do — a cache-establishing turn (chapter 1 of a volume, or right after a compaction-ladder rung resets the prefix) is priced as an ordinary cache-miss input, not an extra surcharge on top.
+
+This is main-pipeline telemetry, not DeepSeek_MTLS's own — the two are separate codebases that happen to share the identical `deepseek_client.py` lineage and pricing table (`_DEEPSEEK_RATES_PER_MTOK` in `src/translator/deepseek_client.py` matches these rates exactly), so the economics transfer directly to what running this lightweight client will actually cost.
 
 ---
 

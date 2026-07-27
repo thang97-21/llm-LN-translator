@@ -14,6 +14,7 @@ _docs/
 .claude/
 CLAUDE.local.md
 .claude.json
+CLAUDE.md
 
 # ── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
