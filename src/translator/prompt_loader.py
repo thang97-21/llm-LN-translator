@@ -72,6 +72,7 @@ def build_user_message(
     *,
     jp_source: str,
     chapter_guidance_blocks: Optional[list] = None,
+    previous_guidance_text: Optional[str] = None,
 ) -> str:
     """
     Wrap the JP source in the per-turn user envelope, followed by the
@@ -79,6 +80,13 @@ def build_user_message(
     deepseek_optimization.assemble_deepseek_chapter_blocks). Placing the
     guidance AFTER the source keeps the source text itself byte-stable
     across retries.
+
+    When *previous_guidance_text* is provided and matches the current
+    chapter's assembled guidance byte-for-byte, the full DRDI/DOVB block
+    is replaced with a single CONTINUE directive. Consecutive chapters
+    sharing the same EPS band and active character set — the common case
+    in multi-chapter scenes — skip ~200-500 uncached tokens per turn,
+    directly improving cache hit ratio.
     """
     parts = [
         "<source_text>",
@@ -92,7 +100,20 @@ def build_user_message(
             if isinstance(block, dict) and block.get("text")
         )
         if guidance_text:
-            parts.append("\n<DEEPSEEK_CHAPTER_EXECUTION_GUIDANCE>")
-            parts.append(guidance_text)
-            parts.append("</DEEPSEEK_CHAPTER_EXECUTION_GUIDANCE>")
+            if previous_guidance_text and guidance_text == previous_guidance_text:
+                # Consecutive chapters with identical canon landscape —
+                # skip the full DRDI/DOVB payload and emit a minimal
+                # directive. The model already has the cached context.xml
+                # and prior turns; re-stating unchanged metadata is waste.
+                parts.append("\n<DEEPSEEK_CHAPTER_EXECUTION_GUIDANCE>")
+                parts.append(
+                    "CONTINUE — same EPS band and active character set "
+                    "as previous chapter. Canon landscape unchanged. "
+                    "Proceed directly to scene analysis."
+                )
+                parts.append("</DEEPSEEK_CHAPTER_EXECUTION_GUIDANCE>")
+            else:
+                parts.append("\n<DEEPSEEK_CHAPTER_EXECUTION_GUIDANCE>")
+                parts.append(guidance_text)
+                parts.append("</DEEPSEEK_CHAPTER_EXECUTION_GUIDANCE>")
     return "\n".join(parts)

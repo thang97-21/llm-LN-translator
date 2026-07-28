@@ -51,6 +51,8 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'prep.max_output_tokens', section: 'Prep — Context Build', label: 'Maximum Output Tokens', kind: 'integer', min: 1, description: "Output ceiling for the prep call's structured XML response." },
   { path: 'prep.http_timeout_seconds', section: 'Prep — Context Build', label: 'Request Timeout', kind: 'integer', min: 1, description: 'HTTP timeout for the single prep API call, in seconds.' },
   { path: 'prep.bible_dir', section: 'Prep — Context Build', label: 'Series Bible Directory', kind: 'text', description: 'Cross-volume series bibles live here; sequels load prior term_lock/voice data from here.' },
+  { path: 'prep.parallel.enabled', section: 'Prep — Context Build', label: 'Parallel Context Build', kind: 'boolean',
+    description: 'Cache-warmed 14-call Pro+Flash fan-out (PARALLEL_PREP_GUIDE.md) instead of the single unified Pro call above. Falls back to the unified call on failure if fallback_to_unified stays on.' },
 
   // ── Translation — Prompts ─────────────────────────────────────────────
   { path: 'translation.master_prompt', section: 'Translation — Prompts', label: 'Primary Translation Prompt', kind: 'text',

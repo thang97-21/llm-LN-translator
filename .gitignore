@@ -4,7 +4,7 @@
 *.env.*.local
 
 # ── Development Papers ─────────────────────────────────────────────────────
-dev/
+## dev/
 DEV/
 _design/
 _docs/
@@ -63,4 +63,4 @@ cache/*
 
 # ── Copyrighted Workspaces ────────────────────────────────────────────────────────
 raw/
-work/
+## work/

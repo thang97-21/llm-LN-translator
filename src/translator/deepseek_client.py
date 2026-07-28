@@ -97,34 +97,8 @@ TOOL_NAME_REPORT_CONSISTENCY_ANCHOR = "report_consistency_anchor"
 TOOL_NAME_FLAG_STRUCTURAL_CONSTRAINT = "flag_structural_constraint"
 
 
-# ── DeepSeek V4 Pro/Flash pricing (USD per 1M tokens, May 2026) ────────────
-# Source: https://api-docs.deepseek.com/quick_start/pricing
-# Permanent 75% discount effective 2026/05/31 15:59 UTC (promotion → permanent).
-# After discount: 1/4 of original launch pricing.
-#
-# deepseek-v4-pro:
-#   Cache miss (input):  $0.435 / MTok   (was $1.74)
-#   Cache hit  (input):  $0.003625 / MTok (was $0.0145; 1/10 of original cache price)
-#   Output:              $0.87 / MTok    (was $3.48, originally $7.00)
-#
-# deepseek-v4-flash:
-#   Cache miss (input):  $0.14 / MTok
-#   Cache hit  (input):  $0.0028 / MTok  (1/10 of original cache price)
-#   Output:              $0.28 / MTok
-#
-# Cache creation: not charged separately (automatic).
-_DEEPSEEK_RATES_PER_MTOK = {
-    "input": 0.435,           # cache miss (75% off $1.74)
-    "cached_input": 0.003625, # cache hit  (75% off $0.0145, which was 1/10 of $0.145)
-    "output": 0.87,           # output     (75% off $3.48, originally $7.00)
-}
-
-# Flash variant rates (used when model is deepseek-v4-flash)
-_DEEPSEEK_FLASH_RATES_PER_MTOK = {
-    "input": 0.14,
-    "cached_input": 0.0028,
-    "output": 0.28,
-}
+# DeepSeek V4 Pro/Flash pricing lives in src.common.token_telemetry.PRICING_PER_MTOK
+# now — see estimate_usage_cost_usd() below, which delegates there.
 
 
 @dataclass
@@ -435,74 +409,28 @@ class DeepSeekClient:
             subturns=subturns,
         )
 
-    # ── DeepSeek Official Tokenizer ──────────────────────────────────────────
-    # DeepSeek V4 uses a BPE tokenizer similar to GPT-4's o200k_base / cl100k_base.
-    # We use tiktoken with o200k_base encoding as the closest approximation,
-    # falling back to the Anthropic count_tokens API for precise counts, then
-    # to a character-based heuristic as last resort.
-    # The API response `usage` fields are the ground truth for billing.
-
-    _tokenizer = None  # lazily loaded tiktoken encoding
-
-    @classmethod
-    def _get_tokenizer(cls):
-        """Lazy-load tiktoken encoding (o200k_base ≈ DeepSeek V4 tokenizer)."""
-        if cls._tokenizer is not None:
-            return cls._tokenizer
-        try:
-            import tiktoken
-            cls._tokenizer = tiktoken.get_encoding("o200k_base")
-            logger.debug("DeepSeek tokenizer: using tiktoken o200k_base encoding")
-        except Exception:
-            try:
-                import tiktoken
-                cls._tokenizer = tiktoken.get_encoding("cl100k_base")
-                logger.debug("DeepSeek tokenizer: using tiktoken cl100k_base encoding (fallback)")
-            except Exception:
-                cls._tokenizer = False  # sentinel: use heuristic
-                logger.debug("DeepSeek tokenizer: tiktoken unavailable, using heuristic")
-        return cls._tokenizer if cls._tokenizer is not False else None
+    # ── Local Tokenizer (approximation) ──────────────────────────────────────
+    # Delegates to src.common.token_telemetry.count_tokens(), shared with
+    # prep — local tiktoken (o200k_base, then cl100k_base), then a
+    # char-based heuristic. DeepSeek's own HuggingFace tokenizer repos were
+    # tried here briefly and reverted: they need HF_TOKEN in practice
+    # (rate-limited or gated depending on the repo), and a token-counting
+    # utility silently depending on an unrelated Hub credential isn't a
+    # trade worth making for a closer-but-still-approximate count. Never
+    # raises, never touches the network. The API response `usage` fields
+    # remain the ground truth for actual billing — this is for context-
+    # budget estimation (conversation manager compaction-ladder decisions),
+    # not what gets logged as "actual cost" in LOG/token_log.md.
 
     def get_token_count(self, text: str) -> int:
-        """Count tokens using the official DeepSeek tokenizer.
-
-        Priority:
-          1. tiktoken o200k_base encoding (closest to DeepSeek V4 tokenizer)
-          2. Anthropic SDK count_tokens (precise but requires API call)
-          3. Character-based heuristic: len(text) // 4 (last resort)
-        """
-        if not text:
-            return 0
-
-        # Priority 1: tiktoken (local, fast, reasonably accurate)
-        tokenizer = self._get_tokenizer()
-        if tokenizer is not None:
-            try:
-                return len(tokenizer.encode(text))
-            except Exception:
-                pass
-
-        # Priority 2: Anthropic SDK count_tokens via DeepSeek endpoint
-        try:
-            return self._client.messages.count_tokens(
-                model=self.model,
-                messages=[{"role": "user", "content": text}],
-            ).input_tokens
-        except Exception:
-            pass
-
-        # Priority 3: Character heuristic
-        return len(text) // 4
+        """Count tokens using the local tiktoken approximation for self.model."""
+        from src.common.token_telemetry import count_tokens
+        return count_tokens(text, self.model)
 
     def get_token_count_batch(self, texts: List[str]) -> int:
         """Count total tokens across multiple texts."""
-        tokenizer = self._get_tokenizer()
-        if tokenizer is not None:
-            try:
-                return sum(len(tokenizer.encode(t)) for t in texts)
-            except Exception:
-                pass
-        return sum(len(t) // 4 for t in texts)
+        from src.common.token_telemetry import count_tokens
+        return sum(count_tokens(t, self.model) for t in texts)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Cost estimation
@@ -521,47 +449,22 @@ class DeepSeekClient:
         """
         Estimate USD cost for DeepSeek V4 (Pro or Flash).
 
-        Permanent 75%-off pricing (effective May 2026):
-          deepseek-v4-pro:
-            Cache miss (input): $0.435 / MTok
-            Cache hit  (input): $0.003625 / MTok
-            Output:             $0.87 / MTok
-          deepseek-v4-flash:
-            Cache miss (input): $0.14 / MTok
-            Cache hit  (input): $0.0028 / MTok
-            Output:             $0.28 / MTok
-
-        Cache creation: $0.00 (automatic).
-        Non-cached input = input_tokens - cache_read_tokens.
+        Delegates to src.common.token_telemetry.cost_breakdown_usd() — the
+        pricing table now lives there as the single source of truth shared
+        with prep (src/prep/parallel_agent.py) and LOG/token_log.md, instead
+        of a second copy here that could silently drift out of sync with it
+        after the next DeepSeek price change. Return shape is unchanged —
+        existing callers of this method see no difference.
         """
-        _ = model_name
-        _ = cache_creation_tokens  # not charged
+        from src.common.token_telemetry import cost_breakdown_usd
         _ = kwargs
-
-        # Select rate table based on model
-        rates = _DEEPSEEK_RATES_PER_MTOK
-        if model_name and "flash" in str(model_name).lower():
-            rates = _DEEPSEEK_FLASH_RATES_PER_MTOK
-
-        _uncached_input = max(0, input_tokens - cache_read_tokens)
-
-        input_cost = _uncached_input * rates["input"] / 1_000_000
-        cache_read_cost = cache_read_tokens * rates["cached_input"] / 1_000_000
-        output_cost = output_tokens * rates["output"] / 1_000_000
-
-        total = input_cost + cache_read_cost + output_cost
-
-        return {
-            "input_cost_usd": round(input_cost, 8),
-            "output_cost_usd": round(output_cost, 8),
-            "cache_read_cost_usd": round(cache_read_cost, 8),
-            "cache_creation_cost_usd": 0.0,
-            "cache_total_cost_usd": round(cache_read_cost, 8),
-            "total_cost_usd": round(total, 8),
-            "input_rate_per_mtok": rates["input"],
-            "output_rate_per_mtok": rates["output"],
-            "cache_read_rate_per_mtok": rates["cached_input"],
-        }
+        return cost_breakdown_usd(
+            model_name=model_name,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # stream_generate — wraps generate() with streaming flag
@@ -590,11 +493,25 @@ class DeepSeekClient:
         use_tool_mode: bool = False,
         tool_handlers: Optional[Dict[str, Any]] = None,
         retrospective_anchor: Optional[str] = None,
+        dry_run: bool = False,
     ) -> LLMResponse:
         """
         Generate content via DeepSeek API (Anthropic-compatible endpoint).
 
         Returns an LLMResponse for the shared ChapterProcessor contract.
+
+        dry_run=True guarantees zero network calls, full stop — not just
+        skipping the translation turn itself. That's why the conversation
+        manager's prepare_turn() is also skipped below rather than run and
+        then discarded: prepare_turn() can trigger a REAL, billed checkpoint-
+        summarization call of its own when the compaction ladder happens to
+        fire on this turn (see the `checkpoint_usage` handling a few lines
+        down) — running it "just to preview the payload" would silently
+        defeat the one guarantee dry-run exists to make. The cost: a dry-run
+        preview shows this turn's raw system+user payload, not the
+        conversation-accumulated one multi-turn mode would actually send.
+        Callers that need the accumulated shape have no dry-run-safe way to
+        see it short of tracing prepare_turn() by hand.
         """
         _ = safety_settings, force_new_session, retrospective_anchor
         target_model = model or self.model
@@ -657,7 +574,7 @@ class DeepSeekClient:
         conversation_telemetry: Dict[str, Any] = {"enabled": False}
         checkpoint_usage: Optional[Dict[str, Any]] = None
         manager = self._conversation_manager
-        if manager is not None and manager.enabled:
+        if manager is not None and manager.enabled and not dry_run:
             prepared = manager.prepare_turn(
                 prompt=prompt,
                 system=system_value,
@@ -697,6 +614,26 @@ class DeepSeekClient:
             kwargs.pop("temperature", None)
         else:
             kwargs["temperature"] = temperature
+
+        if dry_run:
+            # kwargs is the exact payload messages.stream(**kwargs) would have
+            # received — model, max_tokens, messages, system, thinking,
+            # output_config, all present exactly as a real call would build
+            # them. Stashed in provider_metadata rather than written to disk
+            # here: this class doesn't otherwise do file I/O, and it has no
+            # idea what chapter/volume this is for — the caller (agent.py's
+            # translate_chapter, which does know both) owns turning this into
+            # a markdown file, same division of labor as thinking-log and
+            # cost-log already use.
+            return LLMResponse(
+                content="",
+                finish_reason="dry_run",
+                model=target_model,
+                provider="deepseek",
+                api_family=LLMApiFamily.ANTHROPIC_MESSAGES,
+                raw_finish_reason="dry_run",
+                provider_metadata={"dry_run": True, "payload": kwargs},
+            )
 
         start_time = time.time()
 
@@ -993,30 +930,30 @@ class DeepSeekClient:
                 + ". Correct every defect."
             )
         checkpoint_prompt = (
-            "Compress the accepted translation transcript into one loss-minimizing "
-            "current-volume continuity checkpoint. Return XML only. Use root "
+            "Compress the accepted translation transcript into one dense, "
+            "loss-minimizing current-volume continuity checkpoint. Return XML "
+            "only — no preamble, no commentary. Use root "
             "<deepseek_volume_checkpoint> and exactly these named sections: "
             "chapter_coverage, plot_state, relationship_state, unresolved_threads, "
             "names_and_terms, voice_and_pov, callbacks, translation_decisions, "
-            "anchor_excerpts. Every section must be encoded as "
-            "<section name=\"...\"><![CDATA[...]]></section>. Mention every required "
-            f"chapter ID verbatim: {', '.join(required_chapter_ids)}. Treat "
-            "translation_decisions and anchor_excerpts as two different memory "
-            "classes. In translation_decisions, preserve reusable choices such as "
-            "locked wording, voice/register behavior, device strategy, pun carrier, "
-            "cadence, and formatting; label each entry MODE=DECISION unless it is "
-            "also backed by an exact accepted span. In anchor_excerpts, retain only "
-            "accepted English prose likely to recur as a quotation, flashback, "
-            "catchphrase, promise, prophecy, title echo, or deliberate callback. "
-            "For every retained anchor, give labeled CHAPTER_ID and SOURCE_TRIGGER "
-            "fields, then wrap the copied prose between EXACT_EN_BEGIN and "
-            "EXACT_EN_END. Copy that English byte-for-byte from assistant_response: "
-            "do not normalize spelling, capitalization, punctuation, quotation "
-            "marks, italics, dashes, ellipses, line breaks, or wording, and never "
-            "reconstruct missing prose from memory. If no exact callback candidate "
-            "is supported, explicitly write NONE rather than inventing one. Preserve "
-            "exact names, term locks, POV state, EPS/voice evolution, unresolved "
-            "causal links, and translation decisions. Do not invent facts."
+            "anchor_excerpts. Every section: "
+            "<section name=\"...\"><![CDATA[...]]></section>. "
+            "Mention every required chapter ID verbatim: "
+            f"{', '.join(required_chapter_ids)}. "
+            "translation_decisions: preserve only reusable locked choices "
+            "(wording, register, device strategy, formatting) — label each "
+            "MODE=DECISION unless backed by an exact accepted span. Omit "
+            "one-off decisions that will never recur. "
+            "anchor_excerpts: retain ONLY English prose likely to recur as a "
+            "quotation, flashback, catchphrase, promise, prophecy, or title "
+            "echo. For each, give CHAPTER_ID and SOURCE_TRIGGER, then the "
+            "exact prose between EXACT_EN_BEGIN and EXACT_EN_END copied "
+            "byte-for-byte from assistant_response — never normalize, never "
+            "reconstruct from memory. If no such anchor exists for the "
+            "evicted chapters, write NONE and move on — do not invent. "
+            "Prioritize density: every word must earn its place. Do not "
+            "paraphrase plot when a one-line summary suffices. Do not "
+            "invent facts."
             f"{correction}\n\n"
             f"<previous_checkpoint>{previous_checkpoint or ''}</previous_checkpoint>\n"
             "<accepted_turns_json>\n"

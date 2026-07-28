@@ -41,44 +41,37 @@ logger = logging.getLogger(__name__)
 
 _EPS_BAND_REASONING_DIRECTIVES: Dict[str, str] = {
     "HOT": (
-        "Apply maximum analytical rigor to this scene. For each sentence, examine "
-        "subtext, cultural nuance, character voice fidelity, emotional resonance, "
-        "and literary device preservation. Walk through your reasoning step by step: "
-        "identify the JP subtext → select the optimal EN register → verify character "
-        "voice alignment → check for literary technique fidelity → confirm emotional "
-        "resonance. No sentence should pass without at least two of these checks. "
-        "This is a HOT-tagged scene — confession, combat, trauma, or peak emotional "
-        "content demands your full reasoning capacity."
+        "Maximum analytical rigor. Per sentence: examine subtext, voice fidelity, "
+        "emotional resonance, literary devices. Walk reasoning step by step: "
+        "JP subtext → optimal EN register → character voice alignment → technique "
+        "fidelity → emotional resonance. No sentence passes without ≥2 checks. "
+        "HOT scene — confession, combat, trauma, or peak emotional content demands "
+        "full reasoning capacity."
     ),
     "WARM": (
-        "Apply balanced analytical rigor to this scene. Prioritize character voice "
-        "consistency, emotional escalation tracking, and natural narrative flow. "
-        "For key dialogue exchanges, verify that each character's speech register "
-        "matches their established voice fingerprint. For exposition transitions, "
-        "check that the emotional arc is smooth and progressive. Let your reasoning "
-        "focus where the character dynamics demand it, and maintain momentum through "
-        "lower-stakes connective tissue."
+        "Balanced analytical rigor. Prioritize character voice consistency and "
+        "emotional escalation tracking. For key dialogue exchanges: verify speech "
+        "register against voice fingerprints. For exposition: ensure smooth, "
+        "progressive emotional arc. Focus reasoning where character dynamics demand "
+        "it; maintain momentum through connective tissue."
     ),
     "NEUTRAL": (
-        "Apply efficient analytical rigor to this scene. The primary task is accurate, "
-        "natural-sounding prose that maintains character voice continuity and narrative "
-        "coherence. Spot-check dialogue for voice fingerprint compliance and verify "
-        "that transition sentences preserve scene rhythm. Do not overanalyze — this "
-        "is general narrative prose where correctness and readability are paramount."
+        "Efficient analytical rigor. Primary task: accurate, natural prose preserving "
+        "voice continuity and narrative coherence. Spot-check dialogue for fingerprint "
+        "compliance. Verify transitions preserve rhythm. Do not overanalyze — "
+        "correctness and readability are paramount."
     ),
     "COOL": (
-        "Apply light analytical rigor to this scene — casual dialogue, exposition, "
-        "or low-stakes character interaction. Prioritize natural, conversational EN "
-        "output. Verify contraction patterns and voice fingerprint basics. Don't "
-        "linger on subtext analysis unless the JP source clearly signals subtext. "
-        "Throughput matters here: be accurate, be consistent, be efficient."
+        "Light analytical rigor — casual dialogue, exposition, or low-stakes "
+        "interaction. Prioritize natural, conversational output. Verify contraction "
+        "patterns and voice basics. Do not linger on subtext unless the JP source "
+        "clearly signals it. Be accurate, consistent, efficient."
     ),
     "COLD": (
-        "Apply minimal analytical rigor — Oku Hanako throughput mode. This is "
-        "low-intensity setup, character introduction, or procedural narration. "
-        "Focus on accuracy and momentum. Check names and honorifics for consistency. "
-        "Do not think more than 5 sentences ahead. Trust your training data for "
-        "standard phrasing. Speed and precision override literary craft."
+        "Minimal analytical rigor — throughput mode. Low-intensity setup or "
+        "procedural narration. Accuracy and momentum first. Check names and "
+        "honorifics. Do not think more than 5 sentences ahead. Trust training "
+        "data for standard phrasing. Speed and precision override literary craft."
     ),
 }
 

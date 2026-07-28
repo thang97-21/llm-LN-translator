@@ -42,7 +42,7 @@ class PrepError(RuntimeError):
 # Minimal one-shot DeepSeek call (not DeepSeekClient — see module docstring)
 # ══════════════════════════════════════════════════════════════════════════
 
-def _call_deepseek_prep(system_instruction: str, user_message: str) -> str:
+def _call_deepseek_prep(system_instruction: str, user_message: str, *, volume_id: str) -> str:
     try:
         import anthropic as _anthropic_mod
     except ImportError as exc:
@@ -61,6 +61,7 @@ def _call_deepseek_prep(system_instruction: str, user_message: str) -> str:
     model = str(cfg.get("model", "deepseek-v4-pro"))
     max_output_tokens = int(cfg.get("max_output_tokens", 128000))
     thinking_budget = int(cfg.get("thinking_budget", 48000))
+    effort = str(cfg.get("effort", "max"))
     timeout_seconds = float(cfg.get("http_timeout_seconds", 900))
 
     # Same env-var conflict avoidance as DeepSeekClient.__init__: the Anthropic
@@ -89,13 +90,33 @@ def _call_deepseek_prep(system_instruction: str, user_message: str) -> str:
         system=system_instruction,
         messages=[{"role": "user", "content": user_message}],
         thinking={"type": "enabled", "budget_tokens": thinking_budget},
-        output_config={"effort": "max"},
+        output_config={"effort": effort},
     )
 
     text_parts: List[str] = []
+    thinking_parts: List[str] = []
     for block in getattr(response, "content", []):
-        if getattr(block, "type", None) == "text":
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
             text_parts.append(getattr(block, "text", "") or "")
+        elif block_type == "thinking":
+            thinking_parts.append(getattr(block, "thinking", "") or "")
+
+    from src.common.token_telemetry import count_tokens, log_call
+    usage = getattr(response, "usage", None)
+    cache_hit_tokens = int(getattr(usage, "cache_read_input_tokens", 0) or 0) if usage is not None else 0
+    total_input_tokens = count_tokens(system_instruction + "\n\n" + user_message, model)
+    output_tokens = count_tokens("".join(text_parts) + "".join(thinking_parts), model)
+    log_call(
+        phase="prep",
+        volume_id=volume_id,
+        call_label="unified",
+        model=model,
+        cache_hit_tokens=cache_hit_tokens,
+        fresh_tokens=max(0, total_input_tokens - cache_hit_tokens),
+        output_tokens=output_tokens,
+    )
+
     return "".join(text_parts).strip()
 
 
@@ -279,59 +300,21 @@ _BLOCK_NAMES = (
 # Orchestration
 # ══════════════════════════════════════════════════════════════════════════
 
-def run_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[str, Any]:
-    """Full pre-translation prep for one volume. See module docstring."""
-    work_dir = WORK_DIR / volume_id
-    context_path = work_dir / "context.xml"
-    if not context_path.exists():
-        raise PrepError(f"No context.xml at {context_path} — run extract first.")
-
-    existing_context_xml = context_path.read_text(encoding="utf-8")
-    chapters = _read_jp_chapters(work_dir)
-
-    prep_cfg = get_config_section("prep")
-    bible_dir = Path(prep_cfg.get("bible_dir", "bibles/"))
-    if not bible_dir.is_absolute():
-        from src.common.config import PIPELINE_ROOT
-        bible_dir = PIPELINE_ROOT / bible_dir
-
-    bible_match = discover_series_bible(existing_context_xml, bible_dir, series_id)
-    resolved_series_id = bible_match[0] if bible_match else series_id
-
-    user_parts = [f"<existing_context_xml>\n{existing_context_xml}\n</existing_context_xml>"]
-    if bible_match:
-        _, bible_data = bible_match
-        user_parts.append(
-            "<bible_context>\n" + json.dumps(bible_data, ensure_ascii=False, indent=2) + "\n</bible_context>"
-        )
-    user_parts.append(_wrap_jp_chapters(chapters))
-    user_message = "\n\n".join(user_parts)
-
-    prep_prompt_path = Path(prep_cfg.get("prompt", "src/prompt/prep_prompt_deepseek_en.xml"))
-    if not prep_prompt_path.is_absolute():
-        from src.common.config import PIPELINE_ROOT
-        prep_prompt_path = PIPELINE_ROOT / prep_prompt_path
-    system_instruction = prep_prompt_path.read_text(encoding="utf-8")
-
-    logger.info("[PREP] %s — sending %d chapters to DeepSeek (sequel=%s)",
-                volume_id, len(chapters), bool(bible_match))
-    raw_response = _call_deepseek_prep(system_instruction, user_message)
-    populated_xml = _strip_fences(raw_response)
-
-    try:
-        root = ET.fromstring(populated_xml)
-    except ET.ParseError as exc:
-        raise PrepError(
-            f"DeepSeek returned malformed context.xml ({exc}) — refusing to overwrite "
-            f"the existing file. Raw response saved for inspection."
-        ) from exc
-
-    if root.tag != "mtls_project_context":
-        raise PrepError(
-            f"DeepSeek response root is <{root.tag}>, expected <mtls_project_context> — refusing to write."
-        )
-
-    root.set("generated_by", "deepseek_prep")
+def _finalize_and_write(
+    work_dir: Path,
+    context_path: Path,
+    root: ET.Element,
+    *,
+    resolved_series_id: Optional[str],
+    chapters: List[Tuple[str, str]],
+    bible_match: Optional[Tuple[str, Dict[str, Any]]],
+    generated_by: str,
+) -> Dict[str, Any]:
+    """Shared tail of both prep paths: stamp root attrs, write context.xml,
+    update manifest.json, extract the translation brief, build the receipt.
+    Split out so the parallel cache-warmed path (parallel_agent.py) doesn't
+    reimplement it — same output contract, different way of filling blocks."""
+    root.set("generated_by", generated_by)
     root.set("generated_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     if resolved_series_id:
         root.set("series_id", resolved_series_id)
@@ -359,9 +342,8 @@ def run_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[str, Any]:
         atomic_write_text(work_dir / "TRANSLATION_BRIEF.md", brief_text)
 
     blocks_populated = [name for name in _BLOCK_NAMES if not _is_pending(root, name)]
-
-    receipt = {
-        "volume_id": volume_id,
+    return {
+        "volume_id": work_dir.name,
         "chapter_count": len(chapters),
         "character_count": _count_characters(root),
         "series_id": resolved_series_id or "",
@@ -370,6 +352,85 @@ def run_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[str, Any]:
         "blocks_populated": blocks_populated,
         "blocks_pending": [n for n in _BLOCK_NAMES if n not in blocks_populated],
     }
+
+
+def run_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[str, Any]:
+    """Full pre-translation prep for one volume. See module docstring.
+
+    Dispatches to the cache-warmed parallel path (parallel_agent.py) when
+    prep.parallel.enabled is true in config.yaml; falls back to the unified
+    single-call path below on failure if prep.parallel.fallback_to_unified
+    is also true (the default). See PARALLEL_PREP_GUIDE.md.
+    """
+    prep_cfg = get_config_section("prep")
+    parallel_cfg = prep_cfg.get("parallel", {}) or {}
+    if parallel_cfg.get("enabled", False):
+        from src.prep.parallel_agent import run_parallel_prep
+
+        try:
+            return run_parallel_prep(volume_id, series_id=series_id)
+        except Exception as exc:
+            if not parallel_cfg.get("fallback_to_unified", True):
+                raise
+            logger.warning(
+                "[PREP] %s — parallel path failed (%s); falling back to unified Pro call.",
+                volume_id, exc,
+            )
+
+    work_dir = WORK_DIR / volume_id
+    context_path = work_dir / "context.xml"
+    if not context_path.exists():
+        raise PrepError(f"No context.xml at {context_path} — run extract first.")
+
+    existing_context_xml = context_path.read_text(encoding="utf-8")
+    chapters = _read_jp_chapters(work_dir)
+
+    bible_dir = Path(prep_cfg.get("bible_dir", "bibles/"))
+    if not bible_dir.is_absolute():
+        from src.common.config import PIPELINE_ROOT
+        bible_dir = PIPELINE_ROOT / bible_dir
+
+    bible_match = discover_series_bible(existing_context_xml, bible_dir, series_id)
+    resolved_series_id = bible_match[0] if bible_match else series_id
+
+    user_parts = [f"<existing_context_xml>\n{existing_context_xml}\n</existing_context_xml>"]
+    if bible_match:
+        _, bible_data = bible_match
+        user_parts.append(
+            "<bible_context>\n" + json.dumps(bible_data, ensure_ascii=False, indent=2) + "\n</bible_context>"
+        )
+    user_parts.append(_wrap_jp_chapters(chapters))
+    user_message = "\n\n".join(user_parts)
+
+    prep_prompt_path = Path(prep_cfg.get("prompt", "src/prompt/prep_prompt_deepseek_en.xml"))
+    if not prep_prompt_path.is_absolute():
+        from src.common.config import PIPELINE_ROOT
+        prep_prompt_path = PIPELINE_ROOT / prep_prompt_path
+    system_instruction = prep_prompt_path.read_text(encoding="utf-8")
+
+    logger.info("[PREP] %s — sending %d chapters to DeepSeek (sequel=%s)",
+                volume_id, len(chapters), bool(bible_match))
+    raw_response = _call_deepseek_prep(system_instruction, user_message, volume_id=volume_id)
+    populated_xml = _strip_fences(raw_response)
+
+    try:
+        root = ET.fromstring(populated_xml)
+    except ET.ParseError as exc:
+        raise PrepError(
+            f"DeepSeek returned malformed context.xml ({exc}) — refusing to overwrite "
+            f"the existing file. Raw response saved for inspection."
+        ) from exc
+
+    if root.tag != "mtls_project_context":
+        raise PrepError(
+            f"DeepSeek response root is <{root.tag}>, expected <mtls_project_context> — refusing to write."
+        )
+
+    receipt = _finalize_and_write(
+        work_dir, context_path, root,
+        resolved_series_id=resolved_series_id, chapters=chapters,
+        bible_match=bible_match, generated_by="deepseek_prep",
+    )
     logger.info("[PREP] %s — done. %d/%d blocks populated.",
-                volume_id, len(blocks_populated), len(_BLOCK_NAMES))
+                volume_id, len(receipt["blocks_populated"]), len(_BLOCK_NAMES))
     return receipt

@@ -7,12 +7,12 @@ import { appendConsole, browseConsole, createConsole, jumpConsole, setConsoleMod
 import { CONFIG_PATH, loadConfigFields, saveConfigField, type ConfigFieldState } from '../core/configFile.js';
 import { buildConfigRenderLines, formatConfigValue, unquoteYamlScalar, validateConfigInput } from '../core/configSchema.js';
 import { callMcpTool, closeMcpClient, listMcpTools } from '../core/mcpClient.js';
-import { filterVolumes, fuzzyMatch, listChapters, loadEpubs, loadRuntimeConfigLines, loadVolumeDetail, loadVolumes, pipelineRoot, runCliCapability, sortVolumes } from '../core/mtls.js';
+import { filterVolumes, fuzzyMatch, listChapters, loadEpubs, loadRuntimeConfigLines, loadVolumeDetail, loadVolumes, pipelineRoot, runCliCapability, sortVolumes, workRoot } from '../core/mtls.js';
 import { runPreflight } from '../core/preflight.js';
 import type { CapabilitySpec, ConfigLine, ConsoleSeverity, FormValues, Preflight, RunHandle, RunState, SortMode, VolumeSummary } from '../core/types.js';
 import { Badge, PhaseStrip, ProgressBar, riskColor } from './components.js';
 import { layoutForColumns } from './layout.js';
-import { useFileWatcher } from './useFileWatcher.js';
+import { useDirectoryWatcher, useFileWatcher } from './useFileWatcher.js';
 import { useMouseScroll } from './useMouseScroll.js';
 import { useTerminalSize } from './useTerminalSize.js';
 
@@ -87,7 +87,7 @@ function initialWorkspace(volumes: readonly VolumeSummary[]): Workspace { return
 function footerText(workspace: Workspace): string {
   const runHint = workspace.run?.status === 'running' ? ' · Ctrl+C abort background run' : '';
   if (workspace.form) return `Esc closes${runHint} · Ctrl+Shift+Esc exit`;
-  if (workspace.nav === 'dashboard') return `↑↓ workspaces · Enter open · PgUp/PgDn config · Esc back${runHint} · Ctrl+Shift+Esc exit`;
+  if (workspace.nav === 'dashboard') return `↑↓ workspaces · Enter open · PgUp/PgDn config · d dev dry-run default · Esc back${runHint} · Ctrl+Shift+Esc exit`;
   if (workspace.nav === 'configuration') return workspace.configEdit ? 'Enter commit · Esc cancel edit · Ctrl+Shift+Esc exit' : `↑↓ move · Enter edit/toggle · Space toggle · PgUp/PgDn/Home/End jump · / search · r reload · Esc back${runHint} · Ctrl+Shift+Esc exit`;
   if (workspace.nav === 'console') return workspace.run?.status === 'running' ? 'Esc back · Ctrl+C cancel run · Ctrl+Shift+Esc exit' : 'Esc back · Ctrl+Shift+Esc exit';
   return `↑↓ move · Enter select · / search · r refresh · Esc back${runHint} · Ctrl+Shift+Esc exit`;
@@ -147,6 +147,20 @@ function RuntimeConfigPanel({ lines, offset, rows }: { lines: readonly ConfigLin
   </Box>;
 }
 
+// Session-only toggles — deliberately NOT config.yaml fields. This is "what
+// should the NEXT launch form default to," not "what should the pipeline
+// permanently do" (that's what the Configuration screen is for). Living here
+// keeps a fast, throwaway developer switch from acquiring a saved-to-disk
+// footprint it was never meant to have.
+function DeveloperPanel({ dryRunDefault }: { dryRunDefault: boolean }) {
+  return <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1}>
+    <Text bold color="yellow">Developer</Text>
+    <Text>  Dry-run default (Translate Volume): <Text color={dryRunDefault ? 'green' : 'gray'}>{dryRunDefault ? 'ON' : 'off'}</Text></Text>
+    <Text color="gray">  Press d to toggle. When ON, opening Translate Volume pre-checks Dry Run —</Text>
+    <Text color="gray">  assembles the full API payload per chapter to work/&lt;vol&gt;/DRY_RUN/, sends nothing.</Text>
+  </Box>;
+}
+
 function ConfigurationPanel({ fields, cursor, rows, edit, status, query }: { fields: readonly ConfigFieldState[]; cursor: number; rows: number; edit: ConfigEditState; status: ConfigStatus; query: string }) {
   const renderLines = useMemo(() => buildConfigRenderLines(fields), [fields]);
   const viewport = Math.max(6, rows - 10);
@@ -182,6 +196,11 @@ export function App() {
   const [configFields, setConfigFields] = useState<ConfigFieldState[]>(() => loadConfigFields());
   const [workspace, dispatch] = useReducer(reducer, volumes, initialWorkspace); const [preflight, setPreflight] = useState<Preflight>(() => runPreflight()); const [mcpCapabilities, setMcpCapabilities] = useState<CapabilitySpec[]>(() => hydrateMcpCapabilities([]));
   const runHandle = useRef<RunHandle | null>(null); const abortController = useRef<AbortController | null>(null);
+  // Developer > Dry-run default — see DeveloperPanel and openForm. Session-
+  // only (not persisted to config.yaml, not restored across restarts): a
+  // developer flag that silently outlived the debugging session it was
+  // flipped on for is worse than one that resets and makes you notice.
+  const [devDryRunDefault, setDevDryRunDefault] = useState(false);
   const layout = layoutForColumns(columns); const activeVolume = volumes.find((volume) => volume.id === workspace.activeVolume) ?? null;
   // Console is the only screen ConsolePanel ever renders on — no reason to
   // keep paying for the bordered Header, the Navigation sidebar, and (in
@@ -202,6 +221,17 @@ export function App() {
   const recentVolumes = useMemo(() => volumes.slice(0, 10), [volumes]);
   const recentVolumeIds = useMemo(() => recentVolumes.map((volume) => volume.id), [recentVolumes]);
   const refresh = (): void => { const nextVolumes = loadVolumes(); setVolumes(nextVolumes); setEpubs(loadEpubs()); setConfigFields(loadConfigFields()); setRuntimeConfig(loadRuntimeConfigLines()); dispatch({ type: 'activeVolume', id: nextVolumes.some((item) => item.id === workspace.activeVolume) ? workspace.activeVolume : nextVolumes[0]?.id ?? null }); };
+  // Volume detection resilience (see useFileWatcher.ts's useDirectoryWatcher
+  // docstring for the full three-layer rationale): a directory watcher +
+  // poll on work/ catches a volume created by a process outside this app
+  // entirely, and the run-completion effect below catches this app's own
+  // "Extract EPUB" the instant it finishes — neither depended on the other
+  // before, which is how "cannot detect a just-created volume" happened.
+  useDirectoryWatcher(workRoot, refresh);
+  useEffect(() => {
+    if (workspace.run && workspace.run.status !== 'running') refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace.run?.status]);
 
   useEffect(() => { const result = runPreflight(); setPreflight(result); if (result.importsStatus !== 'ready') return; const controller = new AbortController(); void listMcpTools(controller.signal).then((tools) => { setMcpCapabilities(hydrateMcpCapabilities(tools)); setPreflight((current) => ({ ...current, mcpStatus: 'ready', detail: `${tools.length} MCP tools available.` })); }).catch((error: unknown) => setPreflight((current) => ({ ...current, mcpStatus: 'missing', detail: error instanceof Error ? error.message : String(error) }))); return () => controller.abort(); }, []);
   useEffect(() => () => { runHandle.current?.cancel(); abortController.current?.abort(); void closeMcpClient(); }, []);
@@ -223,7 +253,17 @@ export function App() {
   const volumeItems = useMemo(() => sortVolumes(filterVolumes(volumes, workspace.search), workspace.sort), [volumes, workspace.search, workspace.sort]);
   const filteredConfigFields = useMemo(() => configFields.filter((field) => fuzzyMatch(workspace.search, `${field.label} ${field.section} ${field.description}`)), [configFields, workspace.search]);
 
-  const openForm = (spec: CapabilitySpec, values?: FormValues): void => { if (spec.available === false) return; dispatch({ type: 'form', form: { spec, values: values ?? initialValues(spec, workspace.activeVolume), cursor: 0, confirmation: 0, issues: [] } }); };
+  const openForm = (spec: CapabilitySpec, values?: FormValues): void => {
+    if (spec.available === false) return;
+    const defaults = values ?? initialValues(spec, workspace.activeVolume);
+    // Developer > Dry-run default applies to ANY capability with a dry_run
+    // field, not just Translate Volume specifically — a future prep dry-run
+    // field would pick this up for free.
+    const withDevDefaults = devDryRunDefault && spec.fields.some((field) => field.key === 'dry_run')
+      ? { ...defaults, dry_run: true }
+      : defaults;
+    dispatch({ type: 'form', form: { spec, values: withDevDefaults, cursor: 0, confirmation: 0, issues: [] } });
+  };
   const stopRun = (): void => { runHandle.current?.cancel(); abortController.current?.abort(); runHandle.current = null; abortController.current = null; dispatch({ type: 'runDone', code: null, cancelled: true }); dispatch({ type: 'cancelConfirm', value: false }); };
   const launch = (form: FormState): void => {
     const issues = validateCapability(form.spec, form.values, pipelineRoot); if (issues.length) { dispatch({ type: 'form', form: { ...form, issues: issues.map((issue) => issue.message) } }); return; }
@@ -310,6 +350,7 @@ export function App() {
       else if (special.home) dispatch({ type: 'configScroll', delta: 0, viewport: rows - 8, destination: 'home' });
       else if (special.end) dispatch({ type: 'configScroll', delta: 0, viewport: rows - 8, destination: 'end' });
       else if (key.return) { const item = NAV[workspace.navIndex] ?? NAV[0]!; dispatch({ type: 'nav', nav: item.id, navIndex: workspace.navIndex }); }
+      else if (input === 'd') setDevDryRunDefault((prev) => !prev);
       return;
     }
     if (workspace.nav === 'configuration') {
@@ -339,7 +380,7 @@ export function App() {
     }
   });
 
-  const dashboard = <RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} />;
+  const dashboard = <Box flexDirection="column"><RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} /><DeveloperPanel dryRunDefault={devDryRunDefault} /></Box>;
   const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} epubs={epubs} recentVolumes={recentVolumes} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'configuration' ? <ConfigurationPanel fields={filteredConfigFields} cursor={workspace.itemIndex} rows={rows} edit={workspace.configEdit} status={workspace.configStatus} query={workspace.search} /> : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
   const inspector = <Inspector volume={activeVolume} />;
   const footer = footerText(workspace);

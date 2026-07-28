@@ -63,10 +63,17 @@ class DeepSeekTranslator:
         volume_id: str,
         config: Optional[Dict[str, Any]] = None,
         thinking_log_enabled: Optional[bool] = None,
+        dry_run: bool = False,
     ):
         self.work_dir = Path(work_dir)
         self.volume_id = volume_id
         self._config = config or {}
+        # Developer flag: assemble each chapter's full API payload and write
+        # it to WORK/<vol>/DRY_RUN/ instead of sending it. See dry_run.py and
+        # DeepSeekClient.generate()'s dry_run docstring for what's guaranteed
+        # (zero network calls) and what's traded away to guarantee it
+        # (conversation-accumulated payload shape, for multi-turn volumes).
+        self.dry_run = dry_run
 
         self.client = DeepSeekClient()
 
@@ -89,6 +96,12 @@ class DeepSeekTranslator:
             thinking_log_cfg.get("enabled", True) if thinking_log_enabled is None else thinking_log_enabled
         )
         self.thinking_log_dir_name = thinking_log_cfg.get("output_dir", "THINKING")
+
+        # Track per-chapter guidance text for DRDI skip optimization.
+        # When consecutive chapters share EPS band + active characters,
+        # the full DRDI/DOVB block is replaced with a one-line CONTINUE
+        # directive — saving ~200-500 uncached input tokens per turn.
+        self._previous_guidance_text: Optional[str] = None
 
         context_xml = load_context_xml(self.work_dir)
         if context_xml is None:
@@ -150,14 +163,51 @@ class DeepSeekTranslator:
             reasoning_directive_enabled=self.optimizations.get("drdi", {}).get("enabled", True),
             voice_block_enabled=self.optimizations.get("dovb", {}).get("enabled", True),
         )
+
+        # Assemble guidance text for comparison (must match the block text
+        # that build_user_message assembles from these same blocks).
+        current_guidance = "\n\n".join(
+            block.get("text", "")
+            for block in guidance_blocks
+            if isinstance(block, dict) and block.get("text")
+        )
+
         user_message = build_user_message(
             jp_source=jp_source,
             chapter_guidance_blocks=guidance_blocks,
+            previous_guidance_text=self._previous_guidance_text,
         )
+
+        # Rotate: current becomes previous for the next chapter's comparison.
+        self._previous_guidance_text = current_guidance if current_guidance else None
 
         response = self.client.generate(
             prompt=user_message,
             system_instruction=self.system_instruction,
+            dry_run=self.dry_run,
+        )
+
+        if response.provider_metadata.get("dry_run"):
+            from src.translator.dry_run import write_dry_run_prompt
+            out_path = write_dry_run_prompt(
+                work_dir=self.work_dir, volume_id=self.volume_id, chapter_id=chapter_id,
+                payload=response.provider_metadata["payload"],
+            )
+            logger.info("[DRY-RUN] %s — payload written to %s (no API call made)", chapter_id, out_path)
+            # No thinking log, no cost log, no conversation commit — none of
+            # those are true for a call that never happened.
+            return f"[DRY RUN — no translation performed. Payload written to {out_path}]"
+
+        from src.common.token_telemetry import log_call
+        log_call(
+            phase="translator",
+            volume_id=self.volume_id,
+            call_label=chapter_id,
+            model=response.model,
+            cache_hit_tokens=response.cached_tokens,
+            fresh_tokens=max(0, response.input_tokens - response.cached_tokens),
+            output_tokens=response.output_tokens,
+            cost_usd=response.total_cost_usd,  # already correctly computed by generate()
         )
 
         # Strip any <thinking>...</thinking> that leaked into the content
@@ -211,6 +261,23 @@ class DeepSeekTranslator:
             f"## DeepSeek V4 Pro's Translation Reasoning\n\n"
         )
         atomic_write_text(thinking_dir / f"{chapter_id}_THINKING.md", header + merged + "\n")
+        self._maybe_rebuild_density_map()
+
+    def _maybe_rebuild_density_map(self) -> None:
+        """Rebuild THINKING/density_map.html from every THINKING/*.md file on
+        disk so far. Cheap (local parsing + string-built SVG, no LLM call) —
+        safe to redo after every chapter. Never raises: a malformed or
+        not-yet-populated context.xml just means the map isn't ready yet,
+        not a translation failure."""
+        from src.translator.config import get_thinking_log_config
+        density_cfg = get_thinking_log_config().get("density_map", {}) or {}
+        if not density_cfg.get("enabled", True):
+            return
+        from src.translator.thinking_density import build_density_report
+        try:
+            build_density_report(self.work_dir, self.volume_id)
+        except Exception as exc:
+            logger.warning("[THINKING] %s — density map rebuild failed: %s", self.volume_id, exc)
 
     def _post_process(self, text: str) -> str:
         if self.post_processing.get("scene_break_formatting", True):
@@ -249,6 +316,12 @@ class DeepSeekTranslator:
         chapter_meta = chapter_meta or {}
         chapter_id = chapter_meta.get("chapter_id", chapter_path.stem)
         en_text = self.translate_chapter(chapter_path, {**chapter_meta, "chapter_id": chapter_id})
+        if self.dry_run:
+            # en_text is the dry-run placeholder marker, not a translation —
+            # writing it to EN/ or marking the chapter completed would
+            # corrupt real pipeline state (QC's completeness check, `mtl
+            # status`, the TUI's phase strip all trust translation_status).
+            return self.work_dir / "DRY_RUN"
         output_path = self._default_output_path(chapter_id)
         output_path.write_text(en_text, encoding="utf-8")
         _update_manifest_after_translation(self.work_dir, {chapter_id})
@@ -315,6 +388,7 @@ def translate_volume(
     volume_id: str,
     chapters: Optional[List[str]] = None,
     thinking_log_enabled: Optional[bool] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Path]:
     """Convenience entry point: translate a volume's JP/ chapters by volume_id."""
     work_dir = WORK_DIR / volume_id
@@ -331,5 +405,6 @@ def translate_volume(
         work_dir=work_dir,
         volume_id=volume_id,
         thinking_log_enabled=thinking_log_enabled,
+        dry_run=dry_run,
     )
     return translator.translate_all(chapter_files)

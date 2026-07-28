@@ -22,15 +22,20 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
     """Register Phase 2 tools."""
 
     @mcp.tool()  # type: ignore[attr-defined]
-    def translate_chapter(volume_id: str, chapter_id: str, thinking_log: Optional[bool] = None) -> dict:
+    def translate_chapter(
+        volume_id: str, chapter_id: str, thinking_log: Optional[bool] = None, dry_run: bool = False,
+    ) -> dict:
         volume_dir = resolve_volume_dir(volume_id, cfg)
         jp_dir = volume_dir / "JP"
         chapter_path = _resolve_jp_chapter(jp_dir, chapter_id)
 
-        translator = DeepSeekTranslator(work_dir=volume_dir, volume_id=volume_id, thinking_log_enabled=thinking_log)
+        translator = DeepSeekTranslator(
+            work_dir=volume_dir, volume_id=volume_id, thinking_log_enabled=thinking_log, dry_run=dry_run,
+        )
         # translate_and_persist_chapter writes the EN file AND marks it
         # completed in manifest.json in one step — do not duplicate that
-        # write-then-forget-the-manifest logic here again.
+        # write-then-forget-the-manifest logic here again. Under dry_run it
+        # skips both and returns WORK/<vol>/DRY_RUN/ instead.
         output_path = translator.translate_and_persist_chapter(chapter_path, {"chapter_id": chapter_path.stem})
 
         return {
@@ -39,6 +44,7 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
             "volume_id": volume_id,
             "chapter_id": chapter_path.stem,
             "output_path": str(output_path),
+            "dry_run": dry_run,
         }
 
     @mcp.tool()  # type: ignore[attr-defined]
@@ -46,6 +52,7 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
         volume_id: str,
         chapters: Optional[List[str]] = None,
         thinking_log: Optional[bool] = None,
+        dry_run: bool = False,
     ) -> dict:
         volume_dir = resolve_volume_dir(volume_id, cfg)
         jp_dir = volume_dir / "JP"
@@ -57,7 +64,9 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
             wanted = {str(c).strip() for c in chapters}
             chapter_files = [f for f in chapter_files if f.stem in wanted]
 
-        translator = DeepSeekTranslator(work_dir=volume_dir, volume_id=volume_id, thinking_log_enabled=thinking_log)
+        translator = DeepSeekTranslator(
+            work_dir=volume_dir, volume_id=volume_id, thinking_log_enabled=thinking_log, dry_run=dry_run,
+        )
         results = translator.translate_all(chapter_files)
 
         manifest = {}
@@ -73,6 +82,7 @@ def register_translator_tools(mcp: object, cfg: MCPConfig) -> None:
             "chapter_count": len(results),
             "output_paths": {chapter_id: str(path) for chapter_id, path in results.items()},
             "pipeline_state": manifest.get("pipeline_state", {}) if isinstance(manifest, dict) else {},
+            "dry_run": dry_run,
         }
 
 

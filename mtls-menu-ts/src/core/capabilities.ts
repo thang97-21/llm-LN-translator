@@ -5,11 +5,17 @@ const volume: FieldSpec = { key: 'volume_id', label: 'Volume', kind: 'volume', r
 const epub: FieldSpec = { key: 'epub_path', label: 'EPUB', kind: 'epub', required: true, positional: true, projectScoped: true };
 const volumeId: FieldSpec = { key: 'volume_id_override', label: 'Volume ID override', kind: 'text', cliFlag: '--volume-id' };
 const seriesId: FieldSpec = { key: 'series_id', label: 'Series ID', kind: 'text', cliFlag: '--series-id' };
+// Developer flag — see DeveloperPanel (App.tsx) for the Dashboard-level
+// default toggle. 'paid' risk stays on the capability regardless of this
+// field's value: the field only affects what THIS launch does, and
+// defaulting the whole capability to a lower risk tier would misrepresent
+// every non-dry-run launch of the same form.
+const dryRun: FieldSpec = { key: 'dry_run', label: 'Dry Run (assemble payload, send nothing)', kind: 'boolean', cliFlag: '--dry-run', defaultValue: false };
 
 export const CLI_CAPABILITIES: readonly CapabilitySpec[] = [
   { id: 'extract', label: 'Extract EPUB', detail: 'Extract an EPUB and create its working volume.', group: 'Workflows', route: { transport: 'cli', command: 'extract' }, fields: [epub, volumeId], risk: 'write' },
   { id: 'prep', label: 'Prep Volume', detail: 'Build context.xml through a paid DeepSeek preparation call.', group: 'Workflows', route: { transport: 'cli', command: 'prep' }, fields: [volume, seriesId], risk: 'paid' },
-  { id: 'translate', label: 'Translate Volume', detail: 'Translate selected chapters, or every pending chapter when none are chosen.', group: 'Workflows', route: { transport: 'cli', command: 'translate' }, fields: [volume, { key: 'chapters', label: 'Chapters', kind: 'chapter-list', cliFlag: '--chapters' }], risk: 'paid' },
+  { id: 'translate', label: 'Translate Volume', detail: 'Translate selected chapters, or every pending chapter when none are chosen.', group: 'Workflows', route: { transport: 'cli', command: 'translate' }, fields: [volume, { key: 'chapters', label: 'Chapters', kind: 'chapter-list', cliFlag: '--chapters' }, dryRun], risk: 'paid' },
   { id: 'qc', label: 'QC Volume', detail: 'Run the read-only filesystem quality gate.', group: 'Workflows', route: { transport: 'cli', command: 'qc' }, fields: [volume], risk: 'read' },
   { id: 'build', label: 'Build EPUB', detail: 'Package translated chapters into an EPUB.', group: 'Workflows', route: { transport: 'cli', command: 'build' }, fields: [volume, { key: 'output', label: 'Output filename', kind: 'text', cliFlag: '--output' }], risk: 'write' },
   { id: 'run', label: 'Full Pipeline', detail: 'Extract, prep, translate, QC, and build as one canonical CLI workflow.', group: 'Workflows', route: { transport: 'cli', command: 'run' }, fields: [epub, volumeId, seriesId], risk: 'paid' },
@@ -34,8 +40,8 @@ export const MCP_TOOL_OVERLAY: readonly ToolOverlay[] = [
   { id: 'split_content', label: 'Split content', detail: 'Split supplied content into token-bounded parts.', group: 'Librarian', route: { transport: 'mcp', tool: 'split_content' }, fields: [{ key: 'spine_items', label: 'Spine items JSON', kind: 'json-array' }, { key: 'content', label: 'Content', kind: 'multiline' }, integer('max_tokens', 'Maximum tokens', '2000'), integer('min_tokens', 'Minimum tokens', '800')], risk: 'read' },
   { id: 'run_librarian', label: 'Run Librarian', detail: 'Extract and return a manifest.', group: 'Librarian', route: { transport: 'mcp', tool: 'run_librarian' }, fields: [projectPath('epub_path', 'EPUB'), text('volume_id', 'Volume ID'), { key: 'source_lang', label: 'Source language', kind: 'enum', choices: ['ja'], defaultValue: 'ja' }, { key: 'target_lang', label: 'Target language', kind: 'enum', choices: ['en'], defaultValue: 'en' }], risk: 'write' },
   { id: 'prep_volume', label: 'Prep volume', detail: 'Build context.xml through DeepSeek.', group: 'Prep', route: { transport: 'mcp', tool: 'prep_volume' }, fields: [volume, text('series_id', 'Series ID')], risk: 'paid' },
-  { id: 'translate_chapter', label: 'Translate chapter', detail: 'Translate one selected JP chapter through DeepSeek.', group: 'Translator', route: { transport: 'mcp', tool: 'translate_chapter' }, fields: [volume, { key: 'chapter_id', label: 'Chapter', kind: 'chapter-list', required: true }], risk: 'paid' },
-  { id: 'run_translator', label: 'Run translator', detail: 'Translate selected or all JP chapters through DeepSeek.', group: 'Translator', route: { transport: 'mcp', tool: 'run_translator' }, fields: [volume, { key: 'chapters', label: 'Chapters', kind: 'chapter-list' }], risk: 'paid' },
+  { id: 'translate_chapter', label: 'Translate chapter', detail: 'Translate one selected JP chapter through DeepSeek.', group: 'Translator', route: { transport: 'mcp', tool: 'translate_chapter' }, fields: [volume, { key: 'chapter_id', label: 'Chapter', kind: 'chapter-list', required: true }, bool('dry_run', 'Dry Run (assemble payload, send nothing)')], risk: 'paid' },
+  { id: 'run_translator', label: 'Run translator', detail: 'Translate selected or all JP chapters through DeepSeek.', group: 'Translator', route: { transport: 'mcp', tool: 'run_translator' }, fields: [volume, { key: 'chapters', label: 'Chapters', kind: 'chapter-list' }, bool('dry_run', 'Dry Run (assemble payload, send nothing)')], risk: 'paid' },
   { id: 'qc_volume', label: 'QC volume', detail: 'Run read-only filesystem QC.', group: 'QC', route: { transport: 'mcp', tool: 'qc_volume' }, fields: [volume], risk: 'read' },
   { id: 'write_bible', label: 'Write series bible', detail: 'Merge volume continuity into the selected series bible.', group: 'Continuity', route: { transport: 'mcp', tool: 'write_bible' }, fields: [volume, text('series_id', 'Series ID')], risk: 'write' },
   { id: 'markdown_to_xhtml', label: 'Markdown to XHTML', detail: 'Render Markdown in memory.', group: 'Builder', route: { transport: 'mcp', tool: 'markdown_to_xhtml' }, fields: [{ key: 'md_content', label: 'Markdown content', kind: 'multiline', required: true }, text('chapter_id', 'Chapter ID'), bool('skip_illustrations', 'Skip illustrations')], risk: 'read' },
@@ -114,6 +120,13 @@ export function serializeCli(spec: CapabilitySpec, values: FormValues): string[]
     if (field.positional) argv.push(String(value));
     else if (field.cliFlag) {
       argv.push(field.cliFlag);
+      // argparse's boolean flags are action="store_true" — presence alone
+      // means true, and a following "true"/"false" token would be parsed as
+      // an unrelated positional/unrecognized argument, not consumed by the
+      // flag. Never triggered before dry_run: every prior CLI boolean field
+      // went through serializeMcp instead, which already handles kind ===
+      // 'boolean' correctly — this was a latent gap, not a regression.
+      if (field.kind === 'boolean') continue;
       if (field.kind === 'chapter-list') argv.push(...String(value).split(',').map((part) => part.trim()).filter(Boolean));
       else argv.push(String(value));
     }

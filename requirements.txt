@@ -18,7 +18,11 @@ beautifulsoup4>=4.12
 # Image processing (Builder)
 Pillow>=10.0
 
-# Token counting for cache/pricing analytics
+# Token counting for cache/pricing analytics (src/common/token_telemetry.py).
+# Local only, no auth — tried HuggingFace's AutoTokenizer for DeepSeek's own
+# repos and reverted: needs HF_TOKEN in practice (rate-limited/gated), which
+# isn't a trade worth making for a token-counting utility. tiktoken o200k_base
+# is the approximation, cl100k_base a secondary fallback.
 tiktoken>=0.7
 
 # MCP server (Phase 6) — stdio tool server for Claude Desktop / Claude Code

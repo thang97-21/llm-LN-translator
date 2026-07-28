@@ -34,3 +34,70 @@ export function useFileWatcher(filePath: string, onChange: () => void, debounceM
     };
   }, [filePath, debounceMs]);
 }
+
+// Watches a DIRECTORY itself (not one file) for any direct child appearing,
+// renaming, or disappearing — e.g. a new volume folder landing under work/
+// mid-session. Built for exactly one bug: the volume list is a one-time
+// snapshot from loadVolumes() at app startup (see App.tsx's `volumes`
+// useState initializer), and nothing was refreshing it — not after a run
+// this app itself launched (Extract EPUB finishing has no wiring to
+// re-scan), and definitely not when a volume was created by an entirely
+// separate process (a CLI extract in another terminal) the app has no
+// other way to learn about. loadVolumesFrom() (mtls.ts) itself was never
+// the problem — it finds and correctly ranks a brand-new volume by
+// updatedAt the instant it's asked to look; the app just wasn't asking.
+//
+// Non-recursive by choice, not by platform limitation: recursive watching
+// on work/ would also fire on every chapter file a translate run writes
+// (EN/*.md, THINKING/*.md, manifest.json per chapter), turning one
+// volume-list refresh into a refresh storm mid-translation. A direct-child
+// create/rename event is everything "a new volume just appeared" needs —
+// Librarian's extract finishes as one blocking call, so by the time the
+// new work/<vol>/ directory is even visible to a watcher, manifest.json is
+// already inside it.
+//
+// Three resilience layers, weakest link last:
+//   1. fs.watch on the directory — near-instant, but fs.watch is known to
+//      silently miss events under rapid successive writes, and isn't
+//      guaranteed on every platform/filesystem (network drives, some
+//      containers) — wrapped in try/catch, never a hard dependency.
+//   2. A periodic poll (pollMs) — the actual fallback: catches whatever the
+//      watcher missed or never had, independent of whether layer 1 is
+//      working at all. This is what makes detection resilient rather than
+//      "usually works."
+//   3. The caller's own manual refresh (App.tsx's 'r' key) — always
+//      available, zero dependencies, the fallback of last resort.
+export function useDirectoryWatcher(
+  dirPath: string,
+  onChange: () => void,
+  options?: { debounceMs?: number; pollMs?: number },
+): void {
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  const debounceMs = options?.debounceMs ?? 500;
+  const pollMs = options?.pollMs ?? 8000;
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const trigger = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => onChangeRef.current(), debounceMs);
+    };
+
+    let watcher: ReturnType<typeof watch> | null = null;
+    try {
+      watcher = watch(dirPath, () => trigger());
+    } catch {
+      // fs.watch unavailable for this path on this platform/filesystem —
+      // the poll below is the fallback, not a special case handled here.
+    }
+
+    const poll = setInterval(() => onChangeRef.current(), pollMs);
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      watcher?.close();
+      clearInterval(poll);
+    };
+  }, [dirPath, debounceMs, pollMs]);
+}

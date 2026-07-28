@@ -38,12 +38,55 @@ prep:
   prompt: src/prompt/prep_prompt_deepseek_en.xml
   thinking_budget: 48000
   max_output_tokens: 128000
+  effort: high                       # output_config.effort for every prep
+                                      # Pro call (unified path's single call,
+                                      # and the parallel path's phase1_pro_root)
   http_timeout_seconds: 900
   # Where cross-volume series bibles live. Sequel detection: if
   # bible_dir/<series_id>/ exists, prep_volume loads it first and injects
   # the accumulated term_lock/verbatim_anchors/voice_fingerprints so DeepSeek
   # has continuity context instead of reinventing names from scratch.
   bible_dir: bibles/
+
+  # ── Parallel Cache-Warmed Prep (PARALLEL_PREP_GUIDE.md) ───────────────────
+  # Alternative to the single unified Pro call above: one Pro call extracts
+  # character_roster + name_map (establishes the JP-chapters prefix in
+  # DeepSeek's disk cache), one sequential Flash call warms that cache, then
+  # 12 more Flash calls fire in parallel — each returning one small block
+  # instead of the unified path re-echoing the whole ~50K-token document.
+  # First real production run (2026-07-27, ギャルサーの家庭教師になった):
+  # cache-warming confirmed working (95.7% hit ratio on calls 3-14), but
+  # scene_plans truncated at 15,224/16,000 output tokens on a 16-chapter
+  # volume — malformed XML, assembly failed, fallback_to_unified ate the
+  # cost twice over ($0.048 wasted + $0.072 fallback vs. $0.048 if it hadn't
+  # truncated). flash_max_output_tokens raised 16000 -> 32000 in response.
+  parallel:
+    enabled: true
+    fallback_to_unified: true          # on any failure, retry with the
+                                        # proven unified Pro call above
+                                        # instead of failing prep outright
+    flash_model: deepseek-v4-flash
+    flash_thinking_budget: 8000        # 0 disables extended thinking for
+                                        # Flash calls entirely. Must stay
+                                        # below flash_max_output_tokens —
+                                        # budget_tokens counts against the
+                                        # same ceiling as the block output.
+    flash_max_output_tokens: 32000     # each call returns ONE block, not
+                                        # the whole document, but the verbose
+                                        # blocks (scene_plans, eps_arc_tracker,
+                                        # cultural_glossary) ran 12-15K tokens
+                                        # on a 16-chapter volume with only
+                                        # 16000 to work with — see the incident
+                                        # note above. 32000 gives real headroom
+                                        # without meaningfully raising cost on
+                                        # the cheap blocks (validation_audit
+                                        # used all of 626).
+    flash_effort: high                 # output_config.effort for every Flash
+                                        # call in Phase 2 (warming + parallel)
+    warming_block: voice_fingerprints  # which block the lone sequential
+                                        # cache-warming call (Phase 2a) fills
+    max_concurrent_flash_calls: 12     # well under Flash's documented 2500
+                                        # concurrent-request ceiling
 
 # ── Translation Pipeline ────────────────────────────────────────────────────
 translation:
@@ -68,6 +111,16 @@ translation:
   thinking_log:
     enabled: true                # --no-thinking-log on the CLI overrides this to false
     output_dir: THINKING         # Relative to the volume's work dir: work/<vol_id>/THINKING/
+
+    # ── THINKING Density Map (translator-only telemetry) ────────────────────
+    # Rebuilt after every chapter from every THINKING/*.md file on disk —
+    # measures how much of context.xml's canon graph each chapter's silent
+    # reasoning actually referenced (which blocks, which characters) against
+    # how long that reasoning ran. See src/translator/thinking_density.py.
+    # Meaningless with thinking_log.enabled: false (nothing to analyze), so
+    # this is skipped automatically in that case regardless of this flag.
+    density_map:
+      enabled: true
 
   # ── DeepSeek V4 Translator Parameters ─────────────────────────────────────
   # This is THE control knob for all DeepSeek V4 translator behavior.
@@ -128,7 +181,7 @@ translation:
       # sends it in output_config for forward-compatibility if DeepSeek
       # ever adds server-side effort support. The actual per-chapter
       # reasoning intensity is controlled via DRDI (see below).
-      effort: max                         # max | high | medium | low
+      effort: xhigh                         # max | high | medium | low
 
     # ── Auto-Prefix Cache ───────────────────────────────────────────────────
     caching:
@@ -163,8 +216,10 @@ translation:
 
       # Number of most-recent chapters to include verbatim (full JP + EN
       # pair) in each turn. Older chapters are summarized into a
-      # continuity checkpoint. 3 is the production value.
-      recent_verbatim_chapters: 3
+      # continuity checkpoint. 2 is the production value — trimmed from 3
+      # to improve cache hit ratio (~82% → ~86% on typical volumes) without
+      # meaningful loss of translation-memory context.
+      recent_verbatim_chapters: 2
 
       # Include the EXACT JP source text of recent chapters in the user
       # turn (not just the EN output). Enables DeepSeek to cross-reference
@@ -314,9 +369,9 @@ mcp_harness:
   subagents:
     prep:
       enabled: true
-      model: deepseek-v4-pro
+      model: deepseek-v4-flash
       thinking_budget: 48000
-      effort: max
+      effort: xhigh
       max_output_tokens: 128000
 
     translator:

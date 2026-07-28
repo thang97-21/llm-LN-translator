@@ -8,10 +8,14 @@ DeepSeek_MTLS/ root (or invoke via mtl.bat, which cd's there for you) so the
 
     extract <epub_path>      Phase 1: EPUB -> JP chapters (Librarian)
     prep <vol_id>            Unified DeepSeek call: fills context.xml (no Gemini)
-    translate <vol_id> [--no-thinking-log]
+    translate <vol_id> [--no-thinking-log] [--dry-run]
                              Phase 2: JP -> EN (DeepSeek V4 Pro). Saves DeepSeek's
                              per-chapter reasoning to work/<vol_id>/THINKING/ by
-                             default; --no-thinking-log skips that.
+                             default; --no-thinking-log skips that. --dry-run
+                             (developer flag) assembles each chapter's full API
+                             payload and writes it to work/<vol_id>/DRY_RUN/ instead
+                             of sending it — zero API cost, no EN/ output, no
+                             manifest changes.
     qc <vol_id>               Filesystem-only sanity gate (zero API cost)
     build <vol_id>            Phase 4: EN -> EPUB (Builder)
     run <epub_path> [--no-thinking-log]
@@ -102,7 +106,13 @@ def cmd_translate(args: argparse.Namespace) -> int:
         args.volume_id,
         chapters=args.chapters,
         thinking_log_enabled=False if args.no_thinking_log else None,
+        dry_run=args.dry_run,
     )
+    if args.dry_run:
+        print(f"\nDry run — {len(results)} chapter(s), no API calls made:")
+        for chapter_id in sorted(results):
+            print(f"  {chapter_id} -> work/{args.volume_id}/DRY_RUN/")
+        return 0
     print(f"\nTranslated {len(results)} chapter(s):")
     for chapter_id, output_path in sorted(results.items()):
         print(f"  {chapter_id} -> {output_path}")
@@ -222,6 +232,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_translate.add_argument(
         "--no-thinking-log", action="store_true",
         help="Skip saving DeepSeek's per-chapter reasoning to work/<vol_id>/THINKING/ (on by default)",
+    )
+    p_translate.add_argument(
+        "--dry-run", action="store_true",
+        help="Developer flag: assemble each chapter's full API payload and write it to "
+             "work/<vol_id>/DRY_RUN/ instead of sending it. Zero API cost, no EN/ output, "
+             "no manifest changes.",
     )
     p_translate.set_defaults(func=cmd_translate)
 
