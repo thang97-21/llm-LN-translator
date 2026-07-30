@@ -64,3 +64,8 @@ cache/*
 # ── Copyrighted Workspaces ────────────────────────────────────────────────────────
 raw/
 ## work/
+
+# Commercial published-novel text used as local golden-sample calibration
+# data (Seven Seas/Kobo licensed translations) — never redistribute this to
+# the remote, local calibration use only.
+.github/skills/mtl-quality-evaluator/Seven_Seas_REPO/
