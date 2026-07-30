@@ -6,7 +6,7 @@
 # ── Project Identity ────────────────────────────────────────────────────────
 project:
   target_language: en
-  name: DeepSeek_MTLS
+  name: DeepSeek MTLS
   version: 1.0.0
 
 # ── File System Paths ───────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ prep:
                                         # call in Phase 2 (warming + parallel)
     warming_block: voice_fingerprints  # which block the lone sequential
                                         # cache-warming call (Phase 2a) fills
-    max_concurrent_flash_calls: 12     # well under Flash's documented 2500
+    max_concurrent_flash_calls: 20    # well under Flash's documented 2500
                                         # concurrent-request ceiling
 
 # ── Translation Pipeline ────────────────────────────────────────────────────
@@ -378,7 +378,87 @@ mcp_harness:
       harness_managed: true   # DeepSeekClient owns its config (translation.translator)
 
     qc:
-      enabled: true            # Filesystem-only, no LLM call
+      enabled: true            # Agent-managed — see top-level §qc for model config
 
     bible_writer:
       enabled: true            # Filesystem-only, no LLM call
+
+# ── QC Gate Configuration ───────────────────────────────────────────────────
+# Model, thinking, and token parameters for the QC agent family.
+# Pro uses max reasoning for semantic literary analysis (voice differentiation,
+# emotional fidelity, SSP calibration, exemplar generation). Flash is reserved
+# for lightweight pre-flight checks only — never literary evaluation.
+#
+# Per-agent thinking budgets are in each agent's YAML frontmatter
+# (thinkingBudget: 36000 for prose sub-agents). This section defines the
+# ceiling and the model routing. The frontmatter budget cannot exceed
+# the max_output_tokens defined here.
+qc:
+  # ── Model Selection ──────────────────────────────────────────────────────
+  # Primary model for all semantic QC analysis. Pro tier is mandatory for
+  # literary evaluation — Flash cannot perform the structured comparison
+  # and forensic reasoning required by the §E.4 exemplar chain.
+  model: deepseek-v4-pro
+
+  # Lightweight model for pre-flight structural checks only.
+  # qc-structural uses this when invoked standalone (Mode A).
+  # Never used for prose, names, or linguistic analysis.
+  flash_model: deepseek-v4-flash
+
+  # ── Endpoint ──────────────────────────────────────────────────────────────
+  endpoint: https://api.deepseek.com/anthropic
+  api_key_env: DEEPSEEK_API_KEY
+  http_timeout_seconds: 900             # 15 minutes for worst-case volume scan
+
+  # ── Context & Output Ceilings ────────────────────────────────────────────
+  # Maxed at DeepSeek V4 Pro's documented limits. The full 1M context is
+  # needed to hold agent instructions + context.xml + all EN/JP chapters +
+  # golden samples simultaneously. 384K output ensures room for the full
+  # locked-format audit with 9+ exemplars.
+  context_window: 1000000
+  max_output_tokens: 384000
+
+  # ── Thinking / Reasoning ──────────────────────────────────────────────────
+  thinking:
+    enabled: true
+    # Pro ceiling. The YAML frontmatter per-agent thinkingBudget (currently
+    # 36000 for prose sub-agents) must not exceed this value. Orchestrator
+    # agents (mtl-qc, qc-prose) use a lower budget since they aggregate
+    # rather than analyze — defined in their respective frontmatter.
+    budget_tokens: 48000                # PRO ceiling — per-agent budgets ≤ this
+    effort: xhigh                       # max | high | medium | low
+
+  # ── Agent-Specific Budget Overrides ───────────────────────────────────────
+  # These override the per-agent YAML frontmatter thinkingBudget when the
+  # agent is invoked through the MCP harness. Frontmatter values are
+  # authoritative when agents run as VS Code sub-agents.
+  agent_budgets:
+    # Orchestrators — aggregation, not analysis
+    mtl-qc: 16000                       # mode detection + dispatch + gate decision
+    qc-prose: 16000                     # provenance detection + sub-agent aggregation
+
+    # Tier 1 — mechanical/pattern checks (lower reasoning demand)
+    qc-structural: 8000                 # file integrity, headings, encoding
+    qc-names: 12000                     # name drift, honorifics, term locks
+    qc-linguistic: 16000                # CJK residue, calques, grammar, W4W errors
+
+    # Tier 2 — semantic literary analysis (highest reasoning demand)
+    qc-prose-character: 36000           # voice distinctiveness, contamination, archetypes
+    qc-prose-narrator: 36000            # sentence variety, repetition, filter words, POV
+    qc-prose-emotional-peak: 36000      # emotional fidelity, subtext, SSP beat comparison
+
+  # ── SSP Golden Sample Routing ─────────────────────────────────────────────
+  golden_samples:
+    # Directory containing extracted SSP calibration passages.
+    # Indexed by golden-samples-index.md with LCI dimension mapping.
+    registry_dir: .github/agents/reference/
+
+    # Auto-detect Mode B-Deep when golden samples exist for the volume's
+    # series. When true, any QC invocation against a volume with matching
+    # golden samples automatically runs the full literary craft scan.
+    auto_deep_scan: true
+
+    # Load all matching series samples, not just the primary match.
+    # Required for §E.0 Register Provenance — composite calibration
+    # needs cross-series comparison data.
+    load_all_matching: true

@@ -26,6 +26,7 @@ from .markdown_to_xhtml import MarkdownToXHTML
 from .epub_packager import EPUBPackager
 from .image_analyzer import get_image_dimensions, is_horizontal, analyze_kuchie_images
 from .merge_translated_shards_to_spine import merge_translated_shards_to_spine
+from src.common.atomic_io import atomic_write_text
 import re
 
 # The leading H1 line every translated chapter emits ("# Chapter Title") —
@@ -39,6 +40,28 @@ _CHAPTER_H1_RE = re.compile(r'^#(?!#)\s+(.+?)\s*$')
 # value means prep didn't populate it, and OPF assembly should stop, not
 # guess in Japanese.
 _REQUIRED_VOLUME_IDENTITY_FIELDS = ("title_en", "series_en", "author_en", "publisher")
+
+# Metadata localization adds English counterparts without modifying the source
+# fields, so an established volume may carry <publisher_en> instead of the
+# older generic <publisher>.  The builder still exports one OPF ``publisher``
+# value; this is only a read-side compatibility map for the context contract.
+_VOLUME_IDENTITY_FIELD_ALIASES = {
+    "publisher": ("publisher", "publisher_en"),
+}
+
+# A prior fan-out prep path wrote model prose directly into context.xml.  XML
+# entity references are not optional, so prose such as "Ikue & Shuichi" makes
+# the otherwise-valid context unreadable.  Keep this deliberately narrow: it
+# only repairs bare ampersands and leaves every other malformed XML shape to
+# the normal parser error rather than guessing at document structure.
+_BARE_XML_AMPERSAND_RE = re.compile(
+    r"&(?!(?:amp|lt|gt|apos|quot);|#\d+;|#x[0-9A-Fa-f]+;)"
+)
+
+
+def _escape_legacy_bare_ampersands(context_xml: str) -> str:
+    """Return ``context_xml`` with only invalid bare ampersands escaped."""
+    return _BARE_XML_AMPERSAND_RE.sub("&amp;", context_xml)
 
 
 # Industry-standard CSS for EPUB
@@ -761,10 +784,24 @@ class BuilderAgent:
                 "OPF metadata no longer falls back to manifest.json"
             )
 
+        context_xml = context_path.read_text(encoding="utf-8")
         try:
-            root = ET.parse(context_path).getroot()
+            root = ET.fromstring(context_xml)
         except ET.ParseError as exc:
-            raise ValueError(f"context.xml at {context_path} is not valid XML: {exc}") from exc
+            repaired_context_xml = _escape_legacy_bare_ampersands(context_xml)
+            if repaired_context_xml == context_xml:
+                raise ValueError(f"context.xml at {context_path} is not valid XML: {exc}") from exc
+
+            try:
+                root = ET.fromstring(repaired_context_xml)
+            except ET.ParseError:
+                raise ValueError(f"context.xml at {context_path} is not valid XML: {exc}") from exc
+
+            atomic_write_text(context_path, repaired_context_xml)
+            print(
+                "     [REPAIR] Escaped legacy bare ampersand(s) in context.xml "
+                "and revalidated the complete document"
+            )
 
         volume_identity = root.find("volume_identity")
         if volume_identity is None:
@@ -772,8 +809,12 @@ class BuilderAgent:
 
         resolved: Dict[str, Any] = {}
         for field_name in _REQUIRED_VOLUME_IDENTITY_FIELDS:
-            node = volume_identity.find(field_name)
-            text = (node.text or "").strip() if node is not None else ""
+            text = ""
+            for candidate_name in _VOLUME_IDENTITY_FIELD_ALIASES.get(field_name, (field_name,)):
+                node = volume_identity.find(candidate_name)
+                text = (node.text or "").strip() if node is not None else ""
+                if text:
+                    break
             if not text:
                 raise ValueError(
                     f"context.xml <volume_identity>/<{field_name}> is missing or empty at "
