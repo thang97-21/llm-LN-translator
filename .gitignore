@@ -63,7 +63,8 @@ cache/*
 
 # ── Copyrighted Workspaces ────────────────────────────────────────────────────────
 raw/
-## work/
+work/
+scripts/
 
 # ── IDE-Workspace / Agent Authoring (local only — never pushed) ────────────
 # Only src/ (the actual DeepSeek MTLS source) and src/prompt/ (the shipped
