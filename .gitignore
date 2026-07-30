@@ -65,7 +65,12 @@ cache/*
 raw/
 ## work/
 
-# Commercial published-novel text used as local golden-sample calibration
-# data (Seven Seas/Kobo licensed translations) — never redistribute this to
-# the remote, local calibration use only.
-.github/skills/mtl-quality-evaluator/Seven_Seas_REPO/
+# ── IDE-Workspace / Agent Authoring (local only — never pushed) ────────────
+# Only src/ (the actual DeepSeek MTLS source) and src/prompt/ (the shipped
+# translation prompts) go to the remote. Everything that configures how an
+# AI agent develops or operates this repo stays local: subagent/skill
+# definitions, the orchestrator persona, and dev planning notes.
+.github/
+/AGENTS.md
+/PLANNING.md
+bible/
