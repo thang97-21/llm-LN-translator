@@ -147,7 +147,7 @@ translation:
   # ════════════════════════════════════════════════════════════════════════
 
   # Phase 2 provider route: deepseek | qwen.
-  provider: deepseek                 # deepseek | qwen
+  provider: qwen                 # deepseek | qwen
 
   # Master prompt selection. The base prompt consolidates all 13 RAG module
   # policies inline — no external RAG modules, ChromaDB, or vector stores

@@ -461,9 +461,9 @@ QwenCloud's own migration table places its flagship in the top capability tier, 
 
 | Tier | Closed-source equivalents cited | QwenCloud recommendation |
 |---|---|---|
-| Highest capability | GPT-5.5, Claude Opus 4.7, Gemini 3.1 Pro | `qwen3.8-max` |
-| Balanced | GPT-5.4, Claude Sonnet 4.6, Gemini 3 Pro | `qwen3.7-plus`, `deepseek-v4-pro` |
-| Lightweight | GPT-5.4-mini, Claude Haiku 4.5, Gemini 3.1 Flash | `qwen3.7-flash`, `deepseek-v4-flash-0731` |
+| Highest capability | GPT-5.6 Sol, Claude Opus 5 | `qwen3.8-max` |
+| Balanced | GPT-5.6 Terra, Claude Sonnet 5 | `qwen3.7-plus`, `deepseek-v4-pro` |
+| Lightweight | GPT-5.6 Luna, Claude Haiku 4.5 | `qwen3.7-flash`, `deepseek-v4-flash-0731` |
 
 The whole frontier family — `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.7-flash` — carries a **1M-token context window** (the docs put that at "roughly 750,000 words or 10 novels"), thinking mode, function calling, built-in tools, and structured output. This client runs a `*-max` model by default; `translation.qwen.model` is the knob, and the menu labels the tier rather than pinning a version, because frontier model names roll.
 

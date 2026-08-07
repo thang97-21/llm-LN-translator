@@ -564,8 +564,11 @@ def translate_volume(
     # partial run that crashed mid-volume doesn't re-translate chapters
     # whose EN/ output is already on disk and whose manifest entry is
     # truthful.  The single-chapter MCP tool (translate_chapter) is the
-    # escape hatch for intentionally redoing one.
-    chapter_files = _filter_completed_chapters(work_dir, chapter_files)
+    # escape hatch for intentionally redoing one.  Dry-run bypasses this
+    # entirely — it is a developer inspection mode, so it assembles
+    # payloads for every requested chapter regardless of manifest state.
+    if not dry_run:
+        chapter_files = _filter_completed_chapters(work_dir, chapter_files)
 
     translator = DeepSeekTranslator(
         work_dir=work_dir,
