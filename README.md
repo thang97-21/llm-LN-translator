@@ -46,6 +46,10 @@ inherited rather than reinvented. See
     - [Specifications](#specifications)
     - [How this maps onto LLM Translator](#how-this-maps-onto-llm-translator)
     - [Real cost telemetry](#real-cost-telemetry)
+  - [Why Qwen Model?](#why-qwen-model)
+    - [Frontier-class specifications](#frontier-class-specifications)
+    - [The Sino-literacy argument](#the-sino-literacy-argument)
+    - [Where the Qwen route differs in this codebase](#where-the-qwen-route-differs-in-this-codebase)
   - [Configuration](#configuration)
     - [Key Parameters](#key-parameters)
   - [File Structure](#file-structure)
@@ -442,6 +446,68 @@ Not a benchmark, not an estimate — actual `cost_audit_last_run.json` / `transl
 Same client, same endpoint, same pricing table — `PRICING_PER_MTOK` in `src/common/token_telemetry.py` (the shared module both prep paths and the translator log cost through — see [Token & Cost Log](#token--cost-log)) matches these rates exactly — so the economics transfer directly to what running this pipeline will actually cost.
 
 **Parallel prep, first real run.** Separately from the translator numbers above: the cache-warmed parallel prep path's first production run (not a synthetic benchmark) confirmed the design works — calls 3 through 14 landed a **95.7% aggregate cache hit ratio**, matching the projected ~97% from its own design notes. The same run is also where the token-ceiling issue mentioned under [Prep — Two Paths](#prep--two-paths) turned up: one block's output ran to within 776 tokens of a too-tight ceiling, truncated mid-tag, failed assembly, and triggered the Unified fallback — meaning that run paid for both the (wasted) parallel attempt and the fallback that actually shipped, a real 2.5x overpay on that one volume's prep cost. `flash_max_output_tokens` was raised in direct response, and the incident is exactly why `fallback_to_unified` exists as a hard default rather than an opt-in — the alternative was prep failing outright.
+
+---
+
+## Why Qwen Model?
+
+DeepSeek stays the default and nothing here displaces it. Qwen is a **second, fully isolated Phase 2 route** — its own client, prompts, conversation ledger, optimization policy and error taxonomy — selected with one line, `translation.provider: qwen`. Nothing about the DeepSeek path changes when it is off, which is the whole point of keeping the two implementations separate rather than parameterizing one.
+
+Two reasons it exists: a different provider is a genuine hedge when the other refuses or degrades on a volume, and Qwen brings one capability to Japanese source text that is worth engineering around specifically.
+
+### Frontier-class specifications
+
+QwenCloud's own migration table places its flagship in the top capability tier, and — worth noting for how the two providers here relate — puts `deepseek-v4-pro` in the tier below it:
+
+| Tier | Closed-source equivalents cited | QwenCloud recommendation |
+|---|---|---|
+| Highest capability | GPT-5.5, Claude Opus 4.7, Gemini 3.1 Pro | `qwen3.8-max` |
+| Balanced | GPT-5.4, Claude Sonnet 4.6, Gemini 3 Pro | `qwen3.7-plus`, `deepseek-v4-pro` |
+| Lightweight | GPT-5.4-mini, Claude Haiku 4.5, Gemini 3.1 Flash | `qwen3.7-flash`, `deepseek-v4-flash-0731` |
+
+The whole frontier family — `qwen3.8-max`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.7-flash` — carries a **1M-token context window** (the docs put that at "roughly 750,000 words or 10 novels"), thinking mode, function calling, built-in tools, and structured output. This client runs a `*-max` model by default; `translation.qwen.model` is the knob, and the menu labels the tier rather than pinning a version, because frontier model names roll.
+
+Pricing, USD per million tokens, as recorded in `PRICING_PER_MTOK` (`src/Deepseek/common/token_telemetry.py`, verified 2026-08-06), with DeepSeek Pro alongside for scale:
+
+| Model | Cache hit | Cache miss | Cache write | Output |
+|---|---|---|---|---|
+| `qwen3.8-max` | $0.25 | $2.00 | $2.50 | $6.00 |
+| `qwen3.7-plus` | $0.08 | $0.40 | $0.50 | $1.60 |
+| `qwen3.7-flash` | $0.006 | $0.03 | $0.038 | $0.13 |
+| `deepseek-v4-pro` *(reference)* | $0.003625 | $0.435 | — | $0.87 |
+
+**Read that honestly:** frontier Qwen output runs roughly **7x DeepSeek Pro**, and its cache-miss input roughly **4.6x**. Qwen is not the cheap route and this repo does not pretend otherwise — the [real cost telemetry](#real-cost-telemetry) above is a DeepSeek ledger, and no equivalent multi-volume Qwen run has been recorded yet. Pick Qwen for the reason below, not to save money.
+
+### The Sino-literacy argument
+
+Be clear about what is and isn't being claimed. **QwenCloud's documentation makes no Japanese- or Chinese-specific capability claim** — it is an API reference, not a benchmark sheet — and no head-to-head JA→EN evaluation between the two providers has been run here. What follows is an argument from how this pipeline is built, not from a leaderboard.
+
+Both providers read Japanese with **logographic intuition** rather than decoding it as a foreign script through English. For a light novel that matters more than it sounds, because the devices that carry meaning are frequently *visual*: furigana that disagrees with the kanji it annotates, a name coined from component characters, a script switch from kanji to katakana marking a shift in register, a pun that only exists because two readings collide.
+
+The Qwen master prompt (`src/Qwen/prompts/master_prompt_qwen_en.xml`) spends that capability deliberately, in a block named for it:
+
+> **QWEN CJK ADVANTAGE:** Use your logographic intuition to detect furigana conflicts, kanji decomposition, embedded proper nouns, script changes, and sound/meaning collisions that flatter scans miss. Spend that intuition in analysis.
+
+And then — this is the mechanism the route actually turns on — it forbids the model from *reasoning* in that script at all:
+
+> **REASONING LANGUAGE — ENGLISH ONLY (ABSOLUTE):** reason exclusively in English. You are translating JP → EN directly; reasoning in Chinese (or any CJK) creates a JP→CN→EN pipeline that flattens register and character voice. A single CJK sentence in your silent reasoning is a violation — when describing source forms, use romanization or an English label ("the written title", "the three-character coinage"), never raw CJK.
+
+That is the entire literacy argument in two rules. The same fluency that lets the model *see* a furigana conflict will, left alone, quietly relay the chapter through Chinese on its way to English — and a JP→CN→EN relay is where honorific weight, formality tier and character voice go flat, because the intermediate language resolves distinctions English would have needed the Japanese to keep. So the prompt spends the intuition on **analysis** and bans it from **reasoning**, and the translation-memory rule follows suit: prior decisions are recalled by romanization or an English locus label, never by copying the source glyphs back into the reasoning stream.
+
+It is not left to the prompt alone. `_CJK_LEAK_RE` (`src/Qwen/agent.py:26`, applied at `:148`) strips any CJK that survives into the returned English — a mechanical backstop, because a prompt rule is a request and a regex is not. The guard exists *because* the fluency is real; a model that could not think in Chinese would not need to be told not to.
+
+### Where the Qwen route differs in this codebase
+
+| Concern | DeepSeek route | Qwen route |
+|---|---|---|
+| Prompt caching | Automatic server-side prefix caching; no headers, no opt-in | **Explicit** `cache_control` markers — a guaranteed hit, but cache *writes* bill at 125% of standard input and the cache lives 5 minutes. Implicit caching exists too but is not guaranteed and is mutually exclusive with explicit on the Anthropic-compatible endpoint. `translation.qwen.caching.explicit` picks one |
+| Content moderation | not a documented failure mode here | **Automatic on every request, cannot be disabled or configured.** Returns HTTP 400 with `data_inspection_failed`, `custom_role_blocked` or `faq_rule_blocked`. This is not hypothetical for light novels — it is why [Safety-Refusal Fallback](#safety-refusal-fallback--qwen--deepseek) exists |
+| Long-output continuation | continuation turns rebuild from prior content blocks | **Partial Mode** — the last message is `role: assistant` with `"partial": true`, and the model continues seamlessly from that prefix. Official docs forbid thinking in partial mode, so the client disables it for the continuation turn only |
+| Thinking | `thinking.budget_tokens` + prose-injected DRDI scaffolding, since DeepSeek exposes no effort knob | Native hybrid thinking toggled per request; `max_tokens` must exceed `thinking.budget_tokens`, since the budget is shared between reply and reasoning. The client raises it automatically and logs when it does |
+| Endpoint | `https://api.deepseek.com/anthropic` | `https://dashscope-intl.aliyuncs.com/apps/anthropic` — also Anthropic Messages format, so both routes reuse the same `anthropic` SDK rather than carrying a second HTTP client |
+| Conversation ledger | `.context/deepseek_conversation.json`, model-generated checkpoint summaries | `.context/qwen_conversation.json`, **local** compaction — folds older turns into a summary without an API call, so compaction never costs a billed request |
+
+Sources: [QwenCloud documentation](https://docs.qwencloud.com) — text-generation model overview, thinking, context cache, partial mode, and the content-moderation guide under Accuracy Tuning.
 
 ---
 
