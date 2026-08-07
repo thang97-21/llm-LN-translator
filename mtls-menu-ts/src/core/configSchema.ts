@@ -30,6 +30,13 @@ const QWEN_MODEL_LABELS = ['Qwen 3.8 Max', 'Qwen 3.7 Plus', 'Qwen 3.7 Flash'] as
 const ENDPOINT_CHOICES = ['https://api.deepseek.com/anthropic', 'https://api.deepseek.com'] as const;
 const ENDPOINT_LABELS = ['Anthropic', 'OpenAI'] as const;
 const EFFORT_CHOICES = ['max', 'high', 'medium', 'low'] as const;
+// Mirrors PROFILES in src/builder/device_profiles.py, which is the single
+// source of panel geometry. No blank choice here, unlike the launch form's
+// per-run override: this IS the default, so it has to name a real profile.
+const DEVICE_PROFILE_CHOICES = ['standard', 'xteink-x3', 'xteink-x4', 'passthrough'] as const;
+const DEVICE_PROFILE_LABELS = ['Standard 300 PPI', 'XTEINK X3 — 528×792', 'XTEINK X4 — 480×800', 'Passthrough — no changes'] as const;
+const XTC_FORMAT_CHOICES = ['xtc', 'xtch'] as const;
+const XTC_FORMAT_LABELS = ['XTC — 1-bit mono', 'XTCH — 2-bit grayscale, ~2× size'] as const;
 
 export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
 // ─── Project ─────────────────────────────────────────────────────────────────────
@@ -158,10 +165,28 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Place Qwen ephemeral cache markers on the stable system prompt. Cache validity is provider-controlled and short-lived.' },
 
 // ─── Builder ─────────────────────────────────────────────────────────────────────
-  { path: 'builder.fonts.enabled', menu: 'Builder', section: 'Fonts', label: 'Status', kind: 'boolean', description: 'Embed CJK-coverage fonts into the output EPUB.' },
-  { path: 'builder.images.max_width_px', menu: 'Builder', section: 'Images', label: 'Maximum Width (px)', kind: 'integer', min: 1, description: 'Downscale ceiling for cover/kuchie/illustration width.' },
-  { path: 'builder.images.max_height_px', menu: 'Builder', section: 'Images', label: 'Maximum Height (px)', kind: 'integer', min: 1, description: 'Downscale ceiling for cover/kuchie/illustration height.' },
-  { path: 'builder.images.jpeg_quality', menu: 'Builder', section: 'Images', label: 'JPEG Quality', kind: 'integer', min: 1, max: 100, description: 'JPEG re-encode quality (1-100) for optimized images.' },
+  { path: 'builder.device_profile', menu: 'Builder', section: 'Device Profile', label: 'Target Device', kind: 'enum',
+    choices: DEVICE_PROFILE_CHOICES, choiceLabels: DEVICE_PROFILE_LABELS,
+    description: 'Default build target; overridable per run from the Build form. The XTEINK profiles fit art to the panel, convert it to grayscale and force baseline JPEG (progressive does not decode on those devices), and ship a stylesheet limited to the nine CSS properties the firmware implements.' },
+
+  { path: 'builder.fonts.enabled', menu: 'Builder', section: 'Fonts', label: 'Status', kind: 'boolean', description: 'Nominally embeds CJK-coverage fonts. Currently inert: the font list in src/builder/config.py names four files that are not in this repository, and nothing calls the embedder.' },
+  { path: 'builder.images.max_width_px', menu: 'Builder', section: 'Images', label: 'Maximum Width (px)', kind: 'integer', min: 1, description: 'Width ceiling for cover/kuchie/illustration art. Read by the Standard profile only — the XTEINK profiles derive their box from the panel instead.' },
+  { path: 'builder.images.max_height_px', menu: 'Builder', section: 'Images', label: 'Maximum Height (px)', kind: 'integer', min: 1, description: 'Height ceiling for cover/kuchie/illustration art. Standard profile only.' },
+  { path: 'builder.images.jpeg_quality', menu: 'Builder', section: 'Images', label: 'JPEG Quality', kind: 'integer', min: 1, max: 100, description: 'JPEG re-encode quality (1-100) for the Standard profile. The XTEINK profiles use 72, tuned for a panel that dithers to one bit anyway.' },
+
+  { path: 'builder.xtc.enabled', menu: 'Builder', section: 'XTC Export', label: 'Status', kind: 'boolean',
+    description: 'Opt-in CrossPoint-native export. Pages are pre-rendered bitmaps: roughly 10× the EPUB size and the reader permanently loses font and text-size control. Never runs unless requested, and a failed render never fails the build.' },
+  { path: 'builder.xtc.format', menu: 'Builder', section: 'XTC Export', label: 'Container Format', kind: 'enum',
+    choices: XTC_FORMAT_CHOICES, choiceLabels: XTC_FORMAT_LABELS,
+    description: 'XTC is 1-bit and fast. XTCH carries 4 grey levels but doubles the file and costs 3× the refresh time on-device, since grayscale is a multi-pass trick on 1-bit hardware.' },
+  { path: 'builder.xtc.converter_path', menu: 'Builder', section: 'XTC Export', label: 'Converter Path', kind: 'text',
+    description: 'Checkout of github.com/bigbag/epub-to-xtc-converter, with npm install already run in its cli/ directory. Not vendored here — XTC pages must be typeset and rasterized, which is a job for CREngine, not for us.' },
+  { path: 'builder.xtc.font_path', menu: 'Builder', section: 'XTC Export', label: 'Font Path', kind: 'text',
+    description: 'Required TTF/OTF — rendering rasterizes text and this repository ships no fonts. Use a hinted face (Roboto, Tahoma, Verdana); hinting is what stays legible once the page is dithered to one bit.' },
+  { path: 'builder.xtc.node_bin', menu: 'Builder', section: 'XTC Export', label: 'Node Binary', kind: 'text',
+    description: "Blank finds 'node' on PATH. The converter needs Node 18 or newer." },
+  { path: 'builder.xtc.timeout_seconds', menu: 'Builder', section: 'XTC Export', label: 'Timeout (seconds)', kind: 'integer', min: 60,
+    description: 'Ceiling for one conversion. Rendering every page of a volume to a bitmap is minutes of work, not seconds.' },
 
 // ─── Logging ─────────────────────────────────────────────────────────────────────
   { path: 'logging.level', menu: 'Logging', section: 'Logging', label: 'Log Level', kind: 'enum', choices: ['DEBUG', 'INFO', 'WARNING', 'ERROR'], description: 'Log verbosity for the whole pipeline.' },
