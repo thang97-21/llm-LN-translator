@@ -484,11 +484,49 @@ builder:
     # japanese: fonts/NotoSansJP-Regular.otf
     # english: fonts/NotoSerif-Regular.otf
 
-  # Image optimization for cover/kuchie/illustrations
+  # Target device for the build. Overridable per run with --profile.
+  #   passthrough  images copied untouched; reproduces pre-profile output
+  #   standard     300 PPI readers (Kindle, Kobo, tablets)
+  #   xteink-x3    XTEINK X3, 528x792 1-bit e-ink, CrossPoint firmware
+  #   xteink-x4    XTEINK X4, 480x800 1-bit e-ink, CrossPoint firmware
+  # The xteink profiles convert art to 8-bit grayscale, fit it to the panel,
+  # force baseline JPEG (progressive does not decode on those devices) and
+  # swap in a stylesheet limited to the nine CSS properties the firmware
+  # actually implements. See src/builder/device_profiles.py.
+  device_profile: standard
+
+  # Image optimization for cover/kuchie/illustrations.
+  # Consumed by the 'standard' profile; the xteink profiles carry their own
+  # panel-derived values and ignore these.
   images:
     max_width_px: 1200
     max_height_px: 1800
     jpeg_quality: 85
+
+  # Optional XTC/XTCH export — the CrossPoint firmware's native format, which
+  # stores PRE-RENDERED bitmap pages rather than text. Opt-in and off by
+  # default, because the trade is real: a ~400-page volume goes from ~1-2 MB to
+  # ~19 MB (xtc) or ~38 MB (xtch), and the reader permanently loses the ability
+  # to change font, size or margins. What it buys is the elimination of the
+  # 5-10s first-chapter parse, which the device already caches after one open.
+  #
+  # Rendering is delegated to https://github.com/bigbag/epub-to-xtc-converter
+  # (Node 18+, CREngine WASM). Clone it, run `npm install` in its cli/ dir, and
+  # point converter_path at the checkout. Do not vendor it into this repo.
+  xtc:
+    enabled: false
+    converter_path: ""        # path to the epub-to-xtc-converter checkout
+    node_bin: ""              # blank = find 'node' on PATH
+    format: xtc               # xtc (1-bit) | xtch (2-bit grayscale, ~2x size)
+    # Required: rendering rasterizes text and this repo ships no fonts.
+    # Use a HINTED face (Roboto, Tahoma, Verdana) — hinting is what stays
+    # legible once the page is dithered to one bit.
+    font_path: ""
+    timeout_seconds: 1800
+    # Passed through to the converter's settings.json verbatim (deep-merged
+    # over the defaults its own `init` generates). The schema belongs to that
+    # tool, not to us, so anything not listed above goes here.
+    settings: {}
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 logging:

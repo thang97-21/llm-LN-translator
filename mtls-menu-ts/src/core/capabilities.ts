@@ -12,6 +12,28 @@ const seriesId: FieldSpec = { key: 'series_id', label: 'Series ID', kind: 'text'
 // every non-dry-run launch of the same form.
 const dryRun: FieldSpec = { key: 'dry_run', label: 'Dry Run (assemble payload, send nothing)', kind: 'boolean', cliFlag: '--dry-run', defaultValue: false };
 const buildDryRun: FieldSpec = { key: 'dry_run', label: 'Dry Run (assemble structure, package nothing)', kind: 'boolean', cliFlag: '--dry-run', defaultValue: false };
+// Which reader hardware the EPUB is built for. The xteink profiles fit art to
+// the panel, convert it to grayscale, force baseline JPEG (progressive JPEG
+// does not decode on those devices at all) and ship a stylesheet limited to the
+// nine CSS properties CrossPoint firmware actually implements. Source of truth
+// is src/builder/device_profiles.py.
+//
+// The leading blank choice is deliberate and is NOT a missing default: it means
+// "use builder.device_profile from config.yaml". serializeCli drops empty
+// values, so leaving it blank omits --profile and the config stays
+// authoritative — giving this field a defaultValue would silently override the
+// operator's configured target on every launch.
+const PROFILE_CHOICES = ['', 'standard', 'xteink-x3', 'xteink-x4', 'passthrough'];
+const buildProfile: FieldSpec = { key: 'profile', label: 'Device profile (blank = config.yaml default)', kind: 'enum', choices: PROFILE_CHOICES, cliFlag: '--profile' };
+const mcpProfile: FieldSpec = { key: 'profile', label: 'Device profile (blank = config.yaml default)', kind: 'enum', choices: PROFILE_CHOICES };
+// Optional CrossPoint-native export, rendered by an external Node converter
+// configured under builder.xtc. Pages are pre-rendered bitmaps: roughly 10x
+// the file size of the EPUB, and the reader permanently loses font and text
+// size control. Needs an xteink-* profile. A failed render is a warning, never
+// a failed build — the .epub is produced either way.
+const XTC_CHOICES = ['', 'xtc', 'xtch'];
+const buildEmitXtc: FieldSpec = { key: 'emit_xtc', label: 'Also emit XTC (blank = EPUB only)', kind: 'enum', choices: XTC_CHOICES, cliFlag: '--emit-xtc' };
+const mcpEmitXtc: FieldSpec = { key: 'emit_xtc', label: 'Also emit XTC (blank = EPUB only)', kind: 'enum', choices: XTC_CHOICES };
 // This launcher cannot answer the Librarian's re-extraction prompt — the child
 // process has no usable keyboard — so extract/run always pass --force-rerun: a
 // re-extraction proceeds automatically into a NEW derived volume directory and
@@ -23,7 +45,7 @@ export const CLI_CAPABILITIES: readonly CapabilitySpec[] = [
   { id: 'prep', label: 'Prep Volume', detail: 'Build context.xml through a paid DeepSeek preparation call.', group: 'Workflows', route: { transport: 'cli', command: 'prep' }, fields: [volume, seriesId], risk: 'paid' },
   { id: 'translate', label: 'Translate Volume', detail: 'Translate selected chapters, or every pending chapter when none are chosen.', group: 'Workflows', route: { transport: 'cli', command: 'translate' }, fields: [volume, { key: 'chapters', label: 'Chapters', kind: 'chapter-list', cliFlag: '--chapters' }, dryRun], risk: 'paid' },
   { id: 'qc', label: 'QC Volume', detail: 'Run the read-only filesystem quality gate.', group: 'Workflows', route: { transport: 'cli', command: 'qc' }, fields: [volume], risk: 'read' },
-  { id: 'build', label: 'Build EPUB', detail: 'Package translated chapters into an EPUB.', group: 'Workflows', route: { transport: 'cli', command: 'build' }, fields: [volume, { key: 'output', label: 'Output filename', kind: 'text', cliFlag: '--output' }, buildDryRun], risk: 'write' },
+  { id: 'build', label: 'Build EPUB', detail: 'Package translated chapters into an EPUB.', group: 'Workflows', route: { transport: 'cli', command: 'build' }, fields: [volume, { key: 'output', label: 'Output filename', kind: 'text', cliFlag: '--output' }, buildDryRun, buildProfile, buildEmitXtc], risk: 'write' },
   { id: 'run', label: 'Full Pipeline', detail: 'Extract, prep, translate, QC, and build as one canonical CLI workflow. Re-running creates a NEW volume ID; the existing workspace is never overwritten.', group: 'Workflows', route: { transport: 'cli', command: 'run' }, fields: [epub, volumeId, seriesId], risk: 'paid' },
 ];
 
@@ -54,9 +76,9 @@ export const MCP_TOOL_OVERLAY: readonly ToolOverlay[] = [
   { id: 'generate_opf', label: 'Generate OPF preview', detail: 'Preview an OPF document from a manifest or volume.', group: 'Builder', route: { transport: 'mcp', tool: 'generate_opf' }, fields: [{ key: 'manifest', label: 'Manifest JSON', kind: 'json-object' }, { ...volume, required: false }], risk: 'read' },
   { id: 'generate_nav', label: 'Generate NAV preview', detail: 'Preview navigation from a manifest or volume.', group: 'Builder', route: { transport: 'mcp', tool: 'generate_nav' }, fields: [{ key: 'manifest', label: 'Manifest JSON', kind: 'json-object' }, { ...volume, required: false }], risk: 'read' },
   { id: 'merge_translated_shards', label: 'Merge translated shards', detail: 'Merge translated shard files into the spine.', group: 'Builder', route: { transport: 'mcp', tool: 'merge_translated_shards' }, fields: [volume, { key: 'target_language', label: 'Target language', kind: 'enum', choices: ['en'], defaultValue: 'en' }, bool('apply_manifest', 'Apply manifest changes')], risk: 'write' },
-  { id: 'optimize_image', label: 'Optimize image', detail: 'Overwrite an image with an optimized version.', group: 'Builder', route: { transport: 'mcp', tool: 'optimize_image' }, fields: [projectPath('image_path', 'Image path'), integer('max_width', 'Maximum width', '1600')], risk: 'overwrite' },
-  { id: 'package_epub', label: 'Package EPUB', detail: 'Build the EPUB through the MCP builder.', group: 'Builder', route: { transport: 'mcp', tool: 'package_epub' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations'), bool('dry_run', 'Dry Run (assemble structure, package nothing)')], risk: 'write' },
-  { id: 'run_builder', label: 'Run builder', detail: 'Build the EPUB through the canonical builder route.', group: 'Builder', route: { transport: 'mcp', tool: 'run_builder' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations'), bool('dry_run', 'Dry Run (assemble structure, package nothing)')], risk: 'write' },
+  { id: 'optimize_image', label: 'Optimize image', detail: 'Overwrite an image with an optimized version. A device profile supersedes Maximum width and also sets colour depth, JPEG quality and baseline encoding.', group: 'Builder', route: { transport: 'mcp', tool: 'optimize_image' }, fields: [projectPath('image_path', 'Image path'), integer('max_width', 'Maximum width', '1600'), mcpProfile], risk: 'overwrite' },
+  { id: 'package_epub', label: 'Package EPUB', detail: 'Build the EPUB through the MCP builder.', group: 'Builder', route: { transport: 'mcp', tool: 'package_epub' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations'), bool('dry_run', 'Dry Run (assemble structure, package nothing)'), mcpProfile, mcpEmitXtc], risk: 'write' },
+  { id: 'run_builder', label: 'Run builder', detail: 'Build the EPUB through the canonical builder route.', group: 'Builder', route: { transport: 'mcp', tool: 'run_builder' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations'), bool('dry_run', 'Dry Run (assemble structure, package nothing)'), mcpProfile, mcpEmitXtc], risk: 'write' },
 ];
 
 export type McpListedTool = { name: string; description?: string; inputSchema?: unknown };

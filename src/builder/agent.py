@@ -27,6 +27,17 @@ from .markdown_to_xhtml import MarkdownToXHTML
 from .epub_packager import EPUBPackager
 from .image_analyzer import get_image_dimensions, is_horizontal, analyze_kuchie_images
 from .merge_translated_shards_to_spine import merge_translated_shards_to_spine
+from .device_profiles import (
+    DeviceProfile,
+    PROFILE_NAMES,
+    describe_profile,
+    resolve_profile,
+)
+from .image_optimizer import EmitResult, optimize_image_to, summarize as summarize_images
+from .stylesheets import EINK_CSS
+from .config import get_xtc_config
+from .xtc_export import VALID_FORMATS as XTC_FORMATS, export_xtc
+from . import device_budgets
 from src.Deepseek.common.atomic_io import atomic_write_text
 import re
 
@@ -291,6 +302,15 @@ nav#toc a {
 '''
 
 
+# Stylesheet lookup by DeviceProfile.stylesheet key. EINK_CSS lives in
+# stylesheets.py rather than beside DEFAULT_CSS here, because device_profiles
+# needs to name a stylesheet and importing agent.py from it would cycle.
+STYLESHEETS = {
+    "default": DEFAULT_CSS,
+    "eink": EINK_CSS,
+}
+
+
 @dataclass
 class BuildResult:
     """Result of EPUB build operation."""
@@ -306,6 +326,11 @@ class BuildResult:
     # debug_dir is where the assembled-but-unpackaged OEBPS/ tree landed.
     dry_run: bool = False
     debug_dir: Optional[Path] = None
+    # Optional XTC/XTCH companion artifact. xtc_ok is None when no export was
+    # requested, False when one was requested and failed -- a failed export
+    # never fails the build, so these have to be distinguishable.
+    xtc_path: Optional[Path] = None
+    xtc_ok: Optional[bool] = None
 
 
 class BuilderAgent:
@@ -329,7 +354,8 @@ class BuilderAgent:
         self,
         work_base: Optional[Path] = None,
         output_base: Optional[Path] = None,
-        target_language: str = None
+        target_language: str = None,
+        profile: Optional[str] = None,
     ):
         """
         Initialize Builder agent.
@@ -339,10 +365,18 @@ class BuilderAgent:
             output_base: Output directory (defaults to OUTPUT/)
             target_language: Target language code (e.g., 'en', 'vn').
                             If None, uses current target language from config.
+            profile: Device profile name (passthrough | standard | xteink-x3 |
+                     xteink-x4). If None, uses builder.device_profile from
+                     config.yaml. Decides image sizing, colour depth, JPEG
+                     encoding and which stylesheet ships.
         """
         self.work_base = Path(work_base) if work_base else WORK_DIR
         self.output_base = Path(output_base) if output_base else OUTPUT_DIR
         self.output_base.mkdir(parents=True, exist_ok=True)
+
+        # Resolved here rather than at each use site, so an unknown name fails
+        # before any work is done instead of halfway through an image pass.
+        self.profile: DeviceProfile = resolve_profile(profile)
 
         # Language configuration
         self.target_language = target_language if target_language else get_target_language()
@@ -504,6 +538,7 @@ class BuilderAgent:
         skip_qc_check: bool = False,
         include_header_illustrations: bool = False,
         dry_run: bool = False,
+        emit_xtc: Optional[str] = None,
     ) -> BuildResult:
         """
         Build complete EPUB from translated volume.
@@ -528,6 +563,7 @@ class BuilderAgent:
         print(f"\n{'='*60}")
         print(f"BUILDER AGENT - Building: {volume_id}")
         print(f"Target Language: {self.language_name} ({self.target_language.upper()})")
+        print(f"Device Profile: {describe_profile(self.profile)}")
 
         # Auto-detect header illustrations if not explicitly provided
         detected_headers: List[Dict[str, str]] = []
@@ -668,8 +704,13 @@ class BuilderAgent:
 
             # Step 4: Process images
             print("\n[STEP 4/8] Processing images...")
-            image_items, kuchie_metadata = self._process_images(manifest, work_dir, paths)
-            print(f"     Copied: {len(image_items)} images")
+            (
+                image_items,
+                kuchie_metadata,
+                renamed_images,
+                image_results,
+            ) = self._process_images(manifest, work_dir, paths)
+            print(f"     Emitted: {len(image_items)} images")
 
             # Step 5: Generate frontmatter
             print("\n[STEP 5/8] Generating frontmatter...")
@@ -691,10 +732,36 @@ class BuilderAgent:
             nav_items = self._generate_navigation(manifest, paths, chapter_info, actual_language_code, actual_lang_config, actual_target_lang)
             print(f"     Generated: nav.xhtml, toc.ncx")
 
+            # Step 6.5: Fix up image references if any file was transcoded.
+            # Deliberately after every XHTML producer (chapters, frontmatter,
+            # act interstitials, nav) so nothing is left pointing at a filename
+            # that stopped existing during the image pass.
+            self._apply_image_renames(paths, renamed_images)
+
             # Step 7: Generate CSS
             print("\n[STEP 7/8] Creating stylesheet...")
             css_items = self._create_stylesheet(paths)
             print(f"     Created: stylesheet.css")
+
+            # Device budget audit. Warn-only by design: a book that opens
+            # slowly should say so at build time, not fail the build.
+            build_warnings: List[str] = []
+            if self.profile.budgets:
+                collected: List[str] = []
+                collected.extend(
+                    device_budgets.audit_chapters(paths.text_dir, self.profile.budgets)
+                )
+                collected.extend(
+                    device_budgets.audit_images(image_results, self.profile)
+                )
+                collected.extend(
+                    device_budgets.audit_stylesheet(
+                        STYLESHEETS.get(self.profile.stylesheet, DEFAULT_CSS)
+                    )
+                )
+                build_warnings = device_budgets.report(
+                    collected, header=f"{self.profile.name} budget"
+                )
 
             # Step 8: Generate OPF and package
             print("\n[STEP 8/8] Generating OPF and packaging...")
@@ -743,6 +810,7 @@ class BuilderAgent:
                     file_size_mb=dir_size_mb,
                     chapter_count=len(chapter_items),
                     image_count=len(image_items),
+                    warnings=build_warnings,
                     dry_run=True,
                     debug_dir=debug_dir,
                 )
@@ -767,6 +835,31 @@ class BuilderAgent:
             # Get file size
             file_size_mb = output_path.stat().st_size / (1024 * 1024)
 
+            # Optional XTC/XTCH companion. Additive and non-fatal by contract:
+            # the .epub above is the deliverable and stands on its own, so a
+            # failed render is a warning, never a failed build.
+            xtc_path: Optional[Path] = None
+            xtc_ok: Optional[bool] = None
+            if emit_xtc:
+                print(f"\n[XTC] Rendering {emit_xtc} for profile {self.profile.name}...")
+                xtc_cfg = get_xtc_config()
+                xtc_cfg['format'] = emit_xtc
+                xtc_result = export_xtc(
+                    output_path, self.profile, xtc_cfg, output_dir=self.output_base
+                )
+                xtc_ok = xtc_result.ok
+                if xtc_result.ok and xtc_result.output_path:
+                    xtc_path = xtc_result.output_path
+                    print(
+                        f"     [OK] {xtc_path.name}: "
+                        f"{xtc_result.size_bytes / 1024 / 1024:.1f} MB, "
+                        f"{xtc_result.page_count} pages"
+                    )
+                    build_warnings.extend(f"xtc: {w}" for w in xtc_result.warnings)
+                else:
+                    print(f"     [WARN] XTC export failed: {xtc_result.error}")
+                    build_warnings.append(f"xtc export failed: {xtc_result.error}")
+
             # Update manifest
             self._update_manifest(work_dir, output_filename, len(chapter_items), len(image_items))
 
@@ -781,6 +874,11 @@ class BuilderAgent:
             print(f"Size:   {file_size_mb:.2f} MB")
             print(f"Chapters: {len(chapter_items)}")
             print(f"Images: {len(image_items)}")
+            print(f"Profile: {self.profile.name}")
+            if xtc_path:
+                print(f"XTC:    {xtc_path.name}")
+            elif xtc_ok is False:
+                print("XTC:    export failed (see warnings above; .epub is unaffected)")
             print(f"{'='*60}\n")
 
             return BuildResult(
@@ -788,7 +886,10 @@ class BuilderAgent:
                 output_path=output_path,
                 file_size_mb=file_size_mb,
                 chapter_count=len(chapter_items),
-                image_count=len(image_items)
+                image_count=len(image_items),
+                warnings=build_warnings,
+                xtc_path=xtc_path,
+                xtc_ok=xtc_ok,
             )
 
         except Exception as e:
@@ -1922,18 +2023,38 @@ class BuilderAgent:
         paths: EPUBPaths
     ) -> tuple:
         """
-        Copy all images to Images/ directory and analyze kuchi-e dimensions.
-        
+        Emit all images into Images/ under the active device profile and
+        analyze kuchi-e dimensions.
+
+        Images are no longer copied unconditionally. The profile decides
+        whether each one is fitted to a box, converted to grayscale,
+        re-encoded as baseline JPEG, or transcoded outright. A transcode
+        changes the filename, so the rename map has to reach both the OPF
+        manifest (done here) and every <img src> in the generated XHTML
+        (done by _apply_image_renames).
+
         Returns:
-            Tuple of (manifest_items, kuchie_metadata)
+            Tuple of (manifest_items, kuchie_metadata, renamed, emit_results)
         """
         # Support both v3.0-3.5 (assets key) and v3.7 (structure.illustrations) schemas
         assets = manifest.get('assets', {})
         structure = manifest.get('structure', {})
-        
+
         manifest_items = []
+        emit_results: List[EmitResult] = []
+        renamed: Dict[str, str] = {}
 
         assets_dir = work_dir / "assets"
+
+        def _emit(source_path: Path, is_cover: bool = False) -> str:
+            """Emit one image under the profile; returns the emitted filename."""
+            result = optimize_image_to(
+                source_path, paths.images_dir, self.profile, is_cover=is_cover
+            )
+            emit_results.append(result)
+            if result.renamed:
+                renamed[result.source_name] = result.emitted_name
+            return result.emitted_name
 
         # Cover - Skip allcover images entirely
         # Guardrail: normalize cover to a plain string filename.
@@ -1965,16 +2086,15 @@ class BuilderAgent:
             print(f"     [COVER] Source path: {cover_path}")
             print(f"     [COVER] Exists: {cover_path.exists()}")
             if cover_path.exists():
-                dest = paths.images_dir / cover
-                print(f"     [COVER] Destination: {dest}")
-                shutil.copy2(cover_path, dest)
+                emitted_cover = _emit(cover_path, is_cover=True)
+                print(f"     [COVER] Destination: {paths.images_dir / emitted_cover}")
                 manifest_items.append(ManifestItem(
                     id="cover-image",
-                    href=f"Images/{cover}",
-                    media_type=self._get_image_media_type(cover),
+                    href=f"Images/{emitted_cover}",
+                    media_type=self._get_image_media_type(emitted_cover),
                     properties="cover-image"
                 ))
-                print(f"     [OK] Copied cover: {cover}")
+                print(f"     [OK] Emitted cover: {emitted_cover}")
             else:
                 print(f"     [WARNING] Cover file not found: {cover_path}")
         else:
@@ -1990,12 +2110,11 @@ class BuilderAgent:
                 kuchie_path = assets_dir / kuchie
             
             if kuchie_path.exists():
-                dest = paths.images_dir / kuchie
-                shutil.copy2(kuchie_path, dest)
+                emitted_kuchie = _emit(kuchie_path)
                 manifest_items.append(ManifestItem(
                     id=f"kuchie-img-{i+1:03d}",  # Use 'kuchie-img' to avoid conflict with XHTML page IDs
-                    href=f"Images/{kuchie}",
-                    media_type=self._get_image_media_type(kuchie)
+                    href=f"Images/{emitted_kuchie}",
+                    media_type=self._get_image_media_type(emitted_kuchie)
                 ))
 
         # Analyze kuchi-e dimensions for orientation detection
@@ -2023,14 +2142,14 @@ class BuilderAgent:
                 illust_path = assets_dir / "illustrations" / illust
             
             if illust_path.exists():
-                dest = paths.images_dir / illust
-                shutil.copy2(illust_path, dest)
+                emitted_illust = _emit(illust_path)
                 illust_counter += 1
                 manifest_items.append(ManifestItem(
                     id=f"illust-{illust_counter:03d}",
-                    href=f"Images/{illust}",
-                    media_type=self._get_image_media_type(illust)
+                    href=f"Images/{emitted_illust}",
+                    media_type=self._get_image_media_type(emitted_illust)
                 ))
+                # Tracked by SOURCE name: this set dedupes the input list.
                 copied_illustrations.add(illust)
 
         # Additional images (titlepage, manga headers, etc.)
@@ -2038,15 +2157,59 @@ class BuilderAgent:
         for i, additional in enumerate(additional_list):
             additional_path = assets_dir / "additional" / additional
             if additional_path.exists():
-                dest = paths.images_dir / additional
-                shutil.copy2(additional_path, dest)
+                emitted_additional = _emit(additional_path)
                 manifest_items.append(ManifestItem(
                     id=f"additional-{i+1:03d}",
-                    href=f"Images/{additional}",
-                    media_type=self._get_image_media_type(additional)
+                    href=f"Images/{emitted_additional}",
+                    media_type=self._get_image_media_type(emitted_additional)
                 ))
 
-        return manifest_items, kuchie_metadata
+        if emit_results:
+            print(f"     {summarize_images(emit_results)}")
+
+        return manifest_items, kuchie_metadata, renamed, emit_results
+
+    def _apply_image_renames(
+        self,
+        paths: EPUBPaths,
+        renamed: Dict[str, str],
+    ) -> int:
+        """
+        Rewrite image references in generated XHTML after a transcode.
+
+        When a profile converts art.gif to art.jpg, the OPF manifest is fixed
+        up at emission time but every <img src="../Images/art.gif"> in the
+        chapter and frontmatter XHTML still points at a file that no longer
+        exists. This is a post-pass rather than inline rewriting so it does not
+        depend on whether chapters or images were generated first.
+
+        Returns:
+            Number of XHTML files modified.
+        """
+        if not renamed:
+            return 0
+
+        touched = 0
+        for xhtml in sorted(paths.text_dir.glob("*.xhtml")):
+            try:
+                content = xhtml.read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"     [WARN] Could not read {xhtml.name} for rename pass: {exc}")
+                continue
+
+            original = content
+            for old_name, new_name in renamed.items():
+                # Anchored on the Images/ segment so a chapter that merely
+                # mentions the filename in prose is left alone.
+                content = content.replace(f"Images/{old_name}", f"Images/{new_name}")
+
+            if content != original:
+                xhtml.write_text(content, encoding="utf-8")
+                touched += 1
+
+        if touched:
+            print(f"     [OK] Rewrote {len(renamed)} image reference(s) across {touched} file(s)")
+        return touched
 
     def _get_image_media_type(self, filename: str) -> str:
         """Get MIME type for image file."""
@@ -2534,9 +2697,10 @@ class BuilderAgent:
         return manifest_items
 
     def _create_stylesheet(self, paths: EPUBPaths) -> List[ManifestItem]:
-        """Create CSS stylesheet."""
+        """Create CSS stylesheet for the active device profile."""
         css_path = paths.styles_dir / "stylesheet.css"
-        css_path.write_text(DEFAULT_CSS, encoding='utf-8')
+        css = STYLESHEETS.get(self.profile.stylesheet, DEFAULT_CSS)
+        css_path.write_text(css, encoding='utf-8')
 
         return [ManifestItem(
             id="css",
@@ -2704,6 +2868,8 @@ def run_builder(
     skip_qc_check: bool = False,
     include_header_illustrations: bool = False,
     dry_run: bool = False,
+    profile: Optional[str] = None,
+    emit_xtc: Optional[str] = None,
 ) -> BuildResult:
     """
     Main entry point for Builder agent.
@@ -2717,17 +2883,23 @@ def run_builder(
         include_header_illustrations: Keep chapter-opening illustration placeholders
         dry_run: Assemble the EPUB structure but don't package it or touch
             manifest.json — see BuilderAgent.build_epub's dry_run docstring.
+        profile: Device profile name. None uses builder.device_profile from
+            config.yaml.
+        emit_xtc: 'xtc' or 'xtch' to additionally render the CrossPoint native
+            format. Requires an xteink-* profile and a configured converter.
+            A failed export never fails the build.
 
     Returns:
         BuildResult with status and details
     """
-    agent = BuilderAgent(work_base, output_base)
+    agent = BuilderAgent(work_base, output_base, profile=profile)
     return agent.build_epub(
         volume_id,
         output_filename,
         skip_qc_check,
         include_header_illustrations=include_header_illustrations,
         dry_run=dry_run,
+        emit_xtc=emit_xtc,
     )
 
 
@@ -2763,6 +2935,27 @@ if __name__ == "__main__":
              "or touch manifest.json. Assembled OEBPS/ tree is copied to "
              "WORK/<vol_id>/DRY_RUN/ instead.",
     )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        choices=list(PROFILE_NAMES),
+        default=None,
+        help="Target device profile (default: builder.device_profile in config.yaml). "
+             "xteink-x3 / xteink-x4 fit images to the panel, convert them to "
+             "grayscale, force baseline JPEG and ship the e-ink stylesheet. "
+             "passthrough reproduces pre-profile output byte for byte.",
+    )
+    parser.add_argument(
+        "--emit-xtc",
+        type=str,
+        choices=list(XTC_FORMATS),
+        default=None,
+        help="Additionally render the CrossPoint native format alongside the "
+             ".epub. Requires an xteink-* profile and builder.xtc configured "
+             "with a converter checkout and a font. Pages are pre-rendered "
+             "bitmaps: roughly 10x the file size, and the reader can no longer "
+             "change font or text size. A failed render never fails the build.",
+    )
 
     args = parser.parse_args()
 
@@ -2774,6 +2967,8 @@ if __name__ == "__main__":
         skip_qc_check=args.skip_qc,
         include_header_illustrations=args.include_header_illustrations,
         dry_run=args.dry_run,
+        profile=args.profile,
+        emit_xtc=args.emit_xtc,
     )
 
     if result.success and result.dry_run:

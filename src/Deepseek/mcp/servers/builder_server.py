@@ -9,6 +9,8 @@ from PIL import Image
 
 from src.builder.markdown_to_xhtml import convert_paragraphs_to_xhtml
 from src.builder.merge_translated_shards_to_spine import merge_translated_shards_to_spine
+from src.builder.device_profiles import PROFILE_NAMES, UnknownProfileError, resolve_profile
+from src.builder.image_optimizer import optimize_image_to
 
 from src.Deepseek.mcp.mcp_config import MCPConfig
 from src.Deepseek.mcp.runtime import ensure_allowed_path, load_manifest, resolve_volume_dir, run_module
@@ -96,7 +98,7 @@ def register_builder_tools(mcp: object, cfg: MCPConfig) -> None:
         }
 
     @mcp.tool()  # type: ignore[attr-defined]
-    def optimize_image(image_path: str, max_width: int = 1600) -> dict:
+    def optimize_image(image_path: str, max_width: int = 1600, profile: str = "") -> dict:
         path = Path(image_path).expanduser()
         if not path.is_absolute():
             path = (cfg.pipeline_root / path).resolve()
@@ -109,6 +111,35 @@ def register_builder_tools(mcp: object, cfg: MCPConfig) -> None:
             }
 
         original_size = path.stat().st_size
+
+        # A named profile supersedes max_width entirely: it also carries colour
+        # depth, JPEG quality and baseline encoding, none of which the bare
+        # max_width path has ever known about.
+        if profile:
+            try:
+                resolved = resolve_profile(profile)
+            except UnknownProfileError as exc:
+                return {"schema": "OptimizedImage", "ok": False, "error": str(exc)}
+
+            result = optimize_image_to(path, path.parent, resolved)
+            if result.renamed:
+                # The emitted file has a different extension (gif/webp -> jpg).
+                # Drop the undecodable original rather than leaving both, since
+                # this tool's contract is to replace the image in place.
+                path.unlink(missing_ok=True)
+            return {
+                "schema": "OptimizedImage",
+                "ok": True,
+                "path": str(path.parent / result.emitted_name),
+                "profile": resolved.name,
+                "action": result.action,
+                "renamed_from": result.source_name if result.renamed else "",
+                "original_size_bytes": result.source_bytes,
+                "optimized_size_bytes": result.emitted_bytes,
+                "width": result.width,
+                "height": result.height,
+                "undersized_for_panel": result.undersized,
+            }
         with Image.open(path) as image:
             width, height = image.size
             if width > max_width > 0:
@@ -145,7 +176,23 @@ def register_builder_tools(mcp: object, cfg: MCPConfig) -> None:
         skip_qc: bool = False,
         include_header_illustrations: bool = False,
         dry_run: bool = False,
+        profile: str = "",
+        emit_xtc: str = "",
     ) -> dict:
+        if profile:
+            try:
+                resolve_profile(profile)
+            except UnknownProfileError as exc:
+                # Validate before spawning the subprocess: a typo should cost a
+                # message, not a build's worth of output and an argparse dump.
+                return {
+                    "schema": "PackageResult",
+                    "ok": False,
+                    "volume_id": volume_id,
+                    "error": str(exc),
+                    "valid_profiles": list(PROFILE_NAMES),
+                }
+
         args = [volume_id]
         if output_filename:
             args.extend(["--output", output_filename])
@@ -155,12 +202,18 @@ def register_builder_tools(mcp: object, cfg: MCPConfig) -> None:
             args.append("--include-header-illustrations")
         if dry_run:
             args.append("--dry-run")
+        if profile:
+            args.extend(["--profile", profile])
+        if emit_xtc:
+            args.extend(["--emit-xtc", emit_xtc])
         execution = run_module("src.builder.agent", args, cfg)
         return {
             "schema": "PackageResult",
             "ok": bool(execution.get("ok", False)),
             "volume_id": volume_id,
             "dry_run": dry_run,
+            "profile": profile,
+            "emit_xtc": emit_xtc,
             "execution": execution,
         }
 
@@ -171,6 +224,8 @@ def register_builder_tools(mcp: object, cfg: MCPConfig) -> None:
         skip_qc: bool = False,
         include_header_illustrations: bool = False,
         dry_run: bool = False,
+        profile: str = "",
+        emit_xtc: str = "",
     ) -> dict:
         result = package_epub(
             volume_id=volume_id,
@@ -178,6 +233,8 @@ def register_builder_tools(mcp: object, cfg: MCPConfig) -> None:
             skip_qc=skip_qc,
             include_header_illustrations=include_header_illustrations,
             dry_run=dry_run,
+            profile=profile,
+            emit_xtc=emit_xtc,
         )
         result["schema"] = "BuildResult"
         return result
