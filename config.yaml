@@ -1,12 +1,12 @@
 # ============================================================================
-# DeepSeek_MTLS — Master Configuration
-# Lightweight, DeepSeek V4 Pro-exclusive translation client.
+# LLM Translator — Master Configuration
+# Lightweight translation client with selectable DeepSeek and Qwen providers.
 # ============================================================================
 
 # ── Project Identity ────────────────────────────────────────────────────────
 project:
   target_language: en
-  name: DeepSeek MTLS
+  name: LLM Translator
   version: 1.0.0
 
 # ── File System Paths ───────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ paths:
   input_dir: raw/          # Source EPUBs for extraction
   work_dir: work/           # Per-volume working directories
   output_dir: output/       # Final assembled EPUBs
-  prompt_dir: src/prompt/   # Master translation prompts
+  prompt_dir: src/Deepseek/prompt/   # Master translation prompts
   log_dir: logs/            # Debug and cost logs
 
 # ── MCP Phase Routing (optional) ────────────────────────────────────────────
@@ -32,13 +32,13 @@ paths:
 # V4 Flash is not used here: structured 15-block XML output needs the Pro
 # tier's instruction-following, not the Flash tier's throughput.
 prep:
-  model: deepseek-v4-pro
+  model: deepseek-v4-flash
   endpoint: https://api.deepseek.com/anthropic
   api_key_env: DEEPSEEK_API_KEY
-  prompt: src/prompt/prep_prompt_deepseek_en.xml
-  thinking_budget: 48000
-  max_output_tokens: 128000
-  effort: high                       # output_config.effort for every prep
+  prompt: src/Deepseek/prompt/prep_prompt_deepseek_en.xml
+  thinking_budget: 64000
+  max_output_tokens: 384000
+  effort: xhigh                       # output_config.effort for every prep
                                       # Pro call (unified path's single call,
                                       # and the parallel path's phase1_pro_root)
   http_timeout_seconds: 900
@@ -66,12 +66,12 @@ prep:
                                         # proven unified Pro call above
                                         # instead of failing prep outright
     flash_model: deepseek-v4-flash
-    flash_thinking_budget: 8000        # 0 disables extended thinking for
+    flash_thinking_budget: 32000        # 0 disables extended thinking for
                                         # Flash calls entirely. Must stay
                                         # below flash_max_output_tokens —
                                         # budget_tokens counts against the
                                         # same ceiling as the block output.
-    flash_max_output_tokens: 32000     # each call returns ONE block, not
+    flash_max_output_tokens: 384000     # each call returns ONE block, not
                                         # the whole document, but the verbose
                                         # blocks (scene_plans, eps_arc_tracker,
                                         # cultural_glossary) ran 12-15K tokens
@@ -81,24 +81,88 @@ prep:
                                         # without meaningfully raising cost on
                                         # the cheap blocks (validation_audit
                                         # used all of 626).
-    flash_effort: high                 # output_config.effort for every Flash
+    flash_effort: max                 # output_config.effort for every Flash
                                         # call in Phase 2 (warming + parallel)
     warming_block: voice_fingerprints  # which block the lone sequential
                                         # cache-warming call (Phase 2a) fills
     max_concurrent_flash_calls: 20    # well under Flash's documented 2500
                                         # concurrent-request ceiling
 
+  # ── Multi-turn Prep with Prefix Cache (src/prep/multiturn_agent.py) ───────
+  # Third alternative to the unified single-call path and the parallel
+  # cache-warmed fan-out above: one PERSISTED, SEQUENTIAL DeepSeek conversation
+  # (src/translator/deepseek_conversation.py::DeepSeekConversationManager —
+  # the same mechanism the translator uses for chapter-by-chapter multi-turn
+  # translation), one API call per block, in the exact order the Librarian's
+  # placeholder context.xml already defines. Unlike the parallel path's 12
+  # concurrent Flash calls (each blind to the others' output), every turn here
+  # sees every earlier turn's actual output through the growing conversation
+  # history — that ordering is what buys consistency the parallel path can
+  # only check for after the fact (validate_cross_block_consistency). Each
+  # turn returns its block as a small JSON envelope (not raw XML); a
+  # deterministic script (multiturn_agent.py's assembly step) converts and
+  # wires every artifact into context.xml only at the end.
+  #
+  # Checked BEFORE prep.parallel.enabled in run_prep()'s dispatch — do not
+  # enable both at once. fallback_to_unified mirrors the parallel path's
+  # safety net on any failure.
+  multi_turn:
+    enabled: true
+    fallback_to_unified: true
+    flash_model: deepseek-v4-flash
+    thinking_budget: 64000              # 0 disables extended thinking
+    effort: max                        # output_config.effort for every turn
+    max_output_tokens: 384000            # per-block ceiling — one turn returns
+                                         # ONE block's JSON envelope, not the
+                                         # whole document
+    cache_monitor:
+      enabled: true
+      warn_threshold_cache_hit_ratio: 0.70
+
+    # Passed straight to DeepSeekConversationManager as its `config`. Prep's
+    # conversation is short (15 turns, one per block) and the full JP text
+    # only enters once (turn 1) — recent_verbatim_chapters is set >= the turn
+    # count so the compaction ladder stays dormant for a normal-length volume;
+    # it exists as the same safety net the translator relies on, not because
+    # a prep run is expected to need it.
+    conversation:
+      recent_verbatim_chapters: 15
+      checkpoint_trigger_ratio: 0.85
+      soft_notice_ratio: 0.60
+      tool_snip_ratio: 0.70
+      checkpoint_force_ratio: 0.95
+      checkpoint_max_output_tokens: 16000
+      checkpoint_stuck_guard_turns: 2
+      fail_closed_on_checkpoint_error: true
+      persistence_file: .context/deepseek_prep_multiturn_conversation.json
+      cache_user_id: true
+      context_window: 1000000
+
 # ── Translation Pipeline ────────────────────────────────────────────────────
 translation:
+  # ════════════════════════════════════════════════════════════════════════
+  # GENERAL — provider route + shared prompt/log settings. These apply to
+  # whichever provider is selected; provider-specific knobs live in the
+  # `deepseek:` and `qwen:` menus below.
+  # ════════════════════════════════════════════════════════════════════════
+
+  # Phase 2 provider route: deepseek | qwen.
+  provider: qwen                 # deepseek | qwen
+
   # Master prompt selection. The base prompt consolidates all 13 RAG module
   # policies inline — no external RAG modules, ChromaDB, or vector stores
   # are needed at runtime.
-  master_prompt: src/prompt/master_prompt_deepseek_en.xml
+  #
+  # ROUTING: this key feeds the DEEPSEEK route only (get_master_prompt_path()).
+  # When translation.provider is "qwen", the Qwen client loads its own prompt
+  # from translation.qwen.master_prompt below — this key is ignored then, so
+  # do not point it at the Qwen prompt expecting it to ship.
+  master_prompt: src/Deepseek/prompt/master_prompt_deepseek_en.xml
 
   # Optional: Use the V2 literacy-anchor variant for sequel volumes that
   # have prior-volume golden samples in context.xml.  The prompt loader
   # auto-selects this when context.xml contains <prior_volume_anchors>.
-  master_prompt_v2: src/prompt/master_prompt_deepseek_en_v2.xml
+  master_prompt_v2: src/Deepseek/prompt/master_prompt_deepseek_en_v2.xml
 
   # ── Thinking Log ────────────────────────────────────────────────────────────
   # DeepSeek V4 Pro's reasoning_content shows WHY it made each translation
@@ -122,11 +186,11 @@ translation:
     density_map:
       enabled: true
 
-  # ── DeepSeek V4 Translator Parameters ─────────────────────────────────────
-  # This is THE control knob for all DeepSeek V4 translator behavior.
-  # Every parameter below maps directly to deepseek_client.py,
-  # deepseek_conversation.py, and deepseek_optimization.py.
-  translator:
+  # ════════════════════════════════════════════════════════════════════════
+  # DEEPSEEK ROUTE MENU — read by src/Deepseek/translator/config.py when
+  # provider: deepseek. Mirrors the qwen: menu below.
+  # ════════════════════════════════════════════════════════════════════════
+  deepseek:
 
     # ── Model & Connection ──────────────────────────────────────────────────
     # DeepSeek V4 Pro (~$0.435/$0.87 per MTok input/output, 75% discount).
@@ -174,14 +238,14 @@ translation:
       # to 16K for COLD-band chapters if using per-chapter budget routing
       # (not implemented in the bare client — DRDI is the primary
       # reasoning control instead).
-      budget_tokens: 48000
+      budget_tokens: 64000
 
       # Anthropic-format effort level. DeepSeek ignores this at the API
       # level (it has no native effort routing), but the client still
       # sends it in output_config for forward-compatibility if DeepSeek
       # ever adds server-side effort support. The actual per-chapter
       # reasoning intensity is controlled via DRDI (see below).
-      effort: xhigh                         # max | high | medium | low
+      effort: xhigh                         # max | xhigh/high | medium | low
 
     # ── Auto-Prefix Cache ───────────────────────────────────────────────────
     caching:
@@ -269,6 +333,18 @@ translation:
       # true = abort (safe); false = continue (risks context overflow).
       fail_closed_on_checkpoint_error: true
 
+    # ── Output Continuation ─────────────────────────────────────────────────
+    # When a chapter's response is cut off by the per-turn output cap
+    # (stop_reason=max_tokens — which on this endpoint counts reasoning
+    # tokens against the same budget as the translation text), the
+    # translator issues follow-up calls that continue the translation from
+    # exactly where the previous output stopped, instead of shipping a
+    # truncated chapter. `max_continuations` caps how many follow-up calls
+    # one chapter may take; the partial result is used if the cap is hit.
+    continuation:
+      enabled: true
+      max_continuations: 3
+
     # ── DeepSeek-Specific Optimizations ─────────────────────────────────────
     optimizations:
 
@@ -332,10 +408,76 @@ translation:
       # 529 Overloaded: don't retry indefinitely. 3 is production value.
       max_529_retries: 3
 
+  # ════════════════════════════════════════════════════════════════════════
+  # QWEN ROUTE MENU — read by src/Qwen/config.py when provider: qwen.
+  # Mirrors the deepseek: menu above.
+  # ════════════════════════════════════════════════════════════════════════
+  qwen:
+    model: qwen3.7-max
+    endpoint: https://dashscope-intl.aliyuncs.com/apps/anthropic
+    api_key_env: DASHSCOPE_API_KEY
+    http_timeout_seconds: 600
+
+    # Master prompt for the Qwen route. Read by src/Qwen/config.py::
+    # get_qwen_prompt_path() whenever translation.provider is "qwen" — the
+    # general translation.master_prompt key above belongs to the DeepSeek
+    # route and is never consulted by the Qwen client. Swap this path to
+    # point the Qwen route at a different prompt without touching code.
+    master_prompt: src/Qwen/prompts/master_prompt_qwen_en.xml
+    generation:
+      # Official qwen3.8-max rule: when thinking is enabled, max_tokens must
+      # exceed thinking.budget_tokens (shared budget for reply + CoT).
+      max_output_tokens: 128000
+      top_p: 0.95
+    thinking:
+      enabled: true
+      budget_tokens: 48000
+      # Anthropic-compatible multi-turn preserves thinking by returning
+      # prior assistant thinking blocks in conversation history (not a
+      # request header). preserve_thinking is NOT supported on this route
+      # — the conversation manager strips thinking blocks from stored
+      # assistant content instead, matching Qwen's documented rule:
+      # "retain only the content field and ignore reasoning_content."
+    caching:
+      enabled: true
+      explicit: true                 # cache_control markers on system + latest user
+      ttl_minutes: 5                 # official explicit-cache validity window
+      cache_monitor:
+        enabled: true
+        warn_threshold_cache_hit_ratio: 0.70
+    streaming:
+      enabled: true                  # recommended for long thinking turns
+    conversation:
+      enabled: true
+      recent_verbatim_chapters: 2
+      include_exact_jp_task: true
+      persistence_file: .context/qwen_conversation.json
+      context_window: 1000000
+      soft_notice_ratio: 0.60
+      compact_ratio: 0.75
+      hard_trim_ratio: 0.90
+    continuation:
+      enabled: true
+      max_continuations: 3
+      # Official Partial Mode is incompatible with thinking. When true and
+      # thinking is on, the client disables thinking for the continuation turn
+      # and uses assistant partial=true prefix continuation.
+      use_partial_mode: true
+    retry:
+      max_retries: 5
+      base_delay_ms: 500
+      max_delay_ms: 32000
+      jitter_factor: 0.25
+      max_429_retries: 3
+    optimizations:
+      eps_guidance: true
+      voice_block: true
+      partial_prefix: true
+
 # ── EPUB Builder ────────────────────────────────────────────────────────────
 builder:
   # Font embedding for CJK glyph coverage in the output EPUB.
-  # Paths relative to DeepSeek_MTLS/ root.
+  # Paths relative to LLM Translator/ root.
   fonts:
     enabled: true
     # Add font paths here if you have custom CJK fonts
@@ -351,7 +493,7 @@ builder:
 # ── Logging ─────────────────────────────────────────────────────────────────
 logging:
   level: INFO                           # DEBUG | INFO | WARNING | ERROR
-  file: logs/deepseek_mtls.log
+  file: logs/llm_translator.log
   # Log API cost per chapter (input/output/cache tokens → USD)
   cost_tracking: true
 
@@ -370,12 +512,12 @@ mcp_harness:
     prep:
       enabled: true
       model: deepseek-v4-flash
-      thinking_budget: 48000
+      thinking_budget: 64000
       effort: xhigh
       max_output_tokens: 128000
 
     translator:
-      harness_managed: true   # DeepSeekClient owns its config (translation.translator)
+      harness_managed: true   # DeepSeekClient owns its config (translation.deepseek)
 
     qc:
       enabled: true            # Agent-managed — see top-level §qc for model config
@@ -425,7 +567,7 @@ qc:
     # 36000 for prose sub-agents) must not exceed this value. Orchestrator
     # agents (mtl-qc, qc-prose) use a lower budget since they aggregate
     # rather than analyze — defined in their respective frontmatter.
-    budget_tokens: 48000                # PRO ceiling — per-agent budgets ≤ this
+    budget_tokens: 64000                # PRO ceiling — per-agent budgets ≤ this
     effort: xhigh                       # max | high | medium | low
 
   # ── Agent-Specific Budget Overrides ───────────────────────────────────────

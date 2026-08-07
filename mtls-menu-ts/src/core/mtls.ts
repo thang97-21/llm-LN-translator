@@ -3,7 +3,9 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import type { CapabilitySpec, ChapterLog, ConfigLine, PhaseStatus, PhaseStatusValue, RunHandle, SortMode, VolumeDetail, VolumeSummary } from './types.js';
+import { manifestSchema, parseBoundary, translationLogSchema } from './boundary.js';
+import { asChapterRef, asVolumeId } from './types.js';
+import type { CapabilitySpec, ChapterLog, ChapterRef, ConfigLine, PhaseStatus, PhaseStatusValue, RunHandle, SortMode, VolumeDetail, VolumeId, VolumeSummary } from './types.js';
 
 // core/ lives at mtls-menu-ts/src/core. The menu package is two levels up;
 // the Python pipeline it operates is its parent, not the menu directory.
@@ -14,9 +16,7 @@ export const inputRoot = path.join(pipelineRoot, 'raw');
 export const mtlScript = path.join(pipelineRoot, 'scripts', 'mtl.py');
 
 const phaseMap: ReadonlyArray<readonly [string, string]> = [['librarian', 'P1'], ['prep', 'P1.P'], ['translator', 'P2'], ['builder', 'P4']];
-const asRecord = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const asString = (value: unknown, fallback = ''): string => typeof value === 'string' && value.trim() ? value : fallback;
-const asNumber = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
 function deriveSeries(title: string): string { return title.replace(/【[^】]*】|\([^)]*\)|（[^）]*）/g, ' ').replace(/\s+/g, ' ').trim() || title; }
 
@@ -37,15 +37,25 @@ export function loadVolumesFrom(root: string): VolumeSummary[] {
   return readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((entry) => {
     const manifestPath = path.join(root, entry.name, 'manifest.json');
     if (!existsSync(manifestPath)) return [];
-    try {
-      const manifest = asRecord(JSON.parse(readFileSync(manifestPath, 'utf8')));
-      const metadata = asRecord(manifest.metadata); const metadataEn = asRecord(manifest.metadata_en); const pipeline = asRecord(manifest.pipeline_state);
-      const chapters = Array.isArray(manifest.chapters) ? manifest.chapters : [];
-      const translatedCount = chapters.filter((chapter) => { const row = asRecord(chapter); return row.translation_status === 'completed' || row.state === 'DONE'; }).length;
-      const title = asString(metadataEn.title_en, asString(metadata.title, entry.name));
-      const phases: PhaseStatus[] = phaseMap.map(([key, label]) => ({ key, label, status: normalizePhaseStatus(asString(asRecord(pipeline[key]).status, 'pending')) }));
-      return [{ id: entry.name, title, author: asString(metadataEn.author_en, asString(metadata.author, 'unknown')), series: deriveSeries(title), hasEnTitle: Boolean(asString(metadataEn.title_en)), updatedAt: statSync(manifestPath).mtimeMs, chapterCount: chapters.length, translatedCount, phases }];
-    } catch { return []; }
+    const parsed = parseBoundary(manifestSchema, readFileSync(manifestPath, 'utf8'), manifestPath);
+    if (!parsed.ok) {
+      // A corrupt manifest used to vanish silently (catch → []). That made a
+      // Python-side schema drift indistinguishable from "no volumes yet."
+      // The volume directory exists, so surface it as a degraded entry —
+      // the Inspector shows the parse error where a title would be.
+      let mtime = 0; try { mtime = statSync(manifestPath).mtimeMs; } catch { /* unreadable */ }
+      return [{ id: asVolumeId(entry.name), title: entry.name, author: 'unknown', series: entry.name, hasEnTitle: false, updatedAt: mtime, chapterCount: 0, translatedCount: 0, phases: phaseMap.map(([key, label]) => ({ key, label, status: 'unknown' as const })), manifestError: parsed.error }];
+    }
+    const manifest = parsed.data;
+    const metadata = manifest.metadata ?? {}; const metadataEn = manifest.metadata_en ?? {}; const pipeline = manifest.pipeline_state ?? {};
+    const chapters = manifest.chapters ?? [];
+    const translatedCount = chapters.filter((chapter) => chapter.translation_status === 'completed' || chapter.state === 'DONE').length;
+    const title = asString(metadataEn.title_en, asString(metadata.title, entry.name));
+    const phases: PhaseStatus[] = phaseMap.map(([key, label]) => {
+      const phase = (pipeline as Record<string, { status?: string } | undefined>)[key];
+      return { key, label, status: normalizePhaseStatus(asString(phase?.status, 'pending')) };
+    });
+    return [{ id: asVolumeId(entry.name), title, author: asString(metadataEn.author_en, asString(metadata.author, 'unknown')), series: deriveSeries(title), hasEnTitle: Boolean(asString(metadataEn.title_en)), updatedAt: statSync(manifestPath).mtimeMs, chapterCount: chapters.length, translatedCount, phases }];
   }).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
@@ -66,12 +76,16 @@ export function loadRuntimeConfigLines(): ConfigLine[] {
     let translatorIndent = 0;
     let sawAny = false;
     const parents: Array<{ indent: number }> = [];
+    // Show the active provider's menu: translation.provider selects which
+    // block (deepseek: or qwen:) the dashboard reflects.
+    const providerMatch = /^\s*provider:\s*(deepseek|qwen)\s*(?:#.*)?$/.exec(lines.join('\n'));
+    const menuKey = providerMatch?.[1] === 'qwen' ? 'qwen:' : 'deepseek:';
     for (const rawLine of lines) {
       const trimmed = rawLine.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
       const indent = rawLine.length - rawLine.trimStart().length;
       if (!inTranslator) {
-        if (trimmed === 'translator:') { inTranslator = true; translatorIndent = indent; }
+        if (trimmed === menuKey) { inTranslator = true; translatorIndent = indent; }
         continue;
       }
       if (indent <= translatorIndent) break;
@@ -152,11 +166,11 @@ function humanizeConfigValue(key: string, value: string): { text: string; boolSt
 function listFiles(dir: string, suffix: string): string[] { if (!existsSync(dir)) return []; try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(suffix)).map((entry) => path.join(dir, entry.name)).sort((a, b) => a.localeCompare(b)); } catch { return []; } }
 function listMarkdown(dir: string): string[] { return listFiles(dir, '.md'); }
 
-export function listChapters(volumeId: string): string[] { return listMarkdown(path.join(workRoot, volumeId, 'JP')).map((file) => path.basename(file, '.md')); }
+export function listChapters(volumeId: VolumeId): ChapterRef[] { return listMarkdown(path.join(workRoot, volumeId, 'JP')).map((file) => asChapterRef(path.basename(file, '.md'))); }
 
-export function loadVolumeDetail(id: string): VolumeDetail { return loadVolumeDetailFrom(workRoot, id); }
+export function loadVolumeDetail(id: VolumeId): VolumeDetail { return loadVolumeDetailFrom(workRoot, id); }
 
-export function loadVolumeDetailFrom(root: string, id: string): VolumeDetail {
+export function loadVolumeDetailFrom(root: string, id: VolumeId): VolumeDetail {
   const base = path.join(root, id); const empty: VolumeDetail = { id, loaded: false, jpChapters: 0, enChapters: 0, enWords: 0, qcReports: 0, totalInputTokens: 0, totalOutputTokens: 0, successCount: 0, failCount: 0, aiIsmTotal: 0, lastError: null, logChapters: [] };
   if (!existsSync(base)) return empty;
   const jp = listMarkdown(path.join(base, 'JP')); const en = listMarkdown(path.join(base, 'EN'));
@@ -164,8 +178,15 @@ export function loadVolumeDetailFrom(root: string, id: string): VolumeDetail {
   let qcReports = 0; try { const qc = path.join(base, 'QC'); qcReports = existsSync(qc) ? readdirSync(qc, { withFileTypes: true }).filter((entry) => entry.isFile()).length : 0; } catch { /* no QC yet */ }
   const logChapters: ChapterLog[] = []; let totalInputTokens = 0; let totalOutputTokens = 0; let successCount = 0; let failCount = 0; let aiIsmTotal = 0; let lastError: string | null = null;
   try {
-    const log = asRecord(JSON.parse(readFileSync(path.join(base, 'translation_log.json'), 'utf8'))); const rows = Array.isArray(log.chapters) ? log.chapters : [];
-    for (const raw of rows) { const row = asRecord(raw); const quality = asRecord(row.quality); const inputTokens = asNumber(row.input_tokens); const outputTokens = asNumber(row.output_tokens); const success = row.success === true; const error = typeof row.error === 'string' ? row.error : null; const aiIsmCount = typeof quality.ai_ism_count === 'number' ? quality.ai_ism_count : null; totalInputTokens += inputTokens; totalOutputTokens += outputTokens; success ? successCount += 1 : failCount += 1; aiIsmTotal += aiIsmCount ?? 0; if (error) lastError = error; logChapters.push({ chapterId: asString(row.chapter_id, '?'), inputTokens, outputTokens, success, error, passed: typeof quality.passed === 'boolean' ? quality.passed : null, aiIsmCount }); }
+    const logRaw = readFileSync(path.join(base, 'translation_log.json'), 'utf8');
+    const logParsed = parseBoundary(translationLogSchema, logRaw, path.join(base, 'translation_log.json'));
+    // The log is optional (a volume that never translated has none), but a
+    // PRESENT log that fails schema is worth one console line — same
+    // legible-corruption principle as the manifest, quieter because the
+    // detail view has a lastError slot to carry it.
+    if (!logParsed.ok) { lastError = logParsed.error; }
+    const rows = logParsed.ok ? logParsed.data.chapters ?? [] : [];
+    for (const row of rows) { const quality = row.quality ?? {}; const inputTokens = row.input_tokens ?? 0; const outputTokens = row.output_tokens ?? 0; const success = row.success === true; const error = typeof row.error === 'string' ? row.error : null; const aiIsmCount = typeof quality.ai_ism_count === 'number' ? quality.ai_ism_count : null; totalInputTokens += inputTokens; totalOutputTokens += outputTokens; success ? successCount += 1 : failCount += 1; aiIsmTotal += aiIsmCount ?? 0; if (error) lastError = error; logChapters.push({ chapterId: asChapterRef(asString(row.chapter_id, '?')), inputTokens, outputTokens, success, error, passed: typeof quality.passed === 'boolean' ? quality.passed : null, aiIsmCount }); }
   } catch { /* translation log is optional */ }
   return { id, loaded: Boolean(jp.length || en.length || qcReports || logChapters.length), jpChapters: jp.length, enChapters: en.length, enWords, qcReports, totalInputTokens, totalOutputTokens, successCount, failCount, aiIsmTotal, lastError, logChapters };
 }
@@ -179,7 +200,7 @@ export function sortVolumes(volumes: readonly VolumeSummary[], mode: SortMode): 
 // guarantees `python3` on macOS/Linux — plenty of current distros ship no
 // `python` symlink at all — while the python.org Windows installer only
 // ever produces `python.exe`, never `python3.exe`.
-export function pythonCommand(): string { const override = process.env.DEEPSEEK_MTLS_PYTHON; if (override && existsSync(override)) return override; const venv = path.join(pipelineRoot, 'venv', process.platform === 'win32' ? 'Scripts' : 'bin', process.platform === 'win32' ? 'python.exe' : 'python'); return existsSync(venv) ? venv : process.platform === 'win32' ? 'python' : 'python3'; }
+export function pythonCommand(): string { const override = process.env.LLM_TRANSLATOR_PYTHON; if (override && existsSync(override)) return override; const venv = path.join(pipelineRoot, 'venv', process.platform === 'win32' ? 'Scripts' : 'bin', process.platform === 'win32' ? 'python.exe' : 'python'); return existsSync(venv) ? venv : process.platform === 'win32' ? 'python' : 'python3'; }
 
 export function runCliCapability(spec: CapabilitySpec, argv: readonly string[], onText: (text: string, source: 'cli', severity?: 'info' | 'warning' | 'error' | 'success') => void, onDone: (code: number | null, cancelled: boolean) => void): RunHandle {
   if (spec.route.transport !== 'cli') throw new Error(`${spec.id} is not a CLI capability.`);

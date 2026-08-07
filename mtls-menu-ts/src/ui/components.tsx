@@ -32,40 +32,12 @@ const RISK_COLOR: Record<CapabilityRisk, Color> = {
   overwrite: 'red',
 };
 
-export function statusColor(status: PhaseStatusValue): Color {
-  return PHASE_STATUS_COLOR[status];
-}
-
 export function riskColor(risk: CapabilityRisk): Color {
   return RISK_COLOR[risk];
 }
 
-export function formatTokens(count: number): string {
-  if (count >= 1_000_000) {
-    return `${(count / 1_000_000).toFixed(1)}M`;
-  }
-  if (count >= 1_000) {
-    return `${(count / 1_000).toFixed(1)}K`;
-  }
-  return String(count);
-}
-
 export function Badge({ label, color = 'yellow' }: { label: string; color?: Color }) {
   return <Text color={color}>[{label}]</Text>;
-}
-
-export function Breadcrumb({ trail }: { trail: readonly string[] }) {
-  return (
-    <Text color="gray">
-      {trail.map((part, index) =>
-        index === trail.length - 1 ? (
-          <Text key={part} color="cyan" bold>{part}</Text>
-        ) : (
-          <Text key={part}>{part} › </Text>
-        ),
-      )}
-    </Text>
-  );
 }
 
 // Block-character progress bar, colored by completion.

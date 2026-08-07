@@ -7,7 +7,7 @@ Language-specific settings (titles, TOC labels) come from manifest.json.
 
 from pathlib import Path
 from typing import Dict, Any, List
-from src.common.config import load_config, TEMPLATES_DIR
+from src.Deepseek.common.config import load_config, TEMPLATES_DIR
 
 
 # ============================================================================

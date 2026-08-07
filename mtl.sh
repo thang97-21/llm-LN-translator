@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================
-# DeepSeek_MTLS - macOS/Linux CLI Launcher
+# LLM Translator - macOS/Linux CLI Launcher
 # ============================================
 # Usage:
 #   ./mtl.sh extract <epub>

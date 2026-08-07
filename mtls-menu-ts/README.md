@@ -1,4 +1,4 @@
-# DeepSeek_MTLS Operator Console
+# LLM Translator Operator Console
 
 The Ink console is the keyboard-first operator surface for the standalone
 DeepSeek pipeline. Python and MCP remain authoritative; this package supplies

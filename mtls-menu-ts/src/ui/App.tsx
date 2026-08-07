@@ -1,81 +1,27 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import type { Key } from 'ink';
-import Spinner from 'ink-spinner';
 import { CLI_CAPABILITIES, effectiveRisk, hydrateMcpCapabilities, initialValues, previewCapability, serializeCli, serializeMcp, validateCapability } from '../core/capabilities.js';
-import { appendConsole, browseConsole, createConsole, jumpConsole, setConsoleMode, visibleConsoleEntries } from '../core/console.js';
+import { appendConsole, createConsole } from '../core/console.js';
 import { CONFIG_PATH, loadConfigFields, saveConfigField, type ConfigFieldState } from '../core/configFile.js';
-import { buildConfigRenderLines, formatConfigValue, unquoteYamlScalar, validateConfigInput } from '../core/configSchema.js';
+import { activeProvider, filterFieldsForProvider, unquoteYamlScalar, validateConfigInput } from '../core/configSchema.js';
 import { callMcpTool, closeMcpClient, listMcpTools } from '../core/mcpClient.js';
-import { filterVolumes, fuzzyMatch, listChapters, loadEpubs, loadRuntimeConfigLines, loadVolumeDetail, loadVolumes, pipelineRoot, runCliCapability, sortVolumes, workRoot } from '../core/mtls.js';
+import { filterVolumes, fuzzyMatch, listChapters, loadEpubs, loadRuntimeConfigLines, loadVolumes, pipelineRoot, runCliCapability, sortVolumes, workRoot } from '../core/mtls.js';
 import { runPreflight } from '../core/preflight.js';
-import type { CapabilitySpec, ConfigLine, ConsoleSeverity, FormValues, Preflight, RunHandle, RunState, SortMode, VolumeSummary } from '../core/types.js';
-import { Badge, PhaseStrip, ProgressBar, riskColor } from './components.js';
+import { asVolumeId } from '../core/types.js';
+import type { CapabilitySpec, ConfigLine, FormValues, Preflight, RunHandle, RunState, VolumeSummary } from '../core/types.js';
 import { layoutForColumns } from './layout.js';
 import { useDirectoryWatcher, useFileWatcher } from './useFileWatcher.js';
 import { useMouseScroll } from './useMouseScroll.js';
 import { useTerminalSize } from './useTerminalSize.js';
-
-type Nav = 'dashboard' | 'workflows' | 'volumes' | 'advanced' | 'configuration' | 'console' | 'diagnostics';
-type FormState = { spec: CapabilitySpec; values: FormValues; cursor: number; confirmation: 0 | 1 | 2; issues: readonly string[] };
-// Identified by the field's dot-path, not its position in whatever list is
-// currently visible — a save reloads configFields from disk mid-session,
-// and a search query could in principle reorder that list, so an index
-// would silently point at the wrong row.
-type ConfigEditState = { fieldPath: string; buffer: string; error: string | null } | null;
-type ConfigStatus = { fieldPath: string; message: string; ok: boolean } | null;
-type Workspace = { nav: Nav; navIndex: number; itemIndex: number; configOffset: number; activeVolume: string | null; search: string; searching: boolean; form: FormState | null; run: RunState | null; terminalFocused: boolean; cancelConfirm: boolean; sort: SortMode; configEdit: ConfigEditState; configStatus: ConfigStatus };
-type Action =
-  | { type: 'nav'; nav: Nav; navIndex: number }
-  | { type: 'navCursor'; navIndex: number }
-  | { type: 'item'; index: number }
-  | { type: 'search'; value: string; active?: boolean }
-  | { type: 'activeVolume'; id: string | null }
-  | { type: 'form'; form: FormState | null }
-  | { type: 'run'; run: RunState | null }
-  | { type: 'console'; text: string; source: 'cli' | 'mcp' | 'system'; severity?: ConsoleSeverity; stage?: string }
-  | { type: 'runDone'; code: number | null; cancelled: boolean }
-  | { type: 'consoleMode'; mode: 'follow' | 'browse' | 'input' }
-  | { type: 'consoleBrowse'; delta: number; viewport: number }
-  | { type: 'consoleJump'; destination: 'home' | 'end'; viewport: number }
-  | { type: 'configScroll'; delta: number; viewport: number; destination?: 'home' | 'end' }
-  | { type: 'terminalFocus'; value: boolean }
-  | { type: 'cancelConfirm'; value: boolean }
-  | { type: 'sort'; value: SortMode }
-  | { type: 'configEdit'; edit: ConfigEditState }
-  | { type: 'configStatus'; status: ConfigStatus };
-
-const NAV: readonly { id: Nav; label: string }[] = [
-  { id: 'dashboard', label: 'Dashboard' }, { id: 'workflows', label: 'Workflows' }, { id: 'volumes', label: 'Volumes' }, { id: 'advanced', label: 'Advanced Toolbox' }, { id: 'configuration', label: 'Configuration' }, { id: 'console', label: 'Console' }, { id: 'diagnostics', label: 'Diagnostics' },
-];
-
-function reducer(state: Workspace, action: Action): Workspace {
-  switch (action.type) {
-    case 'nav': return { ...state, nav: action.nav, navIndex: action.navIndex, itemIndex: 0, configOffset: 0, search: '', searching: false, cancelConfirm: false, configEdit: null, configStatus: null };
-    case 'navCursor': return { ...state, navIndex: action.navIndex };
-    case 'item': return { ...state, itemIndex: action.index };
-    case 'search': return { ...state, search: action.value, searching: action.active ?? state.searching, itemIndex: 0 };
-    case 'activeVolume': return { ...state, activeVolume: action.id };
-    case 'form': return { ...state, form: action.form };
-    case 'run': return { ...state, run: action.run, nav: 'console', navIndex: NAV.findIndex((item) => item.id === 'console'), terminalFocused: false, cancelConfirm: false };
-    case 'console': return state.run ? { ...state, run: { ...state.run, console: appendConsole(state.run.console, action.text, action.source, action.severity, action.stage) } } : state;
-    case 'runDone': return state.run?.status === 'running' ? { ...state, run: { ...state.run, status: action.cancelled ? 'cancelled' : action.code === 0 ? 'done' : 'failed', exitCode: action.code, console: appendConsole(state.run.console, action.cancelled ? 'Action cancelled.' : `Action finished with code ${action.code ?? 'unknown'}.`, 'system', action.cancelled ? 'warning' : action.code === 0 ? 'success' : 'error', 'complete') } } : state;
-    case 'consoleMode': return state.run ? { ...state, run: { ...state.run, console: setConsoleMode(state.run.console, action.mode) } } : state;
-    case 'consoleBrowse': return state.run ? { ...state, run: { ...state.run, console: browseConsole(state.run.console, action.delta, action.viewport) } } : state;
-    case 'consoleJump': return state.run ? { ...state, run: { ...state.run, console: jumpConsole(state.run.console, action.destination, action.viewport) } } : state;
-    case 'configScroll': return { ...state, configOffset: action.destination === 'home' ? 0 : action.destination === 'end' ? Number.MAX_SAFE_INTEGER : Math.max(0, state.configOffset + action.delta) };
-    case 'terminalFocus': return { ...state, terminalFocused: action.value };
-    case 'cancelConfirm': return { ...state, cancelConfirm: action.value };
-    case 'sort': return { ...state, sort: action.value, itemIndex: 0 };
-    case 'configEdit': return { ...state, configEdit: action.edit };
-    case 'configStatus': return { ...state, configStatus: action.status };
-  }
-}
+import { ConsolePanel } from './ConsolePanel.js';
+import { ConfigurationPanel, DeveloperPanel, RuntimeConfigPanel } from './ConfigPanels.js';
+import { FormPanel } from './FormPanel.js';
+import { CapabilityList, Header, Inspector, Navigation } from './panels.js';
+import { NAV, initialWorkspace, reducer, type FormState, type Workspace } from './workspaceMachine.js';
 
 function clamp(value: number, length: number): number { return Math.max(0, Math.min(Math.max(0, length - 1), value)); }
 function printable(input: string, key: Key): boolean { return input.length === 1 && input >= ' ' && !key.ctrl && !key.meta && !key.tab && !key.return; }
-function basename(value: string): string { return value.split(/[\\/]/).pop() ?? value; }
-function initialWorkspace(volumes: readonly VolumeSummary[]): Workspace { return { nav: 'dashboard', navIndex: 0, itemIndex: 0, configOffset: 0, activeVolume: volumes[0]?.id ?? null, search: '', searching: false, form: null, run: null, terminalFocused: false, cancelConfirm: false, sort: 'recent', configEdit: null, configStatus: null }; }
 // Every capability (Prep Volume included) opens the same FormPanel, and a
 // form can be open on top of ANY nav bucket (workflows, advanced, ...) — it
 // is orthogonal to workspace.nav. The old footer only switched on nav, so
@@ -91,103 +37,6 @@ function footerText(workspace: Workspace): string {
   if (workspace.nav === 'configuration') return workspace.configEdit ? 'Enter commit · Esc cancel edit · Ctrl+Shift+Esc exit' : `↑↓ move · Enter edit/toggle · Space toggle · PgUp/PgDn/Home/End jump · / search · r reload · Esc back${runHint} · Ctrl+Shift+Esc exit`;
   if (workspace.nav === 'console') return workspace.run?.status === 'running' ? 'Esc back · Ctrl+C cancel run · Ctrl+Shift+Esc exit' : 'Esc back · Ctrl+Shift+Esc exit';
   return `↑↓ move · Enter select · / search · r refresh · Esc back${runHint} · Ctrl+Shift+Esc exit`;
-}
-
-function Header({ workspace, preflight, columns, compact }: { workspace: Workspace; preflight: Preflight; columns: number; compact?: boolean }) {
-  const active = workspace.activeVolume ?? 'none';
-  const status = <Text wrap="truncate-end">volume: <Text color={workspace.activeVolume ? 'green' : 'yellow'}>{active}</Text> · python <Badge label={preflight.pythonStatus} color={preflight.pythonStatus === 'ready' ? 'green' : 'red'} /> · MCP <Badge label={preflight.mcpStatus} color={preflight.mcpStatus === 'ready' ? 'green' : preflight.mcpStatus === 'checking' ? 'yellow' : 'red'} /> · API key <Badge label={preflight.apiKeyPresent ? 'present' : 'missing'} color={preflight.apiKeyPresent ? 'green' : 'yellow'} /></Text>;
-  // The Console screen only ever shows the console — 3 chrome rows saved
-  // here (title row + both borders) is 3 more lines of scrollback visible
-  // without touching ConsolePanel itself. Same status line either way.
-  if (compact) return status;
-  return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-    <Box justifyContent="space-between"><Text bold color="cyan">DeepSeek_MTLS · Operator Console</Text><Text color="gray">{layoutForColumns(columns)}</Text></Box>
-    {status}
-  </Box>;
-}
-
-function Navigation({ workspace }: { workspace: Workspace }) { return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} width={22}>{NAV.map((item, index) => <Text key={item.id} inverse={workspace.navIndex === index} color={workspace.navIndex === index ? 'cyan' : 'white'}>{' '}{item.label}{' '}</Text>)}</Box>; }
-
-function CapabilityList({ items, index, query }: { items: readonly CapabilitySpec[]; index: number; query: string }) {
-  const visible = items.filter((item) => fuzzyMatch(query, `${item.group} ${item.label} ${item.detail}`));
-  return <Box flexDirection="column"><Text bold>{visible.length === 1 ? '1 capability' : `${visible.length} capabilities`}{query ? <Text color="cyan"> · search: {query}</Text> : null}</Text>{visible.length ? visible.map((item, position) => <Box key={item.id} flexDirection="column"><Text inverse={position === index} color={position === index ? 'cyan' : item.available === false ? 'gray' : 'white'}>{' '}{item.label} <Text color={riskColor(item.risk)}>[{item.risk}]</Text>{' '}</Text>{position === index && <Text color="gray" wrap="truncate-end">  {item.group}: {item.detail}{item.unavailableReason ? ` — ${item.unavailableReason}` : ''}</Text>}</Box>) : <Text color="yellow">Nothing matches.</Text>}</Box>;
-}
-
-function Inspector({ volume }: { volume: VolumeSummary | null }) { if (!volume) return <Box borderStyle="round" borderColor="gray" paddingX={1}><Text color="gray">Select a volume to inspect it.</Text></Box>; const detail = loadVolumeDetail(volume.id); return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}><Text bold wrap="truncate-end">{volume.title}</Text><Text color="gray">{volume.author} · {volume.series}</Text><ProgressBar value={volume.translatedCount} total={volume.chapterCount} /><PhaseStrip phases={volume.phases} /><Text color="gray">JP {detail.jpChapters} · EN {detail.enChapters} · QC {detail.qcReports}</Text>{detail.lastError ? <Text color="red" wrap="truncate-end">{detail.lastError}</Text> : null}</Box>; }
-
-function FormPanel({ form, activeVolume, preflight, epubs, recentVolumes }: { form: FormState; activeVolume: string | null; preflight: Preflight; epubs: readonly string[]; recentVolumes: readonly VolumeSummary[] }) {
-  const risk = effectiveRisk(form.spec, form.values); let preview = '(complete required fields to preview)'; try { preview = previewCapability(form.spec, form.values, preflight.python); } catch { /* validation gives the useful error */ }
-  const chapters = activeVolume ? listChapters(activeVolume) : [];
-  return <Box flexDirection="column" borderStyle="round" borderColor={risk === 'overwrite' ? 'red' : 'cyan'} paddingX={1}><Text bold>{form.spec.label} <Text color={riskColor(risk)}>[{risk}]</Text></Text><Text color="gray" wrap="truncate-end">{form.spec.detail}</Text>{form.spec.fields.map((field, index) => <Box key={field.key} flexDirection="column"><Text inverse={form.cursor === index} color={form.cursor === index ? 'cyan' : 'white'}>{' '}{field.label}: <Text color="yellow">{field.kind === 'epub' && form.values[field.key] ? basename(String(form.values[field.key])) : String(form.values[field.key] ?? '') || '—'}</Text>{field.required ? ' *' : ''}</Text>{form.cursor === index && field.kind === 'chapter-list' && chapters.length > 0 ? <Text color="gray">  JP: {chapters.join(', ')} · press a for all, or type comma-separated IDs</Text> : null}{form.cursor === index && field.kind === 'epub' ? <Text color="gray">  raw/: {epubs.length ? epubs.map(basename).join(', ') : '(empty — drop an EPUB in raw/)'} · Space/Enter cycles, or type a path</Text> : null}{form.cursor === index && field.kind === 'volume' ? <Text color="gray">  recent: {recentVolumes.length ? recentVolumes.map((volume) => volume.id).join(', ') : '(none yet — run extract first)'} · Space/Enter cycles the 10 latest, or type any volume ID</Text> : null}</Box>)}<Text color="gray" wrap="truncate-end">review: {preview}</Text>{form.issues.map((issue) => <Text key={issue} color="red">! {issue}</Text>)}<Text inverse={form.cursor === form.spec.fields.length} color={risk === 'overwrite' ? 'red' : 'green'}>{' '}▶ {form.confirmation === 0 ? 'Review and confirm' : form.confirmation === 1 ? risk === 'overwrite' ? 'Press Enter for overwrite warning' : 'Press Enter to launch' : 'Press Enter to acknowledge overwrite'}{' '}</Text><Text color="gray">Up/Down fields · type to edit · Space toggles booleans · Enter advances · Esc closes</Text></Box>;
-}
-
-function ConsolePanel({ run, rows, focused, cancelConfirm }: { run: RunState | null; rows: number; focused: boolean; cancelConfirm: boolean }) {
-  if (!run) return <Box borderStyle="round" borderColor="gray" paddingX={1}><Text color="gray">No action yet. Runs stay here after completion instead of evaporating into a 200-line lie.</Text></Box>;
-  const entries = visibleConsoleEntries(run.console, Math.max(4, rows - 9));
-  return <Box flexDirection="column" borderStyle="round" borderColor={run.status === 'failed' ? 'red' : run.status === 'done' ? 'green' : focused ? 'magenta' : 'cyan'} paddingX={1}><Text bold>{run.status === 'running' ? <Text color="cyan"><Spinner type="dots" /> </Text> : null}{run.capability.label} · {run.status}</Text><Text color="gray" wrap="truncate-end">{run.preview}</Text><Text color={focused ? 'magenta' : 'gray'}>focus: {focused ? run.console.mode : 'menu'} · retained {run.console.entries.length}/5000 · {run.console.unseen ? `${run.console.unseen} unseen` : 'tail current'}</Text>{cancelConfirm ? <Text color="red">Cancel the running action? Enter confirms; Esc keeps it alive.</Text> : null}{entries.map((entry) => <Text key={entry.id} color={entry.severity === 'error' ? 'red' : entry.severity === 'warning' ? 'yellow' : entry.severity === 'success' ? 'green' : 'white'} wrap="truncate-end">[{entry.source}/{entry.stage}] {entry.text}</Text>)}<Text color="gray">wheel scrolls anytime · Tab focus · ↑↓ scroll · PgUp/PgDn page · Home/End · f follow · i raw stdin · Esc browse</Text></Box>;
-}
-
-function RuntimeConfigPanel({ lines, offset, rows }: { lines: readonly ConfigLine[]; offset: number; rows: number }) {
-  const viewport = Math.max(6, rows - 8);
-  const start = Math.max(0, Math.min(Math.max(0, lines.length - viewport), offset));
-  const visible = lines.slice(start, start + viewport);
-  const sectionCount = lines.filter((line) => line.kind === 'group').length;
-  const settingCount = lines.filter((line) => line.kind === 'value').length;
-  return <Box flexDirection="column">
-    <Text bold>Runtime configuration · config.yaml</Text>
-    <Text color="gray">{sectionCount} sections · {settingCount} settings · PgUp/PgDn scroll · Home/End jump</Text>
-    {visible.map((line, index) => {
-      const key = `${start + index}`;
-      if (line.kind === 'gap') return <Text key={key}> </Text>;
-      const indent = '  '.repeat(line.depth);
-      if (line.kind === 'group') return <Text key={key} bold color="cyan" wrap="truncate-end">{indent}{line.label}</Text>;
-      const valueColor = line.boolState === 'on' ? 'green' : line.boolState === 'off' ? 'red' : 'yellow';
-      return <Text key={key} wrap="truncate-end">  {indent}{line.label}: <Text color={valueColor}>{line.value}</Text></Text>;
-    })}
-  </Box>;
-}
-
-// Session-only toggles — deliberately NOT config.yaml fields. This is "what
-// should the NEXT launch form default to," not "what should the pipeline
-// permanently do" (that's what the Configuration screen is for). Living here
-// keeps a fast, throwaway developer switch from acquiring a saved-to-disk
-// footprint it was never meant to have.
-function DeveloperPanel({ dryRunDefault }: { dryRunDefault: boolean }) {
-  return <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1}>
-    <Text bold color="yellow">Developer</Text>
-    <Text>  Dry-run default (Translate Volume): <Text color={dryRunDefault ? 'green' : 'gray'}>{dryRunDefault ? 'ON' : 'off'}</Text></Text>
-    <Text color="gray">  Press d to toggle. When ON, opening Translate Volume pre-checks Dry Run —</Text>
-    <Text color="gray">  assembles the full API payload per chapter to work/&lt;vol&gt;/DRY_RUN/, sends nothing.</Text>
-  </Box>;
-}
-
-function ConfigurationPanel({ fields, cursor, rows, edit, status, query }: { fields: readonly ConfigFieldState[]; cursor: number; rows: number; edit: ConfigEditState; status: ConfigStatus; query: string }) {
-  const renderLines = useMemo(() => buildConfigRenderLines(fields), [fields]);
-  const viewport = Math.max(6, rows - 10);
-  const targetLine = renderLines.findIndex((line) => line.kind === 'field' && line.fieldIndex === cursor);
-  const start = Math.max(0, Math.min(Math.max(0, renderLines.length - viewport), targetLine < 0 ? 0 : targetLine - Math.floor(viewport / 2)));
-  const visible = renderLines.slice(start, start + viewport);
-  if (!fields.length) return <Box flexDirection="column"><Text bold>Configuration · config.yaml</Text><Text color="yellow">Nothing matches.</Text></Box>;
-  return <Box flexDirection="column">
-    <Text bold>Configuration · config.yaml{query ? <Text color="cyan"> · search: {query}</Text> : null}</Text>
-    <Text color="gray">{fields.length} settings · Enter edits/toggles · Space toggles · Esc cancels edit</Text>
-    {visible.map((line, index) => {
-      const key = `${start + index}`;
-      if (line.kind === 'gap') return <Text key={key}> </Text>;
-      if (line.kind === 'group') return <Text key={key} bold color="cyan" wrap="truncate-end">{line.label}</Text>;
-      const field = fields[line.fieldIndex]!;
-      const isSelected = line.fieldIndex === cursor;
-      const isEditing = edit?.fieldPath === field.path;
-      const displayValue = isEditing ? edit!.buffer : formatConfigValue(field, field.rawValue);
-      const valueColor = isEditing ? 'cyan' : field.kind === 'boolean' ? (field.rawValue === 'true' ? 'green' : 'red') : 'yellow';
-      return <Box key={key} flexDirection="column">
-        <Text inverse={isSelected && !isEditing} color={isSelected ? 'cyan' : 'white'} wrap="truncate-end">{' '}{field.label}: <Text color={valueColor}>{displayValue}</Text>{isEditing ? <Text color="gray">▏</Text> : null}{' '}</Text>
-        {isSelected ? <Text color="gray" wrap="truncate-end">  {field.description}</Text> : null}
-        {isEditing && edit!.error ? <Text color="red" wrap="truncate-end">  ! {edit!.error}</Text> : null}
-        {status && status.fieldPath === field.path ? <Text color={status.ok ? 'green' : 'red'} wrap="truncate-end">  {status.message}</Text> : null}
-      </Box>;
-    })}
-  </Box>;
 }
 
 export function App() {
@@ -230,7 +79,6 @@ export function App() {
   useDirectoryWatcher(workRoot, refresh);
   useEffect(() => {
     if (workspace.run && workspace.run.status !== 'running') refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace.run?.status]);
 
   useEffect(() => { const result = runPreflight(); setPreflight(result); if (result.importsStatus !== 'ready') return; const controller = new AbortController(); void listMcpTools(controller.signal).then((tools) => { setMcpCapabilities(hydrateMcpCapabilities(tools)); setPreflight((current) => ({ ...current, mcpStatus: 'ready', detail: `${tools.length} MCP tools available.` })); }).catch((error: unknown) => setPreflight((current) => ({ ...current, mcpStatus: 'missing', detail: error instanceof Error ? error.message : String(error) }))); return () => controller.abort(); }, []);
@@ -251,14 +99,29 @@ export function App() {
   const contentItems = useMemo(() => workspace.nav === 'workflows' ? [...CLI_CAPABILITIES] : workspace.nav === 'advanced' ? mcpCapabilities : [], [workspace.nav, mcpCapabilities]);
   const filteredItems = useMemo(() => contentItems.filter((item) => fuzzyMatch(workspace.search, `${item.label} ${item.group} ${item.detail}`)), [contentItems, workspace.search]);
   const volumeItems = useMemo(() => sortVolumes(filterVolumes(volumes, workspace.search), workspace.sort), [volumes, workspace.search, workspace.sort]);
-  const filteredConfigFields = useMemo(() => configFields.filter((field) => fuzzyMatch(workspace.search, `${field.label} ${field.section} ${field.description}`)), [configFields, workspace.search]);
+  // Search composes with the Provider gate: only the selected provider's
+  // settings are ever shown, so the Configuration screen mirrors config.yaml's
+  // GENERAL → deepseek:/qwen: layout. provider read from the full list so the
+  // gate survives a search that excludes the provider field itself.
+  //
+  // Pulling the provider string OUT of the useMemo and into the dependency
+  // array ensures the gate re-fires when the user changes translation.provider
+  // in the config panel — even if React batches the configFields state update
+  // such that the array reference doesn't change between renders.  The string
+  // value ('deepseek' vs 'qwen') is the actual signal; the array reference is
+  // merely the container.
+  const activeProviderValue = useMemo(() => activeProvider(configFields), [configFields]);
+  const filteredConfigFields = useMemo(() => {
+    const searched = configFields.filter((field) => fuzzyMatch(workspace.search, `${field.label} ${field.section} ${field.description}`));
+    return filterFieldsForProvider(searched, activeProviderValue);
+  }, [configFields, workspace.search, activeProviderValue]);
 
   const openForm = (spec: CapabilitySpec, values?: FormValues): void => {
     if (spec.available === false) return;
     const defaults = values ?? initialValues(spec, workspace.activeVolume);
     // Developer > Dry-run default applies to ANY capability with a dry_run
-    // field, not just Translate Volume specifically — a future prep dry-run
-    // field would pick this up for free.
+    // field — Translate Volume and Build EPUB today, and any future capability
+    // that adds one — not just Translate Volume specifically.
     const withDevDefaults = devDryRunDefault && spec.fields.some((field) => field.key === 'dry_run')
       ? { ...defaults, dry_run: true }
       : defaults;
@@ -303,8 +166,8 @@ export function App() {
       // volume you just extracted or translated) needs zero typing. Typing
       // still reaches any volume outside that top 10, or one just created
       // by a run this session that hasn't been picked up by `r` refresh yet.
-      if (field.kind === 'volume' && (input === ' ' || key.return) && recentVolumeIds.length > 0) { const current = recentVolumeIds.indexOf(String(value ?? '')); const next = recentVolumeIds[(current + 1) % recentVolumeIds.length] ?? recentVolumeIds[0]!; setForm({ ...form, values: { ...form.values, [field.key]: next }, confirmation: 0, issues: [] }); return; }
-      if (field.kind === 'chapter-list' && input === 'a' && workspace.activeVolume) { setForm({ ...form, values: { ...form.values, [field.key]: listChapters(workspace.activeVolume).join(',') }, confirmation: 0, issues: [] }); return; }
+      if (field.kind === 'volume' && (input === ' ' || key.return) && recentVolumeIds.length > 0) { const current = recentVolumeIds.map(String).indexOf(String(value ?? '')); const next = recentVolumeIds[(current + 1) % recentVolumeIds.length] ?? recentVolumeIds[0]!; setForm({ ...form, values: { ...form.values, [field.key]: String(next) }, confirmation: 0, issues: [] }); return; }
+      if (field.kind === 'chapter-list' && input === 'a' && workspace.activeVolume) { setForm({ ...form, values: { ...form.values, [field.key]: listChapters(asVolumeId(workspace.activeVolume)).join(',') }, confirmation: 0, issues: [] }); return; }
       if (key.backspace || key.delete) { setForm({ ...form, values: { ...form.values, [field.key]: String(value ?? '').slice(0, -1) }, confirmation: 0, issues: [] }); return; }
       if (printable(input, key)) setForm({ ...form, values: { ...form.values, [field.key]: String(value ?? '') + input }, confirmation: 0, issues: [] });
       return;
@@ -384,5 +247,5 @@ export function App() {
   const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} epubs={epubs} recentVolumes={recentVolumes} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'configuration' ? <ConfigurationPanel fields={filteredConfigFields} cursor={workspace.itemIndex} rows={rows} edit={workspace.configEdit} status={workspace.configStatus} query={workspace.search} /> : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
   const inspector = <Inspector volume={activeVolume} />;
   const footer = footerText(workspace);
-  return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header workspace={workspace} preflight={preflight} columns={columns} compact={maximized} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && !maximized && <Navigation workspace={workspace} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' || maximized ? 0 : 1}>{layout === 'single-pane' && !maximized && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{!maximized && layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{!maximized && layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">{footer}</Text></Box>;
+  return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header activeVolume={workspace.activeVolume} preflight={preflight} columns={columns} compact={maximized} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && !maximized && <Navigation navIndex={workspace.navIndex} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' || maximized ? 0 : 1}>{layout === 'single-pane' && !maximized && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{!maximized && layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{!maximized && layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">{footer}</Text></Box>;
 }

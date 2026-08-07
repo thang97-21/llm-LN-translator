@@ -22,7 +22,6 @@ export function useTerminalSize(): TerminalSize {
     return () => {
       stdout.off('resize', onResize);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stdout]);
 
   return size;

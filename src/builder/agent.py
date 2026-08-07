@@ -7,15 +7,16 @@ Assembles final EPUB from translated content following industry standards
 """
 
 import json
+import secrets
 import shutil
 import tempfile
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 import xml.etree.ElementTree as ET
 
-from src.common.config import WORK_DIR, OUTPUT_DIR, OS_PATHS, get_target_language, get_language_config
+from src.Deepseek.common.config import WORK_DIR, OUTPUT_DIR, OS_PATHS, get_target_language, get_language_config
 from .epub_structure import create_epub_structure, EPUBPaths
 from .opf_generator import OPFGenerator, BookMetadata, ManifestItem, SpineItem
 from .ncx_generator import NCXGenerator, NavPoint
@@ -26,7 +27,7 @@ from .markdown_to_xhtml import MarkdownToXHTML
 from .epub_packager import EPUBPackager
 from .image_analyzer import get_image_dimensions, is_horizontal, analyze_kuchie_images
 from .merge_translated_shards_to_spine import merge_translated_shards_to_spine
-from src.common.atomic_io import atomic_write_text
+from src.Deepseek.common.atomic_io import atomic_write_text
 import re
 
 # The leading H1 line every translated chapter emits ("# Chapter Title") —
@@ -35,7 +36,7 @@ import re
 _CHAPTER_H1_RE = re.compile(r'^#(?!#)\s+(.+?)\s*$')
 
 # <volume_identity> fields context.xml is expected to carry for every
-# volume once prep has run — see src/prompt/prep_prompt_deepseek_en.xml's
+# volume once prep has run — see src/Deepseek/prompt/prep_prompt_deepseek_en.xml's
 # volume_identity block spec. No JP fallback on any of these: an empty
 # value means prep didn't populate it, and OPF assembly should stop, not
 # guess in Japanese.
@@ -300,6 +301,11 @@ class BuildResult:
     image_count: int = 0
     warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    # Set only when build_epub(dry_run=True) ran: no .epub was packaged and
+    # no manifest.json write happened. output_path stays None in that case;
+    # debug_dir is where the assembled-but-unpackaged OEBPS/ tree landed.
+    dry_run: bool = False
+    debug_dir: Optional[Path] = None
 
 
 class BuilderAgent:
@@ -497,6 +503,7 @@ class BuilderAgent:
         output_filename: Optional[str] = None,
         skip_qc_check: bool = False,
         include_header_illustrations: bool = False,
+        dry_run: bool = False,
     ) -> BuildResult:
         """
         Build complete EPUB from translated volume.
@@ -507,6 +514,13 @@ class BuilderAgent:
             skip_qc_check: If True, build even if critics not complete
             include_header_illustrations: If True, preserve chapter-opening
                 illustration placeholders in chapter XHTML instead of skipping them
+            dry_run: Developer flag, the build-side counterpart to Translator's
+                dry_run (src/translator/dry_run.py). Runs every assembly step
+                (chapters, images, nav, OPF) into the temp build directory as
+                normal, then instead of packaging a .epub and writing OUTPUT/,
+                copies that assembled OEBPS/ tree to
+                WORK/<volume_id>/DRY_RUN/<run-stamp>/BUILD/ for inspection.
+                No .epub is produced and manifest.json is not touched.
 
         Returns:
             BuildResult with status and details
@@ -709,6 +723,30 @@ class BuilderAgent:
 
             self._generate_opf(manifest, work_dir, paths, all_items, chapter_info, cover_image_id, actual_language_code)
 
+            if dry_run:
+                debug_dir = self._write_dry_run_build(work_dir, build_dir)
+                dir_size_mb = self._dir_size_mb(debug_dir)
+                shutil.rmtree(build_dir, ignore_errors=True)
+
+                print(f"\n{'='*60}")
+                print("DRY RUN COMPLETE — no .epub packaged, manifest.json untouched")
+                print(f"{'='*60}")
+                print(f"Assembled structure: {debug_dir}")
+                print(f"Size:     {dir_size_mb:.2f} MB")
+                print(f"Chapters: {len(chapter_items)}")
+                print(f"Images:   {len(image_items)}")
+                print(f"{'='*60}\n")
+
+                return BuildResult(
+                    success=True,
+                    output_path=None,
+                    file_size_mb=dir_size_mb,
+                    chapter_count=len(chapter_items),
+                    image_count=len(image_items),
+                    dry_run=True,
+                    debug_dir=debug_dir,
+                )
+
             # Generate output filename
             if output_filename is None:
                 # Use translated title for filename if available
@@ -873,10 +911,31 @@ class BuilderAgent:
         with open(manifest_path, 'r', encoding='utf-8') as f:
             return json.load(f)
 
+    def _write_dry_run_build(self, work_dir: Path, build_dir: Path) -> Path:
+        """
+        Copy the fully-assembled but unpackaged EPUB tree out of the temp
+        build directory into a durable, inspectable location — mirrors
+        Translator dry-run's WORK/<volume_id>/DRY_RUN/ convention
+        (src/translator/dry_run.py) so both phases' dry-run artifacts live
+        in the same place. Run-stamped per invocation since one build_epub()
+        call only ever produces one build, unlike Translator's per-chapter
+        cache reuse within a run.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(2)
+        debug_dir = work_dir / "DRY_RUN" / stamp / "BUILD"
+        shutil.copytree(build_dir, debug_dir)
+        return debug_dir
+
+    @staticmethod
+    def _dir_size_mb(path: Path) -> float:
+        """Total size in MB of every file under *path*, recursively."""
+        total_bytes = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+        return total_bytes / (1024 * 1024)
+
     @staticmethod
     def _extract_chapter_opening_illustration(md_content: str) -> Optional[str]:
         """Return the first chapter-opening illustration placeholder, if present."""
-        from src.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
+        from src.Deepseek.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
 
         content_started = False
         for raw_line in md_content.splitlines():
@@ -1177,7 +1236,7 @@ class BuilderAgent:
             # Generate separate decorated header xhtml BEFORE chapter xhtml if enabled
             if header_illustration_active and header_illustration_placeholder:
                 # Extract image filename from placeholder: [ILLUSTRATION: pxxx.jpg]
-                from src.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
+                from src.Deepseek.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
                 match = re.search(ILLUSTRATION_PLACEHOLDER_PATTERN, header_illustration_placeholder)
                 if match:
                     header_image_file = match.group(1).strip().strip('"')
@@ -1242,7 +1301,7 @@ class BuilderAgent:
                 }
                 # Add header illustration ID if present (for spine ordering)
                 if header_illustration_active and header_illustration_placeholder:
-                    from src.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
+                    from src.Deepseek.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
                     match = re.search(ILLUSTRATION_PLACEHOLDER_PATTERN, header_illustration_placeholder)
                     if match:
                         chapter_entry['header_id'] = f"chapter-{i+1:03d}-header"
@@ -1342,10 +1401,19 @@ class BuilderAgent:
         """
         Decide whether Builder should re-merge split chapters back to raw structure.
 
-        We only merge when:
-        - Librarian used spine fallback split strategy (text page boundary)
-        - Raw TOC/spine inspection confirms malformed TOC + single-content structure
+        BYPASS: The spine merge exists to re-assemble chapters that were split at
+        raw XHTML boundaries during Librarian extraction. When the translator has
+        already completed all chapters (translator.chapters_completed ==
+        translator.chapters_total), each EN file is already a canonical chapter —
+        there is nothing to merge. Context.xml chapter_titles_en and manifest.json
+        metadata_en are the authoritative chapter sources, not the raw EPUB XHTML.
+        The raw extraction and EPUB rebuild are separate concerns; the builder
+        constructs chapters from metadata, not raw structure.
         """
+        translator_state = manifest.get('pipeline_state', {}).get('translator', {})
+        if translator_state.get('status') == 'completed' and translator_state.get('chapters_completed', 0) == translator_state.get('chapters_total', 0):
+            return False, {"reason": "translator_complete_all_chapters — bypassing spine merge; chapters built from metadata"}
+
         split_chapters = [
             ch for ch in chapters
             if ch.get('split_strategy') == 'text_page_boundary'
@@ -1565,7 +1633,7 @@ class BuilderAgent:
         include_header_illustrations: bool = False,
     ) -> List[str]:
         """Convert markdown content to list of paragraphs."""
-        from src.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
+        from src.Deepseek.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
 
         # Strip MTLS editor annotations before any further processing so they
         # never appear in EPUB output regardless of where they were placed.
@@ -2635,6 +2703,7 @@ def run_builder(
     output_base: Optional[Path] = None,
     skip_qc_check: bool = False,
     include_header_illustrations: bool = False,
+    dry_run: bool = False,
 ) -> BuildResult:
     """
     Main entry point for Builder agent.
@@ -2646,6 +2715,8 @@ def run_builder(
         output_base: Optional custom output directory
         skip_qc_check: Skip critics completion check
         include_header_illustrations: Keep chapter-opening illustration placeholders
+        dry_run: Assemble the EPUB structure but don't package it or touch
+            manifest.json — see BuilderAgent.build_epub's dry_run docstring.
 
     Returns:
         BuildResult with status and details
@@ -2656,6 +2727,7 @@ def run_builder(
         output_filename,
         skip_qc_check,
         include_header_illustrations=include_header_illustrations,
+        dry_run=dry_run,
     )
 
 
@@ -2663,7 +2735,7 @@ def run_builder(
 if __name__ == "__main__":
     import argparse
 
-    from src.common.config import ensure_utf8_console
+    from src.Deepseek.common.config import ensure_utf8_console
 
     # Runs as its own subprocess (see mcp/servers/builder_server.py's
     # run_module) with the same Windows charmap-stdout crash risk as
@@ -2685,6 +2757,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Keep chapter-opening illustration placeholders in chapter XHTML",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Developer flag: assemble the EPUB structure but don't package a .epub "
+             "or touch manifest.json. Assembled OEBPS/ tree is copied to "
+             "WORK/<vol_id>/DRY_RUN/ instead.",
+    )
 
     args = parser.parse_args()
 
@@ -2695,9 +2773,12 @@ if __name__ == "__main__":
         output_base=args.output_dir,
         skip_qc_check=args.skip_qc,
         include_header_illustrations=args.include_header_illustrations,
+        dry_run=args.dry_run,
     )
 
-    if result.success:
+    if result.success and result.dry_run:
+        print(f"\nDry run complete — no .epub packaged: {result.debug_dir}")
+    elif result.success:
         print(f"\nEPUB built successfully: {result.output_path}")
     else:
         print(f"\nBuild failed: {result.error}")

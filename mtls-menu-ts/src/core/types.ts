@@ -1,9 +1,23 @@
 export type PhaseStatusValue = 'pending' | 'running' | 'completed' | 'reviewed' | 'built' | 'failed' | 'unknown';
 
+// Branded identifiers. A VolumeId is not interchangeable with a ChapterRef
+// or a PhaseName, even though all three are strings at runtime — the brand
+// makes a transposed argument a compile error, not a silent "volume not
+// found" at render time. Construction goes through the `as*` casts at the
+// IO boundary (filesystem reads, form input); everywhere else, the brand
+// is carried, never re-asserted.
+declare const volumeIdBrand: unique symbol;
+export type VolumeId = string & { readonly [volumeIdBrand]: 'VolumeId' };
+declare const chapterRefBrand: unique symbol;
+export type ChapterRef = string & { readonly [chapterRefBrand]: 'ChapterRef' };
+
+export const asVolumeId = (value: string): VolumeId => value as VolumeId;
+export const asChapterRef = (value: string): ChapterRef => value as ChapterRef;
+
 export type PhaseStatus = { key: string; label: string; status: PhaseStatusValue };
 
 export type VolumeSummary = {
-  id: string;
+  id: VolumeId;
   title: string;
   author: string;
   series: string;
@@ -12,10 +26,13 @@ export type VolumeSummary = {
   chapterCount: number;
   translatedCount: number;
   phases: PhaseStatus[];
+  // Present only when manifest.json failed boundary validation — the entry
+  // is degraded (zeros everywhere) and this carries the parse failure.
+  manifestError?: string;
 };
 
 export type ChapterLog = {
-  chapterId: string;
+  chapterId: ChapterRef;
   inputTokens: number;
   outputTokens: number;
   success: boolean;
@@ -25,7 +42,7 @@ export type ChapterLog = {
 };
 
 export type VolumeDetail = {
-  id: string;
+  id: VolumeId;
   loaded: boolean;
   jpChapters: number;
   enChapters: number;

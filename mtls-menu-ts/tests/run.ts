@@ -5,14 +5,16 @@ import path from 'node:path';
 import { CLI_CAPABILITIES, MCP_TOOL_OVERLAY, effectiveRisk, hydrateMcpCapabilities, serializeCli, serializeMcp, validateCapability } from '../src/core/capabilities.js';
 import { appendConsole, browseConsole, createConsole, jumpConsole, setConsoleMode, visibleConsoleEntries } from '../src/core/console.js';
 import { loadConfigFields } from '../src/core/configFile.js';
-import { CONFIG_FIELDS, formatConfigValue, validateConfigInput } from '../src/core/configSchema.js';
+import { CONFIG_FIELDS, activeProvider, buildConfigRenderLines, filterFieldsForProvider, formatConfigValue, validateConfigInput } from '../src/core/configSchema.js';
 import { loadRuntimeConfigLines, loadVolumeDetailFrom, loadVolumesFrom } from '../src/core/mtls.js';
+import { asVolumeId } from '../src/core/types.js';
 import { layoutForColumns } from '../src/ui/layout.js';
 
 function capability(id: string) { const found = [...CLI_CAPABILITIES, ...MCP_TOOL_OVERLAY].find((item) => item.id === id); assert.ok(found, `missing capability ${id}`); return found; }
 
 const extract = capability('extract');
-assert.deepEqual(serializeCli(extract, { epub_path: 'raw/book.epub', volume_id_override: 'VOL-01' }), ['extract', 'raw/book.epub', '--volume-id', 'VOL-01']);
+assert.deepEqual(serializeCli(extract, { epub_path: 'raw/book.epub', volume_id_override: 'VOL-01' }), ['extract', 'raw/book.epub', '--volume-id', 'VOL-01', '--force-rerun']);
+assert.deepEqual(serializeCli(capability('run'), { epub_path: 'raw/book.epub' }), ['run', 'raw/book.epub', '--force-rerun']);
 assert.deepEqual(serializeCli(capability('prep'), { volume_id: 'VOL-01', series_id: 'series-a' }), ['prep', 'VOL-01', '--series-id', 'series-a']);
 assert.deepEqual(serializeCli(capability('translate'), { volume_id: 'VOL-01', chapters: 'CHAPTER_01, CHAPTER_02' }), ['translate', 'VOL-01', '--chapters', 'CHAPTER_01', 'CHAPTER_02']);
 assert.deepEqual(serializeCli(capability('build'), { volume_id: 'VOL-01', output: 'clean.epub' }), ['build', 'VOL-01', '--output', 'clean.epub']);
@@ -31,13 +33,26 @@ assert.match(validateCapability(capability('split_content'), { spine_items: '', 
 assert.equal(validateCapability(capability('generate_opf'), { manifest: '{"chapters":[]}', volume_id: '' }, path.resolve('project')).length, 0);
 assert.ok(validateCapability(capability('parse_toc'), { nav_path: '..\\outside.xhtml' }, path.resolve('project')).length > 0);
 
-const fixture = mkdtempSync(path.join(os.tmpdir(), 'deepseek-mtls-console-'));
+const fixture = mkdtempSync(path.join(os.tmpdir(), 'llm-translator-console-'));
 try {
   const volume = path.join(fixture, 'VOL-01'); mkdirSync(path.join(volume, 'JP'), { recursive: true }); mkdirSync(path.join(volume, 'EN')); mkdirSync(path.join(volume, 'QC'));
   writeFileSync(path.join(volume, 'manifest.json'), JSON.stringify({ metadata: { title: 'JP Title', author: 'Author' }, metadata_en: { title_en: 'English Title', author_en: 'Writer' }, pipeline_state: { librarian: { status: 'completed' }, prep: { status: 'completed' }, translator: { status: 'running' } }, chapters: [{ translation_status: 'completed' }, { translation_status: 'pending' }] }));
   writeFileSync(path.join(volume, 'JP', 'CHAPTER_01.md'), 'jp'); writeFileSync(path.join(volume, 'EN', 'CHAPTER_01_EN.md'), 'one two'); writeFileSync(path.join(volume, 'QC', 'report.json'), '{}'); writeFileSync(path.join(volume, 'translation_log.json'), JSON.stringify({ chapters: [{ chapter_id: 'CHAPTER_01', input_tokens: 10, output_tokens: 20, success: true, quality: { passed: true, ai_ism_count: 0 } }] }));
   const volumes = loadVolumesFrom(fixture); assert.equal(volumes.length, 1); assert.equal(volumes[0]?.title, 'English Title'); assert.equal(volumes[0]?.translatedCount, 1);
-  const detail = loadVolumeDetailFrom(fixture, 'VOL-01'); assert.equal(detail.jpChapters, 1); assert.equal(detail.enWords, 2); assert.equal(detail.qcReports, 1); assert.equal(detail.totalOutputTokens, 20);
+  const detail = loadVolumeDetailFrom(fixture, asVolumeId('VOL-01')); assert.equal(detail.jpChapters, 1); assert.equal(detail.enWords, 2); assert.equal(detail.qcReports, 1); assert.equal(detail.totalOutputTokens, 20);
+  // Boundary behavior: a corrupt manifest must surface as a degraded entry
+  // with manifestError set — never vanish silently into an empty list.
+  const corrupt = path.join(fixture, 'VOL-CORRUPT'); mkdirSync(corrupt);
+  writeFileSync(path.join(corrupt, 'manifest.json'), '{"metadata": "this should be an object"}');
+  const withCorrupt = loadVolumesFrom(fixture);
+  const degraded = withCorrupt.find((volume) => volume.id === 'VOL-CORRUPT');
+  assert.ok(degraded, 'corrupt manifest must still produce a volume entry');
+  assert.ok(degraded.manifestError?.includes('schema violation'), 'degraded entry must carry the parse failure');
+  assert.equal(degraded.chapterCount, 0);
+  // And invalid JSON entirely — not just schema-violating JSON.
+  writeFileSync(path.join(corrupt, 'manifest.json'), '{not json at all');
+  const stillThere = loadVolumesFrom(fixture).find((volume) => volume.id === 'VOL-CORRUPT');
+  assert.ok(stillThere?.manifestError?.includes('not valid JSON'));
 } finally { rmSync(fixture, { recursive: true, force: true }); }
 
 assert.equal(layoutForColumns(120), 'three-pane'); assert.equal(layoutForColumns(90), 'two-pane'); assert.equal(layoutForColumns(89), 'single-pane');
@@ -61,13 +76,39 @@ assert.equal(configFields.length, CONFIG_FIELDS.length);
 const unresolved = configFields.filter((field) => field.lineIndex === null);
 assert.equal(unresolved.length, 0, `unresolved config paths: ${unresolved.map((field) => field.path).join(', ')}`);
 assert.equal(new Set(CONFIG_FIELDS.map((field) => field.path)).size, CONFIG_FIELDS.length, 'duplicate config field path in schema');
-const drdiField = configFields.find((field) => field.path === 'translation.translator.optimizations.drdi.enabled')!;
+const drdiField = configFields.find((field) => field.path === 'translation.deepseek.optimizations.drdi.enabled')!;
 assert.ok(drdiField);
 assert.equal(formatConfigValue(drdiField, 'true'), 'Enabled');
 assert.equal(formatConfigValue(drdiField, 'false'), 'Disabled');
 assert.equal(validateConfigInput({ ...drdiField, kind: 'integer' }, '12').ok, true);
 assert.equal(validateConfigInput({ ...drdiField, kind: 'integer' }, 'nope').ok, false);
 assert.equal(validateConfigInput({ ...drdiField, kind: 'float', min: 0, max: 1 }, '1.5').ok, false);
+
+// Provider-gated configuration menus: every area is its own submenu, and only
+// the selected provider's settings are shown.
+const providerField = configFields.find((field) => field.path === 'translation.provider')!;
+assert.ok(providerField, 'translation.provider must be an editable field');
+assert.equal(activeProvider(configFields), (providerField.rawValue ?? '').trim().toLowerCase());
+const deepseekView = filterFieldsForProvider(CONFIG_FIELDS, 'deepseek');
+assert.ok(deepseekView.some((field) => field.path.startsWith('translation.deepseek.')));
+assert.ok(!deepseekView.some((field) => field.path.startsWith('translation.qwen.')));
+const qwenView = filterFieldsForProvider(CONFIG_FIELDS, 'qwen');
+assert.ok(qwenView.some((field) => field.path.startsWith('translation.qwen.')));
+assert.ok(!qwenView.some((field) => field.path.startsWith('translation.deepseek.')));
+const unsetView = filterFieldsForProvider(CONFIG_FIELDS, '');
+assert.ok(!unsetView.some((field) => field.path.startsWith('translation.deepseek.') || field.path.startsWith('translation.qwen.')));
+assert.ok(unsetView.some((field) => field.path === 'translation.provider'));
+const menus = [...new Set(CONFIG_FIELDS.map((field) => field.menu))];
+assert.ok(['Project', 'Paths', 'Prep', 'Translation', 'Builder', 'Logging', 'MCP', 'Bible'].every((menu) => menus.includes(menu)));
+const render = buildConfigRenderLines(deepseekView);
+assert.ok(render.some((line) => line.kind === 'menu' && line.label === 'Translation'));
+assert.ok(!render.some((line) => line.kind === 'section' && line.label.startsWith('Qwen')));
+// A section that merely repeats its menu name (Project, Logging) is suppressed
+// so the menu header isn't duplicated in the UI.
+const deduplicated = buildConfigRenderLines(CONFIG_FIELDS);
+assert.ok(!deduplicated.some((line) => line.kind === 'section' && (line.label === 'Project' || line.label === 'Logging')));
+assert.ok(deduplicated.some((line) => line.kind === 'menu' && line.label === 'Project'));
+assert.ok(deduplicated.some((line) => line.kind === 'menu' && line.label === 'Logging'));
 let consoleState = createConsole(); for (let index = 0; index < 5_010; index += 1) consoleState = appendConsole(consoleState, `line ${index}`, 'cli');
 assert.equal(consoleState.entries.length, 5_000); assert.equal(consoleState.entries[0]?.text, 'line 10');
 consoleState = browseConsole(consoleState, 20, 20); assert.equal(consoleState.mode, 'browse'); assert.ok(consoleState.offset > 0); consoleState = setConsoleMode(consoleState, 'input'); assert.equal(consoleState.mode, 'input'); consoleState = jumpConsole(consoleState, 'end', 20); assert.equal(consoleState.mode, 'follow'); assert.equal(consoleState.offset, 0); assert.equal(visibleConsoleEntries(consoleState, 3).length, 3);

@@ -1,8 +1,11 @@
 {
-  // Solution file. `tsc -b` builds the referenced projects in dependency order
-  // (with TS7 --builders parallelism). It compiles nothing itself (files: []).
-  // The compilerOptions below are only so `tsx`, which discovers this config
-  // from the package root, still uses the automatic JSX runtime at runtime.
+  // Solution file. `tsc -b` builds the referenced projects in dependency order.
+  // It compiles nothing itself (files: []). The reference graph below is a
+  // linear chain (core -> ui -> app, no fan-out), so there's nothing for
+  // TS7's `--builders` concurrency flag to parallelize here even if passed;
+  // `typecheck` doesn't pass it. The compilerOptions below are only so `tsx`,
+  // which discovers this config from the package root, still uses the
+  // automatic JSX runtime at runtime.
   "files": [],
   "references": [
     { "path": "./src/core" },

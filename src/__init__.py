@@ -1,3 +1,3 @@
-"""DeepSeek_MTLS — Common infrastructure package."""
+"""LLM Translator — Common infrastructure package."""
 
-# Marker file so `from src.common import ...` works.
+# Marker file so `from src.Deepseek.common import ...` works.

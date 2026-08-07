@@ -9,8 +9,8 @@ let clientPromise: Promise<Client> | null = null;
 async function getClient(): Promise<Client> {
   if (!clientPromise) {
     clientPromise = (async () => {
-      const transport = new StdioClientTransport({ command: pythonCommand(), args: ['-m', 'src.mcp.server'], cwd: pipelineRoot, env: process.env as Record<string, string> });
-      const client = new Client({ name: 'deepseek-mtls-operator-console', version: '2.0.0' }, { capabilities: {} });
+      const transport = new StdioClientTransport({ command: pythonCommand(), args: ['-m', 'src.Deepseek.mcp.server'], cwd: pipelineRoot, env: process.env as Record<string, string> });
+      const client = new Client({ name: 'llm-translator-operator-console', version: '2.0.0' }, { capabilities: {} });
       await client.connect(transport);
       return client;
     })();

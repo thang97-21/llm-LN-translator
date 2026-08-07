@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================
-# DeepSeek_MTLS - macOS/Linux TypeScript TUI Launcher
+# LLM Translator - macOS/Linux TypeScript TUI Launcher
 # ============================================
 set -euo pipefail
 

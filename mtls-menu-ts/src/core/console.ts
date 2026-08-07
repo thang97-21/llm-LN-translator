@@ -1,6 +1,6 @@
 import type { ConsoleEntry, ConsoleMode, ConsoleSeverity, ConsoleSource, ConsoleState } from './types.js';
 
-export const CONSOLE_LIMIT = 5_000;
+const CONSOLE_LIMIT = 5_000;
 
 export function createConsole(): ConsoleState { return { entries: [], mode: 'follow', offset: 0, unseen: 0 }; }
 

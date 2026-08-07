@@ -1,7 +1,19 @@
-# LN Translation Client - DeepSeek-Powered
+# LLM Translator - DeepSeek/Qwen-Powered
 
-**Single-provider pipeline** for Japanese → English light novel translation.
+**Selectable-provider pipeline** for Japanese → English light novel translation.
 Extract, prep, translate, QC, build — and remember the series for next time.
+
+Phase 2 translation can route between isolated DeepSeek and Qwen implementations
+through `translation.provider` in `config.yaml`. DeepSeek remains the default;
+set it to `qwen` to use the Anthropic-format Qwen client, Qwen prompts,
+conversation ledger, and optimization policy. Set `DASHSCOPE_API_KEY` for live
+Qwen calls. Use `dry_run` to inspect a Qwen payload without credentials or
+network access.
+
+Qwen official-spec support includes: Anthropic Messages endpoint, thinking
+budgets, explicit `cache_control` markers, streaming, retry/backoff, moderation
+error classification, conversation compaction, thinking-aware partial
+continuation, and Qwen pricing entries in token telemetry.
 
 ---
 
@@ -26,7 +38,7 @@ Extract, prep, translate, QC, build — and remember the series for next time.
     - [Local Tokenizer](#local-tokenizer)
   - [Why DeepSeek V4 Model?](#why-deepseek-v4-model)
     - [Specifications](#specifications)
-    - [How this maps onto DeepSeek MTLS](#how-this-maps-onto-deepseek-mtls)
+    - [How this maps onto LLM Translator](#how-this-maps-onto-llm-translator)
     - [Real cost telemetry](#real-cost-telemetry)
   - [Configuration](#configuration)
     - [Key Parameters](#key-parameters)
@@ -84,8 +96,8 @@ per-project, per-run cost ledger — see [Telemetry & Developer Tools](#telemetr
 ## Quick Start
 
 ```bash
-# 1. Clone or copy into DeepSeek MTLS/
-cd DeepSeek MTLS
+# 1. Clone or copy into LLM Translator/
+cd LLM Translator
 
 # 2. Create a Python venv
 python -m venv venv
@@ -354,17 +366,17 @@ Architecturally, V4 pairs **DeepSeek Sparse Attention** (compressed sparse atten
 
 Sources: [DeepSeek V4 GA — Surge Pricing & Migration](https://deepseek.ai/blog/deepseek-v4-ga-surge-pricing-migration), [DeepSeek V4 — 1T Params, Benchmarks & Pricing](https://deepseek.ai/deepseek-v4), [DeepSeek API Pricing](https://deepseek.ai/pricing), [DeepSeek V4 Pro — OpenRouter](https://openrouter.ai/deepseek/deepseek-v4-pro)
 
-### How this maps onto DeepSeek MTLS
+### How this maps onto LLM Translator
 
 | V4 characteristic | Where it lands in this codebase |
 |---|---|
-| Automatic server-side prefix caching | `translation.translator.caching` in `config.yaml`; `deepseek_client.py`'s `cache_monitor` warns below a 70% hit ratio — see the real number below |
+| Automatic server-side prefix caching | `translation.deepseek.caching` in `config.yaml`; `deepseek_client.py`'s `cache_monitor` warns below a 70% hit ratio — see the real number below |
 | DRDI/DOVB placed in the *user* turn, not the system prompt | `deepseek_optimization.py` — keeps the system prompt + context.xml prefix byte-stable across chapters so the cache actually hits; moving them into the system instruction would invalidate the prefix every single chapter |
 | 1M context window | `deepseek_conversation.py`'s compaction ladder (`checkpoint_trigger_ratio: 0.85`) exists because the window is large but not infinite — it fires *before* a volume's accumulated conversation would blow past it, not preemptively on every chapter |
-| 384K max output ceiling | `translation.translator.generation.max_output_tokens` in `config.yaml` |
+| 384K max output ceiling | `translation.deepseek.generation.max_output_tokens` in `config.yaml` |
 | Thinking/reasoning mode, effort routing | `thinking.budget_tokens` / `thinking.effort` in `config.yaml`; DeepSeek has no native effort parameter at the API level, which is *why* DRDI exists at all — it's prose-injected reasoning scaffolding standing in for a routing knob the model doesn't expose |
 | No dedicated Anthropic-Messages endpoint in most public docs (DeepSeek's own docs describe an OpenAI-compatible path) | `deepseek_client.py` targets `https://api.deepseek.com/anthropic` anyway — DeepSeek also exposes an Anthropic Messages-format endpoint, which is what lets this client reuse the `anthropic` Python SDK instead of carrying a second HTTP client for one provider |
-| Pro tier vs Flash tier pricing gap | `translation.translator.model` defaults to Pro but Flash is a one-line config change for throughput-over-craft runs; prep's unified path is Pro-only for full-document structured output, but the opt-in parallel path (`prep.parallel.enabled`) routes 12 of its 14 calls to Flash — see [Prep — Two Paths](#prep--two-paths) |
+| Pro tier vs Flash tier pricing gap | `translation.deepseek.model` defaults to Pro but Flash is a one-line config change for throughput-over-craft runs; prep's unified path is Pro-only for full-document structured output, but the opt-in parallel path (`prep.parallel.enabled`) routes 12 of its 14 calls to Flash — see [Prep — Two Paths](#prep--two-paths) |
 | Multi-turn conversation + prefix caching, used together | `deepseek_conversation.py` isn't just a cost lever — it's the **consistency mechanism**. Every chapter's turn carries the still-cached context.xml prefix plus the last few chapters' JP+EN pairs verbatim, so character voice, locked names, and terminology from context.xml get *extended* turn-to-turn instead of re-derived from scratch each time. Caching is what makes carrying that growing history affordable; the history is what makes 1M-token context actually buy something instead of just being a bigger number |
 
 ### Real cost telemetry
@@ -463,7 +475,7 @@ See `config.yaml` for the full documented parameter set.
 | `prep.model` | `deepseek-v4-pro` | The unified path is always Pro — structured 15-block output in one shot needs the instruction-following |
 | `prep.parallel.enabled` | `false` | Opt into the cache-warmed parallel prep path instead of the unified call |
 | `prep.parallel.flash_max_output_tokens` | `32000` | Per-block output ceiling for Flash calls — see the real-incident note under Prep — Two Paths for why this isn't lower |
-| `translation.translator.model` | `deepseek-v4-pro` | Pro ($0.435/$0.87 per MTok) vs Flash ($0.14/$0.28) |
+| `translation.deepseek.model` | `deepseek-v4-pro` | Pro ($0.435/$0.87 per MTok) vs Flash ($0.14/$0.28) |
 | `thinking.budget_tokens` (both) | `48000` | CoT (Chain of Thought) token budget per turn |
 | `translation.thinking_log.density_map.enabled` | `true` | Rebuild the THINKING density map after every chapter |
 | `conversation.recent_verbatim_chapters` | `3` | How many prior chapters are included verbatim |
@@ -477,7 +489,7 @@ See `config.yaml` for the full documented parameter set.
 ## File Structure
 
 ```
-DeepSeek MTLS/
+LLM Translator/
 ├── config.yaml                 ← Master config: prep + translator + phase_routing knobs
 ├── .env                        ← DEEPSEEK_API_KEY (single secret, shared by prep and translate)
 ├── requirements.txt            ← Python deps (anthropic, pyyaml, lxml, bs4, Pillow, tiktoken, mcp)
@@ -582,7 +594,7 @@ The MCP server exposes 6 tool groups (20 tools) and 2 resources for IDE-agent in
 |--------|-------|-------|
 | Librarian | `extract_epub`, `parse_opf_metadata`, `parse_toc`, `convert_xhtml_to_markdown`, `detect_publisher`, `catalog_images`, `split_content`, `run_librarian` | 1 |
 | **Prep** | `prep_volume(volume_id, series_id=None)` — direct binding to `src.prep.agent.run_prep`, one DeepSeek call, no subprocess, no Gemini | 1.P |
-| **Translator** | `translate_chapter`, `run_translator` — direct Python bindings to `src.translator.agent.DeepSeekTranslator`. No subprocess, no CLI, no skill delegation. Both take `dry_run` — see [Dry Run](#dry-run). | 2 |
+| **Translator** | `translate_chapter`, `run_translator` — direct Python bindings to `src.Deepseek.translator.agent.DeepSeekTranslator`. No subprocess, no CLI, no skill delegation. Both take `dry_run` — see [Dry Run](#dry-run). | 2 |
 | **QC** | `qc_volume(volume_id)` — completeness, truncation, token sanity, name-drift, structural checks (filesystem-only, &lt;5s) | Gate |
 | **Bible** | `write_bible(volume_id, series_id=None)` — merges context.xml into `bibles/<series_id>/*.json` | Continuity |
 | Builder | `markdown_to_xhtml`, `generate_opf`, `generate_nav`, `merge_translated_shards`, `optimize_image`, `package_epub`, `run_builder` | 4 |
@@ -600,7 +612,7 @@ The MCP server exposes 6 tool groups (20 tools) and 2 resources for IDE-agent in
 
 The corresponding `.github/skills/` files are thin wrappers — they document the tool interface and workflow order; the actual execution happens server-side in the MCP tool.
 
-Start the server: `python -m src.mcp.server`
+Start the server: `python -m src.Deepseek.mcp.server`
 
 ---
 

@@ -1,9 +1,9 @@
 {
   "mcpServers": {
-    "deepseek-mtls": {
+    "llm-translator": {
       "type": "stdio",
       "command": "python",
-      "args": ["-m", "src.mcp.server"],
+      "args": ["-m", "src.Deepseek.mcp.server"],
       "env": {
         "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY}"
       }

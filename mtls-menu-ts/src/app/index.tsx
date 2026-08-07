@@ -1,3 +1,4 @@
+import './watchAudit.js';
 import { render } from 'ink';
 import { App } from '../ui/App.js';
 import { closeMcpClient } from '../core/mcpClient.js';

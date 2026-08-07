@@ -1,6 +1,6 @@
 @echo off
 REM ============================================
-REM DeepSeek_MTLS - Windows CLI Launcher
+REM LLM Translator - Windows CLI Launcher
 REM ============================================
 REM Usage:
 REM   mtl extract <epub>

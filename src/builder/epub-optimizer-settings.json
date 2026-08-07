@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "settings": {
+    "device": "x4",
+    "customWidth": 480,
+    "convertToBaseline": true,
+    "resizeImages": true,
+    "jpegQuality": 75,
+    "stripFonts": true,
+    "grayscaleCover": false,
+    "grayscaleSettings": {
+      "enabled": false,
+      "blackPoint": 0,
+      "whitePoint": 255,
+      "midtone": 128
+    },
+    "textRemovals": [],
+    "outputFormat": "epub",
+    "readingDirection": "ltr",
+    "repairs": {
+      "unwrapSvgImages": true,
+      "generateNcx": false
+    }
+  },
+  "textPatterns": []
+}

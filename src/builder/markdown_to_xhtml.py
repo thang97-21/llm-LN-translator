@@ -18,7 +18,7 @@ except ImportError:
     SMARTYPANTS_AVAILABLE = False
     Attr = None
 
-from src.common.config import SCENE_BREAK_MARKER, ILLUSTRATION_PLACEHOLDER_PATTERN, MARKDOWN_IMAGE_PATTERN
+from src.Deepseek.common.config import SCENE_BREAK_MARKER, ILLUSTRATION_PLACEHOLDER_PATTERN, MARKDOWN_IMAGE_PATTERN
 from .config import COLLAPSE_BLANK_LINES, BLANK_LINE_FREQUENCY, get_epub_version
 
 # Industry-standard image path (OEBPS format)

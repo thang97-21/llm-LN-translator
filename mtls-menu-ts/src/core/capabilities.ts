@@ -11,14 +11,20 @@ const seriesId: FieldSpec = { key: 'series_id', label: 'Series ID', kind: 'text'
 // defaulting the whole capability to a lower risk tier would misrepresent
 // every non-dry-run launch of the same form.
 const dryRun: FieldSpec = { key: 'dry_run', label: 'Dry Run (assemble payload, send nothing)', kind: 'boolean', cliFlag: '--dry-run', defaultValue: false };
+const buildDryRun: FieldSpec = { key: 'dry_run', label: 'Dry Run (assemble structure, package nothing)', kind: 'boolean', cliFlag: '--dry-run', defaultValue: false };
+// This launcher cannot answer the Librarian's re-extraction prompt — the child
+// process has no usable keyboard — so extract/run always pass --force-rerun: a
+// re-extraction proceeds automatically into a NEW derived volume directory and
+// the old workspace (translations included) is preserved, never overwritten.
+// serializeCli appends the flag after the operator's own fields.
 
 export const CLI_CAPABILITIES: readonly CapabilitySpec[] = [
-  { id: 'extract', label: 'Extract EPUB', detail: 'Extract an EPUB and create its working volume.', group: 'Workflows', route: { transport: 'cli', command: 'extract' }, fields: [epub, volumeId], risk: 'write' },
+  { id: 'extract', label: 'Extract EPUB', detail: 'Extract an EPUB and create its working volume. Re-running creates a NEW volume ID; the existing workspace is never overwritten.', group: 'Workflows', route: { transport: 'cli', command: 'extract' }, fields: [epub, volumeId], risk: 'write' },
   { id: 'prep', label: 'Prep Volume', detail: 'Build context.xml through a paid DeepSeek preparation call.', group: 'Workflows', route: { transport: 'cli', command: 'prep' }, fields: [volume, seriesId], risk: 'paid' },
   { id: 'translate', label: 'Translate Volume', detail: 'Translate selected chapters, or every pending chapter when none are chosen.', group: 'Workflows', route: { transport: 'cli', command: 'translate' }, fields: [volume, { key: 'chapters', label: 'Chapters', kind: 'chapter-list', cliFlag: '--chapters' }, dryRun], risk: 'paid' },
   { id: 'qc', label: 'QC Volume', detail: 'Run the read-only filesystem quality gate.', group: 'Workflows', route: { transport: 'cli', command: 'qc' }, fields: [volume], risk: 'read' },
-  { id: 'build', label: 'Build EPUB', detail: 'Package translated chapters into an EPUB.', group: 'Workflows', route: { transport: 'cli', command: 'build' }, fields: [volume, { key: 'output', label: 'Output filename', kind: 'text', cliFlag: '--output' }], risk: 'write' },
-  { id: 'run', label: 'Full Pipeline', detail: 'Extract, prep, translate, QC, and build as one canonical CLI workflow.', group: 'Workflows', route: { transport: 'cli', command: 'run' }, fields: [epub, volumeId, seriesId], risk: 'paid' },
+  { id: 'build', label: 'Build EPUB', detail: 'Package translated chapters into an EPUB.', group: 'Workflows', route: { transport: 'cli', command: 'build' }, fields: [volume, { key: 'output', label: 'Output filename', kind: 'text', cliFlag: '--output' }, buildDryRun], risk: 'write' },
+  { id: 'run', label: 'Full Pipeline', detail: 'Extract, prep, translate, QC, and build as one canonical CLI workflow. Re-running creates a NEW volume ID; the existing workspace is never overwritten.', group: 'Workflows', route: { transport: 'cli', command: 'run' }, fields: [epub, volumeId, seriesId], risk: 'paid' },
 ];
 
 type ToolOverlay = Omit<CapabilitySpec, 'route' | 'available' | 'unavailableReason'> & { route: McpRoute };
@@ -49,8 +55,8 @@ export const MCP_TOOL_OVERLAY: readonly ToolOverlay[] = [
   { id: 'generate_nav', label: 'Generate NAV preview', detail: 'Preview navigation from a manifest or volume.', group: 'Builder', route: { transport: 'mcp', tool: 'generate_nav' }, fields: [{ key: 'manifest', label: 'Manifest JSON', kind: 'json-object' }, { ...volume, required: false }], risk: 'read' },
   { id: 'merge_translated_shards', label: 'Merge translated shards', detail: 'Merge translated shard files into the spine.', group: 'Builder', route: { transport: 'mcp', tool: 'merge_translated_shards' }, fields: [volume, { key: 'target_language', label: 'Target language', kind: 'enum', choices: ['en'], defaultValue: 'en' }, bool('apply_manifest', 'Apply manifest changes')], risk: 'write' },
   { id: 'optimize_image', label: 'Optimize image', detail: 'Overwrite an image with an optimized version.', group: 'Builder', route: { transport: 'mcp', tool: 'optimize_image' }, fields: [projectPath('image_path', 'Image path'), integer('max_width', 'Maximum width', '1600')], risk: 'overwrite' },
-  { id: 'package_epub', label: 'Package EPUB', detail: 'Build the EPUB through the MCP builder.', group: 'Builder', route: { transport: 'mcp', tool: 'package_epub' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations')], risk: 'write' },
-  { id: 'run_builder', label: 'Run builder', detail: 'Build the EPUB through the canonical builder route.', group: 'Builder', route: { transport: 'mcp', tool: 'run_builder' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations')], risk: 'write' },
+  { id: 'package_epub', label: 'Package EPUB', detail: 'Build the EPUB through the MCP builder.', group: 'Builder', route: { transport: 'mcp', tool: 'package_epub' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations'), bool('dry_run', 'Dry Run (assemble structure, package nothing)')], risk: 'write' },
+  { id: 'run_builder', label: 'Run builder', detail: 'Build the EPUB through the canonical builder route.', group: 'Builder', route: { transport: 'mcp', tool: 'run_builder' }, fields: [volume, text('output_filename', 'Output filename'), bool('skip_qc', 'Skip QC'), bool('include_header_illustrations', 'Include header illustrations'), bool('dry_run', 'Dry Run (assemble structure, package nothing)')], risk: 'write' },
 ];
 
 export type McpListedTool = { name: string; description?: string; inputSchema?: unknown };
@@ -131,6 +137,9 @@ export function serializeCli(spec: CapabilitySpec, values: FormValues): string[]
       else argv.push(String(value));
     }
   }
+  // extract/run always carry --force-rerun from this launcher (see the comment
+  // at CLI_CAPABILITIES) — appended last so the operator's own fields win.
+  if (spec.route.command === 'extract' || spec.route.command === 'run') argv.push('--force-rerun');
   return argv;
 }
 

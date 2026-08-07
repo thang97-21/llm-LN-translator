@@ -3,12 +3,13 @@
 *.env.local
 *.env.*.local
 
-# ── Development Papers ─────────────────────────────────────────────────────
+# ── Development Files ─────────────────────────────────────────────────────
 ## dev/
 DEV/
 _design/
 _docs/
 *.tmp.md
+test/
 
 # ── Claude Local Settings ───────────────────────────────────────────────────
 .claude/
