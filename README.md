@@ -388,6 +388,8 @@ All local token counting (`src/common/token_telemetry.py`) runs on a bundled `ti
 
 ### Specifications
 
+**IMPORTANT UPDATE**: DeepSeek has confirmed they will raise the API pricing significantly, at an unknown date. This repo reflects only the current pricing, when price increases we will update accordingly
+
 DeepSeek V4 reached **general availability in July 2026**, closing out a preview period that began April 24, 2026. GA brought a hard cutover: as of July 24, 2026, the legacy aliases (`deepseek-chat`, `deepseek-reasoner`) stopped resolving entirely — every call has to name a real GA model ID. This client only ever used the GA IDs (`deepseek-v4-pro`, `deepseek-v4-flash`) throughout, so that cutover was a non-event here. Two tiers, both text-only:
 
 | | V4 Pro | V4 Flash |
