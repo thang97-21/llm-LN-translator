@@ -457,9 +457,9 @@ Two reasons it exists: a different provider is a genuine hedge when the other re
 
 ### Frontier-class specifications
 
-QwenCloud's own migration table places its flagship in the top capability tier, and — worth noting for how the two providers here relate — puts `deepseek-v4-pro` in the tier below it:
+QwenCloud publishes a migration table grouping models into capability tiers. The tier names and the QwenCloud recommendations below are theirs; the closed-source column is our own mapping, refreshed to the current generation. **The claim is equivalence, not superiority** — a tier is a rough capability band for picking a starting point, not a ranking, and nothing here asserts any of these models beats any other. Worth noting for how the two providers in this repo relate: `deepseek-v4-pro` sits one band below Qwen's flagship.
 
-| Tier | Closed-source equivalents cited | QwenCloud recommendation |
+| Tier | Equivalent closed-source models | QwenCloud recommendation |
 |---|---|---|
 | Highest capability | GPT-5.6 Sol, Claude Opus 5 | `qwen3.8-max` |
 | Balanced | GPT-5.6 Terra, Claude Sonnet 5 | `qwen3.7-plus`, `deepseek-v4-pro` |
