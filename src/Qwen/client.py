@@ -159,8 +159,27 @@ class QwenClient:
                 budget,
             )
 
+        # dry_run guarantees more than "no network call": the preview must not
+        # depend on conversation state either, so caller-assembled history is
+        # DROPPED here rather than trusted. The guard lives in the client, not
+        # in the agent, mirroring DeepSeekClient.generate() — a guard in the
+        # caller is a guard the next caller forgets, which is exactly how this
+        # leaked: agent.py assembled the window before the client ever saw the
+        # dry_run flag, so every chapter's preview carried the same frozen
+        # recent-verbatim pair left behind by the last real run. That is
+        # accurate for at most one chapter in the volume and fiction for the
+        # rest.
+        # Partial Mode is exempt: there, `messages` is not accumulated ledger
+        # history but the continuation prefix OF THIS TURN — the assistant
+        # fragment being continued from. Dropping it would discard the very
+        # thing the preview is meant to show.
+        turn_messages = (
+            [{"role": "user", "content": prompt}]
+            if dry_run and not partial
+            else (messages or [{"role": "user", "content": prompt}])
+        )
         request_messages = self._prepare_messages(
-            messages or [{"role": "user", "content": prompt}],
+            turn_messages,
             explicit_cache=bool(caching_cfg.get("enabled", True) and caching_cfg.get("explicit", True)),
             partial=partial,
         )

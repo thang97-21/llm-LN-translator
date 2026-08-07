@@ -1,13 +1,20 @@
 """
-Dry-run prompt inspection.
+Dry-run prompt inspection. Shared by BOTH provider routes.
 
-DeepSeekClient.generate(dry_run=True) (deepseek_client.py) assembles the
-exact request payload (model, system, messages, thinking, output_config,
-max_tokens) and returns it in LLMResponse.provider_metadata["payload"]
-instead of sending it — see that method's docstring for why conversation-
-manager processing is skipped in that mode too, not just the network call
-(prepare_turn() can itself trigger a real, billed checkpoint-summarization
-call). This module turns that payload into a readable .md file.
+DeepSeekClient.generate(dry_run=True) and QwenClient.generate(dry_run=True)
+each assemble the exact request payload (model, system, messages, thinking,
+output_config, max_tokens) and return it in
+LLMResponse.provider_metadata["payload"] instead of sending it. Both skip
+conversation history in that mode, and both do it INSIDE the client — see
+their docstrings for the two different reasons (DeepSeek: prepare_turn() can
+trigger a real, billed checkpoint-summarization call; Qwen: the ledger never
+advances during a dry run, so any window read from disk is frozen at the last
+real run and misrepresents every chapter but one). This module turns that
+payload into a readable .md file.
+
+Nothing here may assume DeepSeek's payload shape. `system` in particular is a
+plain string on the DeepSeek route and a list of cache_control-bearing content
+blocks on the Qwen one; both go through _content_to_text.
 
 Per-project, like every other telemetry artifact this pipeline writes now
 (LOG/, THINKING/) — WORK/<volume_id>/DRY_RUN/<run-stamp>/<chapter_id>.md.
@@ -75,14 +82,24 @@ def _render_message(msg: Dict[str, Any]) -> str:
 
 def write_dry_run_prompt(
     *, work_dir: Path, volume_id: str, chapter_id: str, payload: Dict[str, Any],
+    provider: str = "deepseek",
 ) -> Path:
-    """Render `payload` (DeepSeekClient.generate()'s exact request kwargs)
-    to a markdown file under WORK/<volume_id>/DRY_RUN/<run-stamp>/ and
-    return its path."""
+    """Render `payload` (the client's exact request kwargs) to a markdown file
+    under WORK/<volume_id>/DRY_RUN/<run-stamp>/ and return its path.
+
+    Shared by both provider routes, so nothing here may assume DeepSeek's
+    payload shape. `provider` only selects which client is named in the
+    header — it must not change what is rendered.
+    """
     from src.Deepseek.common.token_telemetry import count_tokens
 
+    client_name = "QwenClient" if str(provider).lower() == "qwen" else "DeepSeekClient"
     model = str(payload.get("model", ""))
-    system_text = str(payload.get("system") or "")
+    # NOT str(): DeepSeek sends `system` as a plain string, Qwen sends a LIST
+    # of content blocks carrying cache_control. str() on that list yields a
+    # Python repr — one 350KB line of escaped newlines — which is how every
+    # Qwen dry-run file became unreadable. _content_to_text handles both.
+    system_text = _content_to_text(payload.get("system") or "")
     messages: List[Dict[str, Any]] = payload.get("messages") or []
     thinking = payload.get("thinking")
     output_config = payload.get("output_config")
@@ -107,13 +124,17 @@ def write_dry_run_prompt(
         f"- **Thinking:** {thinking_line}",
         f"- **Estimated input tokens (local tiktoken approximation):** {estimated_input_tokens:,}",
         "",
-        "No API call was made — this is the exact payload DeepSeekClient.generate() "
+        f"No API call was made — this is the exact payload {client_name}.generate() "
         "assembled, captured right before the network call would have fired. "
-        "Multi-turn conversation history is deliberately NOT assembled even when "
-        "conversation mode is enabled: doing so for real risks triggering a real, "
-        "billed checkpoint-summarization call mid-preparation, which would defeat "
-        "the one guarantee dry-run exists to make. This is the raw single-turn "
-        "system+user payload only.",
+        "Multi-turn conversation history is deliberately NOT assembled, even when "
+        "conversation mode is enabled, and both routes drop it inside the client "
+        "rather than trusting the caller. On the DeepSeek route, assembling it can "
+        "itself trigger a real, billed checkpoint-summarization call, which would "
+        "defeat the one guarantee dry-run exists to make. On the Qwen route the "
+        "ledger never advances during a dry run, so a window read from disk would "
+        "be frozen at whatever the last real run left behind — accurate for at most "
+        "one chapter in the volume and misleading for every other. Either way, this "
+        "is the raw single-turn system+user payload only.",
         "",
         "## system",
         "",

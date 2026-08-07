@@ -147,6 +147,90 @@ def test_conversation_compaction(tmp_path):
     assert manager.state.get("summary")
 
 
+def test_qwen_dry_run_drops_conversation_history(tmp_path):
+    """A dry-run payload must be single-turn even when a conversation ledger
+    with real history is attached.
+
+    This is the regression guard for a leak found by reading actual DRY_RUN
+    output: the agent assembled the recent-verbatim window BEFORE the client
+    ever saw dry_run, so every chapter's preview carried the same frozen pair
+    of chapters left behind by the last real run — truthful for at most one
+    chapter in the volume and fiction for the rest. The guard now lives in
+    QwenClient.generate(), so passing history in explicitly must not defeat it.
+    """
+    manager = QwenConversationManager(
+        tmp_path,
+        "VOL",
+        "qwen3.8-max",
+        "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+        {
+            "enabled": True,
+            "recent_verbatim_chapters": 2,
+            "context_window": 1_000_000,
+            "persistence_file": ".context/qwen_conversation.json",
+        },
+    )
+    for index in (6, 7):
+        manager.commit(
+            f"CHAPTER_0{index}",
+            [{"role": "user", "content": f"JP source of chapter {index}"}],
+            f"EN output of chapter {index}",
+            tmp_path / f"CHAPTER_0{index}_EN.md",
+            [{"type": "text", "text": f"EN output of chapter {index}"}],
+        )
+    history = manager.messages("system", "translate chapter 1")
+    assert len(history) > 1, "precondition: the ledger really does carry history"
+
+    client = QwenClient(dry_run=True)
+    response = client.generate(
+        prompt="translate chapter 1",
+        system_instruction="system",
+        messages=history,          # deliberately handed the assembled window
+        dry_run=True,
+    )
+    payload = response.provider_metadata["payload"]
+    assert len(payload["messages"]) == 1, payload["messages"]
+    assert payload["messages"][0]["role"] == "user"
+    rendered = "".join(
+        block.get("text", "") for block in payload["messages"][0]["content"]
+    )
+    assert "chapter 6" not in rendered and "chapter 7" not in rendered
+
+
+def test_dry_run_renderer_handles_block_shaped_system(tmp_path):
+    """The shared renderer must not str() a list-shaped system block.
+
+    Qwen sends `system` as a list of cache_control-bearing content blocks;
+    DeepSeek sends a plain string. str() on the list produced a Python repr —
+    one enormous escaped line — which is why every Qwen dry-run file was
+    hundreds of KB and unreadable.
+    """
+    from src.Deepseek.translator.dry_run import write_dry_run_prompt
+
+    path = write_dry_run_prompt(
+        work_dir=tmp_path,
+        volume_id="VOL",
+        chapter_id="CHAPTER_01",
+        payload={
+            "model": "qwen3.7-max",
+            "system": [
+                {"type": "text", "text": "SYSTEM_MARKER", "cache_control": {"type": "ephemeral"}}
+            ],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "USER_MARKER"}]}],
+            "thinking": {"type": "enabled", "budget_tokens": 100},
+            "max_tokens": 200,
+        },
+        provider="qwen",
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "SYSTEM_MARKER" in text
+    assert "USER_MARKER" in text
+    assert "'type': 'text'" not in text, "system rendered as a Python repr"
+    assert "cache_control" not in text
+    assert "QwenClient.generate()" in text, "header must name the actual client"
+    assert "DeepSeekClient" not in text
+
+
 def test_safety_fallback_block_build_and_inject(tmp_path):
     from src.Qwen.safety_fallback import build_inheritance_block, inject_inheritance_block
 
@@ -303,3 +387,52 @@ def test_safety_fallback_writes_qc_inheritance_artifact(tmp_path):
     assert "CHAPTER_08" not in data["completed_chapters_before_refusal"]
     assert data["deepseek_inheritance_config"]["fallback_provider"] == "deepseek"
     assert "consistency copypass" in data["qc_instruction"]
+
+
+def test_dry_run_translate_volume_bypasses_manifest(tmp_path):
+    """Dry-run must ignore manifest completion state and assemble payloads for
+    every requested chapter (it is a developer inspection mode); a non-dry run
+    must still filter completed chapters."""
+    import json
+
+    import src.Deepseek.translator.agent as da
+    import src.Qwen.agent as qa
+
+    fake_work = tmp_path / "work"
+    root = fake_work / "V"  # WORK_DIR/<volume_id>/
+    jp = root / "JP"
+    jp.mkdir(parents=True)
+    for i in range(1, 5):
+        (jp / f"CHAPTER_{i:02d}.md").write_text(f"# {i}", encoding="utf-8")
+    (root / "manifest.json").write_text(
+        json.dumps({
+            "chapters": [
+                {"id": "01", "source_file": "CHAPTER_01.md", "translation_status": "completed"},
+                {"id": "02", "source_file": "CHAPTER_02.md", "translation_status": "completed"},
+                {"id": "03", "source_file": "CHAPTER_03.md", "translation_status": "pending"},
+                {"id": "04", "source_file": "CHAPTER_04.md", "translation_status": "pending"},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    (root / "context.xml").write_text(
+        '<mtls_project_context schema_version="1.0" volume_id="V"/>', encoding="utf-8"
+    )
+
+    qa_work, da_work = qa.WORK_DIR, da.WORK_DIR
+    try:
+        qa.WORK_DIR = fake_work
+        da.WORK_DIR = fake_work
+        res_q = qa.translate_volume("V", dry_run=True)
+        res_d = da.translate_volume("V", dry_run=True)
+    finally:
+        qa.WORK_DIR = qa_work
+        da.WORK_DIR = da_work
+
+    expected = {"CHAPTER_01", "CHAPTER_02", "CHAPTER_03", "CHAPTER_04"}
+    assert set(res_q) == expected, f"Qwen dry-run must bypass manifest: {sorted(res_q)}"
+    assert set(res_d) == expected, f"DeepSeek dry-run must bypass manifest: {sorted(res_d)}"
+
+    # The non-dry-run path still respects the manifest completion filter.
+    kept = da._filter_completed_chapters(root, sorted(jp.glob("CHAPTER_*.md")))
+    assert {p.stem for p in kept} == {"CHAPTER_03", "CHAPTER_04"}

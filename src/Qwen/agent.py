@@ -84,7 +84,15 @@ class QwenTranslator:
             previous_guidance_text=self._previous_guidance_text,
         )
         self._previous_guidance_text = guidance.strip() if guidance else None
-        messages = self.client.conversation_manager.messages(self.system_instruction, prompt, int(get_qwen_conversation_config().get("recent_verbatim_chapters", 2) or 2)) if self.client.conversation_manager else None
+        # Skipped in dry_run so the ledger is not even read for a preview.
+        # QwenClient.generate() drops caller-supplied history in dry_run
+        # regardless — that guard is the authoritative one; this only avoids
+        # doing the work to build something the client will discard.
+        messages = (
+            self.client.conversation_manager.messages(self.system_instruction, prompt, int(get_qwen_conversation_config().get("recent_verbatim_chapters", 2) or 2))
+            if self.client.conversation_manager and not self.dry_run
+            else None
+        )
         try:
             response = self.client.generate(prompt=prompt, system_instruction=self.system_instruction, messages=messages, dry_run=self.dry_run)
         except QwenModerationError as exc:
@@ -92,7 +100,7 @@ class QwenTranslator:
             return self._safety_fallback_translate(chapter_path, chapter_id, exc)
         if response.provider_metadata.get("dry_run"):
             from src.Deepseek.translator.dry_run import write_dry_run_prompt
-            path = write_dry_run_prompt(work_dir=self.work_dir, volume_id=self.volume_id, chapter_id=chapter_id, payload=response.provider_metadata["payload"])
+            path = write_dry_run_prompt(work_dir=self.work_dir, volume_id=self.volume_id, chapter_id=chapter_id, payload=response.provider_metadata["payload"], provider="qwen")
             return f"[DRY RUN — no translation performed. Payload written to {path}]"
         parts = [response.content]
         thinking_parts = [response.thinking_content] if response.thinking_content else []
@@ -309,4 +317,9 @@ def translate_volume(volume_id: str, chapters: Optional[List[str]] = None, think
     if chapters:
         wanted = set(chapters)
         chapter_files = [path for path in chapter_files if path.stem in wanted or path.stem.split("_")[-1] in wanted]
-    return QwenTranslator(work_dir, volume_id, thinking_log_enabled=thinking_log_enabled, dry_run=dry_run).translate_all(_filter_completed_chapters(work_dir, chapter_files))
+    # Dry-run bypasses the manifest completion filter: it is a developer
+    # inspection mode and must assemble payloads for every requested
+    # chapter regardless of manifest state.
+    if not dry_run:
+        chapter_files = _filter_completed_chapters(work_dir, chapter_files)
+    return QwenTranslator(work_dir, volume_id, thinking_log_enabled=thinking_log_enabled, dry_run=dry_run).translate_all(chapter_files)
