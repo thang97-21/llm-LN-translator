@@ -118,6 +118,9 @@
     ONE EXCEPTION: leave &lt;character_attribute_anchors&gt; exactly as &lt;pending&gt; — this block belongs to a
     cross-volume continuity subsystem this lightweight client does not run. Do not attempt to fill it.
 
+    ANOTHER EXCEPTION: leave &lt;translation_inheritance&gt; exactly as &lt;pending&gt; — this block is populated
+    at runtime by the Qwen→DeepSeek safety-refusal fallback, not by prep. Do not attempt to fill it.
+
     For any OTHER block where the source genuinely does not support a confident answer (e.g. a volume
     with no illustrations at all), leave that block in its original &lt;pending&gt; shape rather than
     inventing content. A missing block is honest; a fabricated one corrupts the translator's context.

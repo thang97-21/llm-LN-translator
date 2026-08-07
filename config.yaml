@@ -147,7 +147,7 @@ translation:
   # ════════════════════════════════════════════════════════════════════════
 
   # Phase 2 provider route: deepseek | qwen.
-  provider: qwen                 # deepseek | qwen
+  provider: deepseek                 # deepseek | qwen
 
   # Master prompt selection. The base prompt consolidates all 13 RAG module
   # policies inline — no external RAG modules, ChromaDB, or vector stores
@@ -425,8 +425,9 @@ translation:
     # point the Qwen route at a different prompt without touching code.
     master_prompt: src/Qwen/prompts/master_prompt_qwen_en.xml
     generation:
-      # Official qwen3.8-max rule: when thinking is enabled, max_tokens must
-      # exceed thinking.budget_tokens (shared budget for reply + CoT).
+      # Official Qwen frontier-class rule: when thinking is enabled,
+      # max_tokens must exceed thinking.budget_tokens (shared budget for
+      # reply + CoT). Applies to every *-max model, not one version of it.
       max_output_tokens: 128000
       top_p: 0.95
     thinking:
@@ -473,6 +474,34 @@ translation:
       eps_guidance: true
       voice_block: true
       partial_prefix: true
+
+  # ════════════════════════════════════════════════════════════════════════
+  # SAFETY-REFUSAL FALLBACK (Qwen → DeepSeek)
+  # ════════════════════════════════════════════════════════════════════════
+  # When Qwen's content moderation refuses a chapter (QwenModerationError,
+  # HTTP 400 family — e.g. code="InvalidParameter" + "inappropriate
+  # content"), the refusal is deterministic: retrying the same payload
+  # against the same gate fails identically. The client therefore does NOT
+  # retry. Instead it hands the chapter to the DeepSeek route — but not
+  # cold. Before the DeepSeek payload is built, an inheritance agent (one
+  # DeepSeek call running on the PREP config — model/endpoint/key below)
+  # reads every EN chapter Qwen has already produced, summarizes the
+  # translation decisions Qwen established (names, honorifics, voice,
+  # terminology, style), and injects that summary into a
+  # <translation_inheritance> block in context.xml with a marker, so the
+  # DeepSeek run inherits all of Qwen's decisions instead of reinventing
+  # them. The block is seeded <pending/> by the Librarian and left pending
+  # by prep; it is populated only at runtime when a safety refusal fires.
+  safety_fallback:
+    enabled: true
+    fallback_provider: deepseek            # only deepseek is wired today
+    block_name: translation_inheritance    # context.xml block injected on refusal
+    marker: "This run succeeds from Qwen's safety refusal. All translation decisions must inherit from Qwen."
+    # The inheritance agent runs on the PREP config (model/endpoint/api_key)
+    # — same credentials and endpoint prep uses, one-shot summarization call.
+    inherit_agent:
+      enabled: true
+      prompt: src/Qwen/prompts/inherit_decisions_prompt.xml
 
 # ── EPUB Builder ────────────────────────────────────────────────────────────
 builder:

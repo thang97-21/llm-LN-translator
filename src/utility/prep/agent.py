@@ -292,7 +292,7 @@ _BLOCK_NAMES = (
     "validation_audit", "volume_identity", "world_setting", "character_roster",
     "name_map", "relationship_graph", "verbatim_anchors", "character_attribute_anchors",
     "voice_fingerprints", "cultural_glossary", "eps_arc_tracker", "scene_plans",
-    "eps_signals", "illustration_context", "translation_brief",
+    "eps_signals", "illustration_context", "translation_brief", "translation_inheritance",
 )
 
 

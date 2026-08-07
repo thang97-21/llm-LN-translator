@@ -89,7 +89,7 @@ class QwenTranslator:
             response = self.client.generate(prompt=prompt, system_instruction=self.system_instruction, messages=messages, dry_run=self.dry_run)
         except QwenModerationError as exc:
             logger.error("[QWEN-SAFETY] %s blocked by content moderation: %s", chapter_id, exc)
-            raise
+            return self._safety_fallback_translate(chapter_path, chapter_id, exc)
         if response.provider_metadata.get("dry_run"):
             from src.Deepseek.translator.dry_run import write_dry_run_prompt
             path = write_dry_run_prompt(work_dir=self.work_dir, volume_id=self.volume_id, chapter_id=chapter_id, payload=response.provider_metadata["payload"])
@@ -153,6 +153,45 @@ class QwenTranslator:
                 response.provider_metadata.get("raw_content_blocks"),
             )
         return text
+
+    def _safety_fallback_translate(self, chapter_path: Path, chapter_id: str, exc: QwenModerationError) -> str:
+        """Qwen safety-refusal fallback: do NOT retry. Switch to DeepSeek with
+        decision inheritance injected into context.xml, and return the EN text.
+
+        The inheritance agent (DeepSeek call on the prep config) summarizes
+        the translation decisions Qwen already made in prior EN chapters, and
+        that summary is injected into <translation_inheritance> before the
+        DeepSeek payload is built — see src/Qwen/safety_fallback.py.
+
+        The caller (translate_and_persist_chapter) writes the returned text to
+        EN/ and marks the chapter completed, exactly as it would for a normal
+        Qwen success — the fallback only changes where the text came from.
+        """
+        from src.Qwen.config import get_safety_fallback_config  # local — cheap, keeps imports tidy
+        from src.Qwen.safety_fallback import fallback_translate_chapter  # local — avoids import cycle
+
+        cfg = get_safety_fallback_config()
+        if not cfg.get("enabled", True):
+            logger.warning("[QWEN-SAFETY] %s — safety fallback disabled; re-raising moderation error", chapter_id)
+            raise exc
+
+        try:
+            return fallback_translate_chapter(
+                work_dir=self.work_dir,
+                volume_id=self.volume_id,
+                chapter_path=chapter_path,
+                chapter_id=chapter_id,
+                refusal=exc,
+                dry_run=self.dry_run,
+            )
+        except QwenModerationError:
+            raise
+        except Exception as fallback_exc:  # noqa: BLE001 - surface any fallback failure loudly
+            logger.error(
+                "[QWEN-SAFETY] %s — DeepSeek fallback failed (%s); re-raising original moderation error",
+                chapter_id, fallback_exc,
+            )
+            raise exc from fallback_exc
 
     def _log_usage(self, call_label: str, response, continuation_count: int) -> None:
         try:

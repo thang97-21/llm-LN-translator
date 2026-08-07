@@ -25,8 +25,12 @@ const MODEL_CHOICES = ['deepseek-v4-pro', 'deepseek-v4-flash'] as const;
 const MODEL_LABELS = ['DeepSeek V4 Pro', 'DeepSeek V4 Flash'] as const;
 const PROVIDER_CHOICES = ['deepseek', 'qwen'] as const;
 const PROVIDER_LABELS = ['DeepSeek', 'Qwen'] as const;
-const QWEN_MODEL_CHOICES = ['qwen3.8-max', 'qwen3.7-plus', 'qwen3.7-flash'] as const;
-const QWEN_MODEL_LABELS = ['Qwen 3.8 Max', 'Qwen 3.7 Plus', 'Qwen 3.7 Flash'] as const;
+// Frontier-class (*-max) names roll between versions, so both live here —
+// qwen3.7-max was configured but absent from this list, which made the
+// currently-set model unselectable in the menu. Pricing follows the CLASS, not
+// the version: token_telemetry bills any other *-max at frontier rates.
+const QWEN_MODEL_CHOICES = ['qwen3.7-max', 'qwen3.8-max', 'qwen3.7-plus', 'qwen3.7-flash'] as const;
+const QWEN_MODEL_LABELS = ['Qwen 3.7 Max — frontier-class', 'Qwen 3.8 Max — frontier-class', 'Qwen 3.7 Plus — balanced', 'Qwen 3.7 Flash — economy'] as const;
 const ENDPOINT_CHOICES = ['https://api.deepseek.com/anthropic', 'https://api.deepseek.com'] as const;
 const ENDPOINT_LABELS = ['Anthropic', 'OpenAI'] as const;
 const EFFORT_CHOICES = ['max', 'high', 'medium', 'low'] as const;

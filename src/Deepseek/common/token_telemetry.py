@@ -95,6 +95,10 @@ def _rates_for_model(model_name: str) -> Dict[str, float]:
             return PRICING_PER_MTOK["qwen3.7-flash"]
         if "plus" in name:
             return PRICING_PER_MTOK["qwen3.7-plus"]
+        # Frontier-class fallback: any other qwen model (qwen3.7-max and
+        # whatever succeeds it) bills at max-tier rates. Deliberately the
+        # priciest Qwen tier — a cost ledger that guesses low is worse than
+        # useless, because nobody audits a number that looks cheap.
         return PRICING_PER_MTOK["qwen3.8-max"]
     if "flash" in name:
         return PRICING_PER_MTOK["deepseek-v4-flash"]

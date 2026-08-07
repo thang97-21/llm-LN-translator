@@ -675,7 +675,7 @@ class LibrarianAgent:
         print(f"Assets:       {asset_count}  (cover + kuchie + illustrations)")
         print(f"")
         print(f"manifest.json — runtime configuration only")
-        print(f"context.xml   — raw OPF metadata + 15-block agent placeholder")
+        print(f"context.xml   — raw OPF metadata + 16-block agent placeholder")
         print(f"")
         print(f"Status:       Ready for Phase 1.15 → Title Philosophy")
         print(f"{'='*60}\n")
@@ -3242,7 +3242,7 @@ class LibrarianAgent:
         opf_metadata: Dict[str, Any],
         target_lang: str,
     ) -> None:
-        """Write the 15-block context shell owned by the preparation agents."""
+        """Write the 16-block context shell owned by the preparation agents."""
         block_owners = (
             ("validation_audit", "metadata_gate"),
             ("volume_identity", "metadata_processor"),
@@ -3259,6 +3259,7 @@ class LibrarianAgent:
             ("eps_signals", "metadata_processor"),
             ("illustration_context", "visual_analysis"),
             ("translation_brief", "translation_brief_agent"),
+            ("translation_inheritance", "safety_fallback"),
         )
 
         root = ET.Element(

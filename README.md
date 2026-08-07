@@ -15,11 +15,16 @@ budgets, explicit `cache_control` markers, streaming, retry/backoff, moderation
 error classification, conversation compaction, thinking-aware partial
 continuation, and Qwen pricing entries in token telemetry.
 
+A content-moderation refusal mid-volume does not end the run: the chapter is
+handed to DeepSeek with Qwen's already-established translation decisions
+inherited rather than reinvented. See
+[Safety-Refusal Fallback](#safety-refusal-fallback--qwen--deepseek).
+
 ---
 
 ## Navigation
 
-- [LN Translation Client - DeepSeek-Powered](#ln-translation-client---deepseek-powered)
+- [LLM Translator - DeepSeek/Qwen-Powered](#llm-translator---deepseekqwen-powered)
   - [Navigation](#navigation)
   - [Glossary](#glossary)
   - [What It Is](#what-it-is)
@@ -29,10 +34,11 @@ continuation, and Qwen pricing entries in token telemetry.
     - [IDE Agent (MCP Tools) — One-Line E2E](#ide-agent-mcp-tools--one-line-e2e)
   - [Architecture](#architecture)
     - [The Translator — What Makes It "Bare"](#the-translator--what-makes-it-bare)
+    - [Safety-Refusal Fallback — Qwen → DeepSeek](#safety-refusal-fallback--qwen--deepseek)
     - [Prep — Two Paths](#prep--two-paths)
     - [Series Continuity — The Bible Writer](#series-continuity--the-bible-writer)
-  - [Telemetry & Developer Tools](#telemetry--developer-tools)
-    - [Token & Cost Log](#token--cost-log)
+  - [Telemetry \& Developer Tools](#telemetry--developer-tools)
+    - [Token \& Cost Log](#token--cost-log)
     - [THINKING Density Map](#thinking-density-map)
     - [Dry Run](#dry-run)
     - [Local Tokenizer](#local-tokenizer)
@@ -282,6 +288,39 @@ This one is ~200 lines across 4 core files:
 | `agent.py` | Orchestrator: load prompt → inject context.xml → per-chapter send → receive → write |
 
 Everything else is **gone**. The DeepSeek master prompt carries all translation policy inline.
+
+### Safety-Refusal Fallback — Qwen → DeepSeek
+
+Qwen's content-moderation gate will refuse a chapter outright (`QwenModerationError`, HTTP 400 family — e.g. `code="InvalidParameter"` with *"inappropriate content"*, classified as `data_inspection_failed`). Light novels trip it on material that is entirely ordinary for the genre, and the refusal is **deterministic**: the same payload against the same gate fails identically every time. So the Qwen route does not retry it — `is_retryable()` returns `False` for moderation errors, and a backoff loop here would only buy the same refusal three times more slowly.
+
+The chapter goes to DeepSeek instead. The interesting part is that it does not go **cold**.
+
+Handing chapter 9 of a volume to a second model with no history is how a heroine acquires a new name halfway through a book, honorifics start appearing where they had been dropped, and a running epithet quietly changes wording. So before the DeepSeek payload is built:
+
+1. The exact refusal code is captured from the exception for the audit trail.
+2. An **inheritance agent** — one DeepSeek call running on the *prep* config (`prep.model` / `endpoint` / `api_key_env`, via `_call_deepseek_prep`) — reads every EN chapter Qwen has already produced and summarizes the decisions Qwen actually established: names, honorific practice as *observed* rather than as stated, landmarks, epithets, voice, terminology.
+3. That summary is upserted into a `<translation_inheritance>` block in `context.xml`, carrying a marker stating the run succeeds from a Qwen refusal and all decisions must inherit from Qwen. The block is seeded `<pending/>` by the Librarian and left pending by prep — it is populated only at runtime, only when a refusal actually fires.
+4. DeepSeek translates the chapter. Because the DeepSeek route already embeds `context.xml` verbatim in its system prompt, the block reaches the model with no prompt surgery at all.
+
+Injection is idempotent — re-running replaces the existing block rather than stacking a second one — and `context.xml` is written atomically.
+
+**It fails loudly.** If the inheritance agent or the injection step fails for any reason, the original moderation error is re-raised rather than falling through to a cold translation. A run that stops is recoverable; a volume that silently changes its own terminology at chapter 9 is not.
+
+Every firing also writes `WORK/<vol_id>/QC/inheritance_translator.json`: the exact refusal (code, message, HTTP status), every chapter completed *before* the refusal, and the governing inheritance config. This is a translator-side input to QC, never a QC report. `mtl-qc` reads it before dispatching any sub-agent; its presence sets `has_inheritance_handoff` and makes a **cross-provider consistency copypass mandatory** — post-refusal chapters are checked against both the recorded decisions and the pre-refusal Qwen chapters, routed through `qc-names` with prior Qwen output winning any metadata conflict, and reported in its own audit section.
+
+```yaml
+translation:
+  safety_fallback:            # sibling of translation.qwen, not nested under it
+    enabled: true
+    marker: "This run succeeds from Qwen's safety refusal. All translation decisions must inherit from Qwen."
+    inherit_agent:
+      enabled: true
+      prompt: src/Qwen/prompts/inherit_decisions_prompt.xml
+```
+
+Two keys in that block, `fallback_provider` and `block_name`, are **not read by anything** — the provider and the block name are both fixed in `src/Qwen/safety_fallback.py`. They describe the design rather than configure it; changing them has no effect until something wires them up.
+
+One consequence worth stating plainly: a volume that hits a refusal is **translated by two different models**, and no amount of decision inheritance makes that free. The inheritance summary and the mandatory copypass are mitigations, not a guarantee — the QC artifact exists precisely because the seam deserves a human look.
 
 ### Prep — Two Paths
 
