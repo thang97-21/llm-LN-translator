@@ -37,7 +37,7 @@ from xml.etree import ElementTree as ET
 
 # Every context.xml block name a chapter's reasoning could plausibly reference.
 # character_attribute_anchors is included even though the lightweight prep
-# client never fills it (src/prep/agent.py) — if it's ever populated by a
+# client never fills it (src/utility/prep/agent.py) — if it's ever populated by a
 # future prep revision or a hand-edited context.xml, it should still count.
 CONTEXT_XML_BLOCKS: Tuple[str, ...] = (
     "volume_identity", "world_setting", "character_roster", "name_map",

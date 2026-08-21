@@ -60,7 +60,7 @@ FLASH_BLOCKS: Tuple[str, ...] = (
 
 # ══════════════════════════════════════════════════════════════════════════
 # Multi-turn prep — one sequential turn per block, same order every time.
-# Must match src/prep/agent.py::_BLOCK_NAMES (the Librarian's placeholder
+# Must match src/utility/prep/agent.py::PREP_BLOCK_NAMES (the Librarian's placeholder
 # context.xml order) with chapter_titles_en inserted right after
 # volume_identity (same relative position FLASH_BLOCKS above uses, since the
 # prompt's own volume_identity schema ties title_en and chapter_titles_en
@@ -209,53 +209,60 @@ def build_task_suffix(block_names: Tuple[str, ...], *, extra_note: str = "") -> 
 
 # ══════════════════════════════════════════════════════════════════════════
 # Multi-turn prep — one persisted, sequential DeepSeekConversationManager
-# turn per block (src/prep/multiturn_agent.py), instead of the parallel
+# turn per block (src/utility/prep/multiturn_agent.py), instead of the parallel
 # path's independent concurrent calls. Every turn's response is a small JSON
-# node envelope (see src/prep/json_xml_node.py), not raw XML — the ONE thing
+# node envelope (see src/utility/prep/json_xml_node.py), not raw XML — the ONE thing
 # that differs from build_shared_system_prompt() above; ROLE, LOCALIZATION_
 # POLICY, and every block's schema text are still read from the exact same
 # source (prep_prompt_deepseek_en.xml via _section()/_block_schema()), so
 # the block content rules never get defined twice.
 # ══════════════════════════════════════════════════════════════════════════
 
-def build_multiturn_system_prompt() -> str:
+def build_multiturn_system_prompt(
+    *,
+    existing_context_xml: str,
+    jp_chapters_block: str,
+    bible_block: str = "",
+    web_search_block: str = "",
+) -> str:
+    """Build the immutable system prefix for one prep conversation.
+
+    The canonical prompt contributes role, policy, and quality-bar text. The
+    current context shell, Japanese source, optional bible, and one-time web
+    evidence are also system content so every block turn shares one stable
+    prefix. Only the user task changes between turns.
+    """
     role = _section("ROLE")
     policy = _section("LOCALIZATION_POLICY")
-    return (
-        "<ROLE>\n" + role + "\n\n"
-        "You are being called as one turn of a persisted, SEQUENTIAL, multi-turn prep "
-        "conversation — one call per context.xml block, always in the same fixed order. "
-        "Every earlier turn's own output is already visible to you in this conversation's "
-        "history (the raw JSON envelope it returned) — treat any character, name, or fact "
-        "a prior turn already committed as LOCKED. Reuse it exactly; never rename or "
-        "reinterpret it just because this turn's block gives you room to.\n"
-        "</ROLE>\n\n"
-        "<LOCALIZATION_POLICY>\n" + policy + "\n</LOCALIZATION_POLICY>\n\n"
-        "<OUTPUT_CONTRACT>\n"
-        "The FIRST turn's user message additionally carries <jp_chapters> (full JP text of "
-        "every chapter) and, for sequel volumes, <bible_context> — a JSON dump of the series "
-        "bible's term_lock/verbatim_anchors/voice_fingerprints accumulated from prior volumes; "
-        "anything in it is AUTHORITATIVE — extend it, never rename or reinterpret a character "
-        "or anchor it already locks. Every turn's user message ends with a <BLOCK_TASK> naming "
-        "the ONE block you must produce this turn, with that block's schema rules inline.\n\n"
-        "Return ONLY a single JSON object — no markdown fences, no commentary, no document "
-        "wrapper. The FIRST character of your response is `{`. Shape:\n"
+    quality_bar = _section("QUALITY_BAR")
+    sections = [
+        "<prep_prompt>\n" + role + "\n\n<LOCALIZATION_POLICY>\n" + policy
+        + "\n</LOCALIZATION_POLICY>\n\n<QUALITY_BAR>\n" + quality_bar
+        + "\n</QUALITY_BAR>\n</prep_prompt>",
+        "<existing_context_xml>\n" + existing_context_xml.strip() + "\n</existing_context_xml>",
+        jp_chapters_block,
+    ]
+    if bible_block:
+        sections.append(bible_block)
+    if web_search_block:
+        sections.append(web_search_block)
+    sections.append(
+        "<MULTITURN_PREP_CONTRACT>\n"
+        "This is one persisted, sequential prep conversation. The system content above is "
+        "immutable run input and is shared by every turn. Earlier assistant JSON envelopes in "
+        "the conversation history are accepted decisions: treat their names, terms, voice, "
+        "and facts as locked. Each user turn supplies exactly one trailing <BLOCK_TASK> and "
+        "you must produce only that block.\n\n"
+        "Return ONLY one JSON object — no markdown fences, commentary, or wrapper. The FIRST "
+        "character of the response is `{`. Shape:\n"
         '  {"tag": "BLOCK_NAME", "attrs": {...}, "text": "...", "children": [...]}\n'
-        "`attrs`, `text`, and `children` are all optional; every entry in `children` is a node "
-        "in this exact same shape. This JSON tree IS the block's XML element — `tag` is the "
-        "element name, `attrs` its attributes, `text` its own text content, `children` its "
-        "nested elements in order. Encode the block's schema below as this tree exactly like "
-        "you would write it as XML; do not flatten or reshape it into a different JSON "
-        "convention.\n\n"
-        "If the source genuinely does not support a confident answer for this block, return it "
-        'in pending shape instead of inventing content: {"tag": "BLOCK_NAME", "attrs": '
-        '{"status": "pending"}, "children": [{"tag": "pending", "text": "reason"}]}. A missing '
-        "block is honest; a fabricated one corrupts the translator's context.\n\n"
-        "Read every chapter before writing any block — character_roster, name_map, and "
-        "voice_fingerprints in particular are wrong if built from chapter 1 alone and a name or "
-        "role shifts later in the volume.\n"
-        "</OUTPUT_CONTRACT>"
+        "`attrs`, `text`, and `children` are optional; each child uses this exact node shape. "
+        "The JSON tree is the XML element. If the source cannot support a confident answer, "
+        'return pending shape: {"tag": "BLOCK_NAME", "attrs": {"status": "pending"}, '
+        '"children": [{"tag": "pending", "text": "reason"}]}. Never invent.\n'
+        "</MULTITURN_PREP_CONTRACT>"
     )
+    return "\n\n".join(sections)
 
 
 def build_multiturn_task_suffix(block_name: str, *, extra_note: str = "") -> str:

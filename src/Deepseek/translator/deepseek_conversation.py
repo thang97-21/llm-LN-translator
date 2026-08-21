@@ -63,6 +63,9 @@ class DeepSeekConversationManager:
         self.model = str(model)
         self.endpoint = str(endpoint).rstrip("/")
         self.config = dict(config or {})
+        self.conversation_kind = str(
+            self.config.get("conversation_kind", "translation")
+        ).strip().lower() or "translation"
         self.enabled = bool(self.config.get("enabled", True))
         self.recent_verbatim_chapters = max(
             1, int(self.config.get("recent_verbatim_chapters", 3) or 3)
@@ -140,6 +143,7 @@ class DeepSeekConversationManager:
             "volume_id": self.volume_id,
             "model": self.model,
             "endpoint": self.endpoint,
+            "conversation_kind": self.conversation_kind,
             "system_hash": "",
             "prefix_shape": {},
             "prefix_change_reasons": [],
@@ -220,6 +224,7 @@ class DeepSeekConversationManager:
             and str(loaded.get("volume_id")) == self.volume_id
             and str(loaded.get("model")) == self.model
             and str(loaded.get("endpoint", "")).rstrip("/") == self.endpoint
+            and str(loaded.get("conversation_kind", "translation")) == self.conversation_kind
         )
         if not identity:
             logger.warning(
@@ -522,6 +527,18 @@ class DeepSeekConversationManager:
         turn record for checkpoint compression.
         """
         messages: List[Dict[str, Any]] = []
+        if self.conversation_kind == "prep":
+            for turn in self.turns:
+                if not isinstance(turn, dict):
+                    continue
+                user_prompt = str(turn.get("user_prompt") or "")
+                assistant = str(turn.get("assistant_response") or "")
+                if user_prompt:
+                    messages.append({"role": "user", "content": user_prompt})
+                if assistant:
+                    messages.append({"role": "assistant", "content": assistant})
+            return messages
+
         for turn in self.turns:
             if not isinstance(turn, dict):
                 continue

@@ -34,7 +34,3 @@ def get_qwen_retry_config() -> Dict[str, Any]:
 
 def get_qwen_streaming_config() -> Dict[str, Any]:
     return get_qwen_config().get("streaming", {}) or {}
-
-
-def get_safety_fallback_config() -> Dict[str, Any]:
-    return get_config_section("translation").get("safety_fallback", {}) or {}

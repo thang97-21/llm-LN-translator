@@ -27,7 +27,7 @@ from src.Deepseek.mcp.servers.translator_server import register_translator_tools
 MCP_INSTRUCTIONS = (
     "LLM Translator lightweight pipeline tools: "
     "Phase 1 librarian extraction, "
-    "Phase 1.P unified DeepSeek prep (fills context.xml, no Gemini/main-pipeline dependency), "
+    "Phase 1.P cached multi-turn DeepSeek prep (fills context.xml, no Gemini/main-pipeline dependency), "
     "Phase 2 DeepSeek V4 Pro translation, "
     "QC gate (filesystem-only sanity checks), "
     "Bible Writer (cross-volume series continuity), "

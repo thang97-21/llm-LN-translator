@@ -1,4 +1,4 @@
-"""LLM Translator — Prep (unified single-DeepSeek-call context.xml builder)."""
+"""LLM Translator — Prep (cached multi-turn context.xml builder)."""
 
 from src.utility.prep.agent import PrepError, run_prep
 

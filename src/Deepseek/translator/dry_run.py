@@ -1,20 +1,15 @@
 """
-Dry-run prompt inspection. Shared by BOTH provider routes.
+Dry-run prompt inspection shared by every Phase 2 provider.
 
-DeepSeekClient.generate(dry_run=True) and QwenClient.generate(dry_run=True)
-each assemble the exact request payload (model, system, messages, thinking,
-output_config, max_tokens) and return it in
-LLMResponse.provider_metadata["payload"] instead of sending it. Both skip
-conversation history in that mode, and both do it INSIDE the client — see
-their docstrings for the two different reasons (DeepSeek: prepare_turn() can
-trigger a real, billed checkpoint-summarization call; Qwen: the ledger never
-advances during a dry run, so any window read from disk is frozen at the last
-real run and misrepresents every chapter but one). This module turns that
-payload into a readable .md file.
+Each provider assembles its exact request payload and returns it in
+``LLMResponse.provider_metadata["payload"]`` instead of sending it. Every
+provider drops conversation history inside its client before rendering a
+preview, so a dry run remains credential-free and single-turn.
 
-Nothing here may assume DeepSeek's payload shape. `system` in particular is a
-plain string on the DeepSeek route and a list of cache_control-bearing content
-blocks on the Qwen one; both go through _content_to_text.
+Nothing here assumes one wire shape. DeepSeek has a plain ``system`` string,
+Qwen has cache-bearing system blocks, and OpenAI Responses has developer and
+user items under ``input``. This module renders all three without changing the
+payload a provider would send.
 
 Per-project, like every other telemetry artifact this pipeline writes now
 (LOG/, THINKING/) — WORK/<volume_id>/DRY_RUN/<run-stamp>/<chapter_id>.md.
@@ -26,6 +21,7 @@ run (new process) gets its own rather than overwriting the last.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 import threading
@@ -60,11 +56,11 @@ def _content_to_text(content: Any) -> str:
 
 def _render_block(block: Dict[str, Any]) -> str:
     btype = block.get("type", "?")
-    if btype == "text":
+    if btype in {"text", "input_text", "output_text"}:
         return str(block.get("text", ""))
-    if btype == "thinking":
-        text = str(block.get("thinking", ""))
-        return f"_[thinking block, {len(text)} chars]_\n\n{text}"
+    if btype in {"thinking", "reasoning"}:
+        text = str(block.get("thinking") or block.get("text") or "")
+        return f"_[reasoning block, {len(text)} chars]_\n\n{text}"
     if btype == "tool_use":
         return (
             f"**Tool call:** `{block.get('name')}`\n```json\n"
@@ -80,6 +76,21 @@ def _render_message(msg: Dict[str, Any]) -> str:
     return f"### {role}\n\n{_content_to_text(msg.get('content', ''))}\n"
 
 
+def _cache_preview(payload: Dict[str, Any]) -> tuple[str, str, int]:
+    options = payload.get("prompt_cache_options") or (
+        (payload.get("extra_body") or {}).get("prompt_cache_options")
+    ) or {}
+    mode = str(options.get("mode") or "disabled")
+    cache_key = str(payload.get("prompt_cache_key") or "")
+    key_digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:12] if cache_key else "-"
+    breakpoint_count = 0
+    for item in payload.get("input") or []:
+        for block in item.get("content") or []:
+            if isinstance(block, dict) and block.get("prompt_cache_breakpoint"):
+                breakpoint_count += 1
+    return mode, key_digest, breakpoint_count
+
+
 def write_dry_run_prompt(
     *, work_dir: Path, volume_id: str, chapter_id: str, payload: Dict[str, Any],
     provider: str = "deepseek",
@@ -93,26 +104,36 @@ def write_dry_run_prompt(
     """
     from src.Deepseek.common.token_telemetry import count_tokens
 
-    client_name = "QwenClient" if str(provider).lower() == "qwen" else "DeepSeekClient"
+    client_names = {"qwen": "QwenClient", "openai": "OpenAIClient"}
+    client_name = client_names.get(str(provider).lower(), "DeepSeekClient")
     model = str(payload.get("model", ""))
-    # NOT str(): DeepSeek sends `system` as a plain string, Qwen sends a LIST
-    # of content blocks carrying cache_control. str() on that list yields a
-    # Python repr — one 350KB line of escaped newlines — which is how every
-    # Qwen dry-run file became unreadable. _content_to_text handles both.
-    system_text = _content_to_text(payload.get("system") or "")
-    messages: List[Dict[str, Any]] = payload.get("messages") or []
+    input_items: List[Dict[str, Any]] = payload.get("input") or []
+    developer_items = [item for item in input_items if item.get("role") == "developer"]
+    system_text = "\n".join(_content_to_text(item.get("content", "")) for item in developer_items)
+    messages: List[Dict[str, Any]] = (
+        [item for item in input_items if item.get("role") != "developer"]
+        if input_items
+        else payload.get("messages") or []
+    )
+    if not system_text:
+        system_text = _content_to_text(payload.get("system") or "")
     thinking = payload.get("thinking")
+    reasoning = payload.get("reasoning")
     output_config = payload.get("output_config")
-    max_tokens = payload.get("max_tokens")
+    max_tokens = payload.get("max_tokens", payload.get("max_output_tokens"))
+    cache_mode, cache_key_digest, breakpoint_count = _cache_preview(payload)
 
     combined_text = system_text + "\n".join(_content_to_text(m.get("content", "")) for m in messages if isinstance(m, dict))
     estimated_input_tokens = count_tokens(combined_text, model)
 
-    thinking_line = (
-        f"enabled, budget={thinking.get('budget_tokens')}" if isinstance(thinking, dict) else "disabled"
-    )
-    if isinstance(output_config, dict) and output_config.get("effort"):
-        thinking_line += f", effort={output_config['effort']}"
+    if isinstance(reasoning, dict):
+        thinking_line = f"mode={reasoning.get('mode', 'standard')}, effort={reasoning.get('effort', 'unspecified')}"
+    else:
+        thinking_line = (
+            f"enabled, budget={thinking.get('budget_tokens')}" if isinstance(thinking, dict) else "disabled"
+        )
+        if isinstance(output_config, dict) and output_config.get("effort"):
+            thinking_line += f", effort={output_config['effort']}"
 
     lines = [
         f"# Dry Run — {chapter_id}",
@@ -122,19 +143,16 @@ def write_dry_run_prompt(
         f"- **Model:** {model}",
         f"- **Max output tokens:** {max_tokens}",
         f"- **Thinking:** {thinking_line}",
+        f"- **Cache mode:** {cache_mode}",
+        f"- **Prompt cache key SHA-256:** {cache_key_digest}",
+        f"- **Explicit cache breakpoints:** {breakpoint_count}",
         f"- **Estimated input tokens (local tiktoken approximation):** {estimated_input_tokens:,}",
         "",
         f"No API call was made — this is the exact payload {client_name}.generate() "
-        "assembled, captured right before the network call would have fired. "
-        "Multi-turn conversation history is deliberately NOT assembled, even when "
-        "conversation mode is enabled, and both routes drop it inside the client "
-        "rather than trusting the caller. On the DeepSeek route, assembling it can "
-        "itself trigger a real, billed checkpoint-summarization call, which would "
-        "defeat the one guarantee dry-run exists to make. On the Qwen route the "
-        "ledger never advances during a dry run, so a window read from disk would "
-        "be frozen at whatever the last real run left behind — accurate for at most "
-        "one chapter in the volume and misleading for every other. Either way, this "
-        "is the raw single-turn system+user payload only.",
+        "assembled, captured immediately before the network call. Conversation "
+        "history is deliberately absent even when conversation mode is enabled: "
+        "a preview must represent one current-source turn, not frozen state from "
+        "a previous real run.",
         "",
         "## system",
         "",

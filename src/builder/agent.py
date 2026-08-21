@@ -46,6 +46,15 @@ import re
 # never gets mistaken for the title.
 _CHAPTER_H1_RE = re.compile(r'^#(?!#)\s+(.+?)\s*$')
 
+# Editorial scratch note some prep/QC passes leave directly above the real H1
+# when a chapter title gets corrected in-file, e.g.:
+#   ## TITLE CORRECTION: Prep title "X" corrected to "Y" — ...
+# It documents the fix for a human reviewer, not for the reader of the book,
+# and must never ship as chapter content. Filtered out before H1 detection so
+# it is treated as discardable noise rather than "real body content" that
+# would trip the hard-fail in _extract_chapter_h1_title below.
+_TITLE_CORRECTION_ANNOTATION_RE = re.compile(r'^##\s*TITLE CORRECTION\s*:?', re.IGNORECASE)
+
 # <volume_identity> fields context.xml is expected to carry for every
 # volume once prep has run — see src/Deepseek/prompt/prep_prompt_deepseek_en.xml's
 # volume_identity block spec. No JP fallback on any of these: an empty
@@ -977,8 +986,13 @@ class BuilderAgent:
         """
         The chapter's EN title is the leading '# Title' line DeepSeek now
         emits at the top of every translated chapter, not a manifest.json
-        chapter field. Leading blank lines are tolerated; once real body
-        content starts, a later '#' is body text, not a title marker.
+        chapter field. Leading blank lines are tolerated, and so are leading
+        '## TITLE CORRECTION: ...' annotation lines (see
+        _TITLE_CORRECTION_ANNOTATION_RE) — those are prep/QC scratch notes
+        left above the real, already-corrected H1, not chapter content, and
+        are discarded so the scan continues to the actual title beneath them.
+        Once any other real body content starts, a later '#' is body text,
+        not a title marker.
 
         Hard failure by design: no Japanese fallback and no "Chapter N"
         placeholder. A missing H1 means the translated output is malformed
@@ -987,6 +1001,8 @@ class BuilderAgent:
         for line in md_content.splitlines():
             stripped = line.strip()
             if not stripped:
+                continue
+            if _TITLE_CORRECTION_ANNOTATION_RE.match(stripped):
                 continue
             match = _CHAPTER_H1_RE.match(stripped)
             if not match:

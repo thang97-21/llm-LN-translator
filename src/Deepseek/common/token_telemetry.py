@@ -26,10 +26,9 @@ Three responsibilities live here, and nowhere else:
    as the true last resort. Never raises, always degrades, never touches
    the network.
 
-   "Cached" token counts can NEVER come from local tokenization — that's
-   server-side knowledge (which bytes DeepSeek's disk cache actually served)
-   no local tokenizer can reconstruct. Every caller here sources cache-hit
-   counts from the API's own usage.cache_read_input_tokens, never derives it.
+   Cache-read and cache-write token counts can NEVER come from local
+   tokenization — they are provider-side knowledge no local tokenizer can
+   reconstruct. Every caller sources them from its API usage object.
 
 3. **Logging** (log_call) — thread-safe append to
    WORK/<volume_id>/LOG/token_log_<run-stamp>.md, ONE FILE PER RUN, not a
@@ -45,8 +44,7 @@ Three responsibilities live here, and nowhere else:
    project from context.xml's own OPF-sourced metadata (title/author/
    publisher — see _read_opf_metadata) plus the JP source's raw size
    (character count) and an estimated input-token count for the whole
-   volume, both via count_tokens(). Prep's parallel Flash calls (up to 12
-   concurrent, see src/prep/parallel_agent.py) and the translator can both
+   volume, both via count_tokens(). Prep's optional parallel Flash calls (see src/utility/prep/parallel_agent.py) and the translator can both
    write without interleaving/corrupting rows.
 """
 
@@ -83,13 +81,38 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
     "qwen3.8-max":  {"cache_hit": 0.25, "cache_miss": 2.0, "cache_write": 2.5,  "output": 6.0},
     "qwen3.7-plus": {"cache_hit": 0.08, "cache_miss": 0.4, "cache_write": 0.5,  "output": 1.6},
     "qwen3.7-flash":{"cache_hit": 0.006,"cache_miss": 0.03,"cache_write": 0.038,"output": 0.13},
+    # OpenAI GPT-5.6 Luna text pricing (USD / 1M tokens), verified 2026-08-10
+    # against https://developers.openai.com/api/docs/models/gpt-5.6-luna.
+    # The long-context tier above 272K input tokens is selected below from the
+    # actual request size rather than exposed as an operator-controlled knob.
+    "gpt-5.6-luna": {"cache_hit": 0.02, "cache_miss": 0.20, "cache_write": 0.25, "output": 1.20},
+    # Anthropic Claude-5 family pricing (USD / 1M tokens), verified 2026-08-20
+    # against https://platform.claude.com/docs/en/about-claude/models/overview.
+    # cache_hit = 0.1x the base input rate, matching the documented 5m-TTL
+    # cache-read multiplier; cache_write here approximates the 5m-TTL write
+    # multiplier (1.25x input) — the 1h-TTL write rate (2x) isn't tracked as
+    # a separate column, same "not billing-exact" disclaimer this module
+    # already carries for DeepSeek/Qwen's own approximated rates.
+    "claude-sonnet-5": {"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50, "output": 10.00},
+    "claude-opus-5":   {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25, "output": 25.00},
+    "claude-fable-5":  {"cache_hit": 1.00, "cache_miss": 10.00, "cache_write": 12.50, "output": 50.00},
 }
 
 
-def _rates_for_model(model_name: str) -> Dict[str, float]:
+def _rates_for_model(model_name: str, *, input_tokens: int = 0) -> Dict[str, float]:
     name = str(model_name or "").strip().lower()
+    if name.startswith("gpt-5.6"):
+        if int(input_tokens) > 272_000:
+            return {"cache_hit": 0.04, "cache_miss": 0.40, "cache_write": 0.50, "output": 1.80}
+        return PRICING_PER_MTOK["gpt-5.6-luna"]
     if name in PRICING_PER_MTOK:
         return PRICING_PER_MTOK[name]
+    if name.startswith("claude-"):
+        # This route (src/Anthropic) is scoped to sonnet-5/opus-5/fable-5
+        # only — any other claude-* name reaching here (a config typo, or a
+        # model outside the supported set) bills at the priciest of the
+        # three rather than silently undercounting cost.
+        return PRICING_PER_MTOK["claude-fable-5"]
     if name.startswith("qwen"):
         if "flash" in name:
             return PRICING_PER_MTOK["qwen3.7-flash"]
@@ -112,19 +135,24 @@ def cost_breakdown_usd(
     output_tokens: int = 0,
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
+    cache_creation_included_in_input: bool = False,
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """Full cost breakdown dict — same shape src/translator/deepseek_client.py's
     estimate_usage_cost_usd() has always returned, so that method can delegate
     here without changing its contract for existing callers.
 
-    For DeepSeek, cache_creation_tokens is accepted for signature compatibility
-    only — DeepSeek's automatic caching bills cache writes at $0.00. For Qwen
-    explicit cache, cache creation is billed when the provider reports
-    cache_creation_input_tokens.
+    ``cache_creation_included_in_input`` is true for native OpenAI Responses,
+    where ``usage.input_tokens`` already contains cache-write tokens. Other
+    providers retain the established accounting semantics by default.
     """
-    rates = _rates_for_model(model_name)
-    uncached_input = max(0, int(input_tokens) - int(cache_read_tokens))
+    rates = _rates_for_model(model_name, input_tokens=input_tokens)
+    uncached_input = max(
+        0,
+        int(input_tokens)
+        - int(cache_read_tokens)
+        - (int(cache_creation_tokens) if cache_creation_included_in_input else 0),
+    )
 
     input_cost = uncached_input * rates["cache_miss"] / 1_000_000
     cache_read_cost = int(cache_read_tokens) * rates["cache_hit"] / 1_000_000
@@ -143,6 +171,7 @@ def cost_breakdown_usd(
         "input_rate_per_mtok": rates["cache_miss"],
         "output_rate_per_mtok": rates["output"],
         "cache_read_rate_per_mtok": rates["cache_hit"],
+        "cache_write_rate_per_mtok": cache_write_rate,
     }
 
 
@@ -305,7 +334,7 @@ def _log_path_for_volume(volume_id: str) -> Path:
     return WORK_DIR / volume_id / "LOG" / f"token_log_{stamp}.md"
 
 
-def _build_header(volume_id: str, work_dir: Path, model: str) -> str:
+def _build_header(volume_id: str, work_dir: Path, model: str, provider: str = "deepseek") -> str:
     opf = _read_opf_metadata(work_dir)
     title = str(opf.get("dc_title_jp") or "").strip() or volume_id
     author = str(opf.get("author_jp") or "").strip() or "—"
@@ -315,7 +344,8 @@ def _build_header(volume_id: str, work_dir: Path, model: str) -> str:
     run_stamp = _session_stamp_for_volume(volume_id)
 
     return (
-        f"# DeepSeek Token & Cost Log — {volume_id}\n\n"
+        f"# Token & Cost Log - {volume_id}\n\n"
+        f"- **Provider:** {str(provider or 'unknown').strip().lower()}\n"
         f"- **Run started:** {run_started} (stamp `{run_stamp}`)\n"
         f"- **Title (JP):** {title}\n"
         f"- **Author (JP):** {author}\n"
@@ -325,16 +355,11 @@ def _build_header(volume_id: str, work_dir: Path, model: str) -> str:
         "One row per API call made THIS RUN across prep and/or translator — each "
         "invocation of this process gets its own dated log file rather than "
         "appending into (or blending with) an earlier run's; see "
-        "WORK/<volume>/LOG/ for the full run history. Input/output counts come "
-        "from a local tiktoken encoding (o200k_base, approximation only — "
-        "DeepSeek doesn't publish a real tokenizer usable without HuggingFace "
-        "Hub auth), falling back to a char-based heuristic if even that isn't "
-        "available; cached-token counts come from the API's own usage object "
-        "(`cache_read_input_tokens`) — that's server-side knowledge no local "
-        "tokenizer can reconstruct. Pricing: "
-        "https://api-docs.deepseek.com/quick_start/pricing.\n\n"
-        "| Timestamp (UTC) | Phase | Volume | Call | Model | Cache Hit | Fresh (Miss) | Output | Cost (USD) |\n"
-        "|---|---|---|---|---|---:|---:|---:|---:|\n"
+        "WORK/<volume>/LOG/ for the full run history. Per-call input, output, "
+        "cache-read, and cache-write counts come from the provider usage object; "
+        "the whole-volume JP estimate above remains a local tokenizer estimate.\n\n"
+        "| Timestamp (UTC) | Phase | Volume | Call | Model | Cache Hit | Cache Write | Fresh | Output | Breakpoint Success Rate | Prefix Recovery | Total Cache Coverage | Net Cache Savings (USD) | Cost (USD) |\n"
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n"
     )
 
 
@@ -348,6 +373,12 @@ def log_call(
     fresh_tokens: int,
     output_tokens: int,
     cost_usd: Optional[float] = None,
+    provider: str = "deepseek",
+    cache_write_tokens: int = 0,
+    breakpoint_success_rate: Optional[float] = None,
+    prefix_recovery: Optional[float] = None,
+    total_cache_coverage: Optional[float] = None,
+    cache_net_savings_usd: Optional[float] = None,
 ) -> float:
     """Append one row to this run's WORK/<volume_id>/LOG/token_log_<stamp>.md
     (see _session_stamp_for_volume). Thread-safe — prep's parallel Flash
@@ -368,9 +399,13 @@ def log_call(
             model, cache_hit_tokens=cache_hit_tokens, fresh_tokens=fresh_tokens, output_tokens=output_tokens,
         )
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ratio = lambda value: "-" if value is None else f"{float(value) * 100:.2f}%"
+    savings = "-" if cache_net_savings_usd is None else f"${float(cache_net_savings_usd):.6f}"
     row = (
         f"| {timestamp} | {phase} | {volume_id} | {call_label} | {model} | "
-        f"{int(cache_hit_tokens)} | {int(fresh_tokens)} | {int(output_tokens)} | ${cost_usd:.6f} |\n"
+        f"{int(cache_hit_tokens)} | {int(cache_write_tokens)} | {int(fresh_tokens)} | "
+        f"{int(output_tokens)} | {ratio(breakpoint_success_rate)} | {ratio(prefix_recovery)} | "
+        f"{ratio(total_cache_coverage)} | {savings} | ${cost_usd:.6f} |\n"
     )
     work_dir = WORK_DIR / volume_id
     log_path = _log_path_for_volume(volume_id)
@@ -379,6 +414,6 @@ def log_call(
         is_new = not log_path.exists()
         with open(log_path, "a", encoding="utf-8") as f:
             if is_new:
-                f.write(_build_header(volume_id, work_dir, model))
+                f.write(_build_header(volume_id, work_dir, model, provider))
             f.write(row)
     return cost_usd

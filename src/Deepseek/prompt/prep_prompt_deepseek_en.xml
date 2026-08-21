@@ -244,9 +244,36 @@
       Wraps &lt;anchor id="a1" category="catchphrase|promise|title_echo|callback" character="..." locked="true"&gt;
       for recurring signature phrases likely to be quoted verbatim later in the volume or a sequel:
         &lt;jp&gt;exact JP text&lt;/jp&gt;&lt;en&gt;your canonical EN rendering&lt;/en&gt;&lt;notes&gt;why this phrase matters&lt;/notes&gt;
-      If bible_context supplied prior-volume anchors for this series, carry them forward UNCHANGED (same
-      `en` wording) before adding any new ones discovered in this volume — anchors that drift between
-      volumes defeat the entire point of locking them.
+
+      GENDER/SUBJECT VARIANCE CHECK — run this before locking any anchor. Japanese frequently omits or
+      neutralizes the addressee, subject, or speaker (dropped pronouns, gender-neutral endearments,
+      address terms that read as fixed phrases in JP but are NOT gender-neutral in English — e.g. a
+      childhood endearment like いい子いい子 renders as "good girl" toward one character and "good boy"
+      toward another). Before writing &lt;en&gt;, scan this phrase's OTHER occurrences across the full
+      volume (not just the first hit) and ask: does the correct English wording change depending on who
+      is speaking, who is addressed, or whose gender/role is grammatically load-bearing in English but
+      absent or ambiguous in the JP? A single early instance is not sufficient evidence that a phrase is
+      invariant — check before you lock.
+        - NOT variant (the common case): write the single &lt;en&gt; rendering and lock normally —
+          locked="true", no extra attribute needed.
+        - VARIANT: do not hard-lock one literal string as if it were universal. Instead:
+            &lt;anchor id="a1" ... locked="true" status="gender_variant"&gt;
+            &lt;en&gt;the default/majority-usage EN rendering (the form used most often this volume)&lt;/en&gt;
+            &lt;notes&gt;state the adaptation rule explicitly: the default wording, the alternate wording(s),
+            and the concrete condition that selects between them (e.g. "'good girl, good girl' when
+            addressed to Sekina; 'good boy, good boy' when addressed to Kotarou — adapt the address term
+            to the addressee's gender, keep the doubled-phrase cadence fixed"). The rule you write here is
+            what a future volume — and the translator applying this anchor mid-chapter — will follow, so
+            it must be self-sufficient without re-deriving it from raw JP.&lt;/notes&gt;
+          The phrase's cadence, structure, and emotional register stay locked; only the gendered/subject
+          term inside it is conditional. Never emit a variant anchor with an empty or vague notes field —
+          an unresolved variant is worse than a correctly-flagged one.
+      If bible_context supplied prior-volume anchors for this series, carry forward their WORDING
+      unchanged only for non-variant anchors (status absent) — drift between volumes defeats the point of
+      locking them. For an anchor carried forward with status="gender_variant", carry forward the
+      adaptation RULE (the notes field), not a single frozen literal: re-apply that rule against this
+      volume's actual speakers/addressees rather than assuming the prior volume's default case still
+      applies here. Add any new anchors discovered in this volume using the same variance check above.
     </block>
 
     <block name="voice_fingerprints">

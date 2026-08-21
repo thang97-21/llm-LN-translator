@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.Deepseek.common.atomic_io import atomic_write_json
-from src.Deepseek.common.config import WORK_DIR
+from src.Deepseek.common.config import WORK_DIR, get_safety_fallback_config
 from src.Deepseek.common.llm_types import LLMTermination
+from src.Deepseek.common.safety_fallback import fallback_translate_chapter
 from src.Deepseek.common.token_telemetry import log_call
 from src.Qwen.client import QwenClient
 from src.Qwen.config import get_qwen_config, get_qwen_continuation_config, get_qwen_conversation_config, get_qwen_optimization_config, get_qwen_prompt_path
@@ -169,15 +170,12 @@ class QwenTranslator:
         The inheritance agent (DeepSeek call on the prep config) summarizes
         the translation decisions Qwen already made in prior EN chapters, and
         that summary is injected into <translation_inheritance> before the
-        DeepSeek payload is built — see src/Qwen/safety_fallback.py.
+        DeepSeek payload is built — see src/Deepseek/common/safety_fallback.py.
 
         The caller (translate_and_persist_chapter) writes the returned text to
         EN/ and marks the chapter completed, exactly as it would for a normal
         Qwen success — the fallback only changes where the text came from.
         """
-        from src.Qwen.config import get_safety_fallback_config  # local — cheap, keeps imports tidy
-        from src.Qwen.safety_fallback import fallback_translate_chapter  # local — avoids import cycle
-
         cfg = get_safety_fallback_config()
         if not cfg.get("enabled", True):
             logger.warning("[QWEN-SAFETY] %s — safety fallback disabled; re-raising moderation error", chapter_id)
@@ -190,6 +188,8 @@ class QwenTranslator:
                 chapter_path=chapter_path,
                 chapter_id=chapter_id,
                 refusal=exc,
+                source_provider="Qwen",
+                refusal_code_default="data_inspection_failed",
                 dry_run=self.dry_run,
             )
         except QwenModerationError:

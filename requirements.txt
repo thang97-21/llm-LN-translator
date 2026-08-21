@@ -1,9 +1,14 @@
 # LLM Translator — Minimal Dependencies
-# Only what Librarian + Builder + bare DeepSeek Translator need.
-# No ChromaDB, no Google SDK, no OpenAI, no vector stores.
+# Only what Librarian + Builder + the selected Phase 2 provider need.
 
-# DeepSeek V4 Pro API (Anthropic-compatible endpoint)
-anthropic>=0.39.0
+# Phase 2 provider SDKs
+# anthropic floor raised for src/Anthropic's real Messages API route: adaptive
+# thinking (thinking.type="adaptive") and the Message Batches API used by
+# src/Anthropic/batch.py both postdate 0.39.0, which only ever needed to
+# support DeepSeek/Qwen's Anthropic-*compatible* endpoints, not these
+# newer-generation Claude-5 features. 0.125.0 is current as of 2026-08-20.
+anthropic>=0.100.0
+openai>=2.0.0
 
 # YAML configuration
 pyyaml>=6.0

@@ -7,6 +7,7 @@ import { appendConsole, browseConsole, createConsole, jumpConsole, setConsoleMod
 import { loadConfigFields } from '../src/core/configFile.js';
 import { CONFIG_FIELDS, activeProvider, buildConfigRenderLines, filterFieldsForProvider, formatConfigValue, validateConfigInput } from '../src/core/configSchema.js';
 import { loadRuntimeConfigLines, loadVolumeDetailFrom, loadVolumesFrom } from '../src/core/mtls.js';
+import { resolvePreflightRequirements } from '../src/core/preflight.js';
 import { asVolumeId } from '../src/core/types.js';
 import { layoutForColumns } from '../src/ui/layout.js';
 
@@ -57,9 +58,12 @@ try {
 
 assert.equal(layoutForColumns(120), 'three-pane'); assert.equal(layoutForColumns(90), 'two-pane'); assert.equal(layoutForColumns(89), 'single-pane');
 // Dashboard's grouped ConfigLine[] tree (Runtime configuration panel).
+// Asserts against whichever provider config.yaml's translation.provider
+// actually activates — "the active provider menu, not a stale amalgam of
+// every route" (see mtls.ts's own comment on loadRuntimeConfigLines).
 const runtimeConfig = loadRuntimeConfigLines();
-assert.ok(runtimeConfig.some((line) => line.kind === 'value' && line.label === 'Model' && line.value === 'DeepSeek V4 Pro'));
-assert.ok(runtimeConfig.some((line) => line.kind === 'value' && line.label === 'Endpoint' && line.value === 'Anthropic'));
+assert.ok(runtimeConfig.some((line) => line.kind === 'value' && line.label === 'Model' && line.value === 'GPT-5.6 Luna'));
+assert.ok(runtimeConfig.some((line) => line.kind === 'value' && line.label === 'Endpoint' && line.value === 'OpenAI Responses'));
 assert.ok(!runtimeConfig.some((line) => line.kind === 'value' && /api[_ -]?key/i.test(line.label)));
 assert.ok(!runtimeConfig.some((line) => line.kind === 'group' && (line.label === 'Prep' || line.label === 'Builder')));
 // Every boolean-shaped value line must carry a boolState for the Dashboard's
@@ -94,10 +98,20 @@ assert.ok(deepseekView.some((field) => field.path.startsWith('translation.deepse
 assert.ok(!deepseekView.some((field) => field.path.startsWith('translation.qwen.')));
 const qwenView = filterFieldsForProvider(CONFIG_FIELDS, 'qwen');
 assert.ok(qwenView.some((field) => field.path.startsWith('translation.qwen.')));
-assert.ok(!qwenView.some((field) => field.path.startsWith('translation.deepseek.')));
+assert.ok(!qwenView.some((field) => field.path.startsWith('translation.deepseek.') || field.path.startsWith('translation.openai.')));
+const openaiView = filterFieldsForProvider(CONFIG_FIELDS, 'openai');
+assert.ok(openaiView.some((field) => field.path === 'translation.openai.reasoning.effort'));
+assert.ok(openaiView.some((field) => field.path.endsWith('warn_threshold_breakpoint_success_rate')));
+assert.ok(openaiView.some((field) => field.path.endsWith('warn_threshold_prefix_recovery')));
+assert.ok(openaiView.some((field) => field.path.endsWith('min_repeat_calls_before_warning')));
+assert.ok(!openaiView.some((field) => field.path === 'translation.openai.caching.cache_monitor.warn_threshold_cache_hit_ratio'));
+assert.ok(!openaiView.some((field) => field.path.startsWith('translation.deepseek.') || field.path.startsWith('translation.qwen.')));
+const anthropicView = filterFieldsForProvider(CONFIG_FIELDS, 'anthropic');
+assert.ok(anthropicView.some((field) => field.path === 'translation.anthropic.thinking.effort'));
+assert.ok(anthropicView.some((field) => field.path === 'translation.anthropic.batch.enabled'));
+assert.ok(!anthropicView.some((field) => field.path.startsWith('translation.deepseek.') || field.path.startsWith('translation.qwen.') || field.path.startsWith('translation.openai.')));
 const unsetView = filterFieldsForProvider(CONFIG_FIELDS, '');
-assert.ok(!unsetView.some((field) => field.path.startsWith('translation.deepseek.') || field.path.startsWith('translation.qwen.')));
-assert.ok(unsetView.some((field) => field.path === 'translation.provider'));
+assert.ok(!unsetView.some((field) => field.path.startsWith('translation.deepseek.') || field.path.startsWith('translation.qwen.') || field.path.startsWith('translation.openai.') || field.path.startsWith('translation.anthropic.')));
 const menus = [...new Set(CONFIG_FIELDS.map((field) => field.menu))];
 assert.ok(['Project', 'Paths', 'Prep', 'Translation', 'Builder', 'Logging', 'MCP', 'Bible'].every((menu) => menus.includes(menu)));
 const render = buildConfigRenderLines(deepseekView);
@@ -109,6 +123,22 @@ const deduplicated = buildConfigRenderLines(CONFIG_FIELDS);
 assert.ok(!deduplicated.some((line) => line.kind === 'section' && (line.label === 'Project' || line.label === 'Logging')));
 assert.ok(deduplicated.some((line) => line.kind === 'menu' && line.label === 'Project'));
 assert.ok(deduplicated.some((line) => line.kind === 'menu' && line.label === 'Logging'));
+
+const openaiPreflight = resolvePreflightRequirements(`
+translation:
+  provider: openai
+  openai:
+    api_key_env: OPENAI_TRANSLATION_KEY
+`);
+assert.deepEqual(openaiPreflight, { provider: 'openai', apiKeyEnv: 'OPENAI_TRANSLATION_KEY', imports: 'lxml,bs4,PIL,yaml,mcp,openai' });
+
+const anthropicPreflight = resolvePreflightRequirements(`
+translation:
+  provider: anthropic
+  anthropic:
+    api_key_env: ANTHROPIC_TRANSLATION_KEY
+`);
+assert.deepEqual(anthropicPreflight, { provider: 'anthropic', apiKeyEnv: 'ANTHROPIC_TRANSLATION_KEY', imports: 'lxml,bs4,PIL,yaml,mcp,anthropic' });
 let consoleState = createConsole(); for (let index = 0; index < 5_010; index += 1) consoleState = appendConsole(consoleState, `line ${index}`, 'cli');
 assert.equal(consoleState.entries.length, 5_000); assert.equal(consoleState.entries[0]?.text, 'line 10');
 consoleState = browseConsole(consoleState, 20, 20); assert.equal(consoleState.mode, 'browse'); assert.ok(consoleState.offset > 0); consoleState = setConsoleMode(consoleState, 'input'); assert.equal(consoleState.mode, 'input'); consoleState = jumpConsole(consoleState, 'end', 20); assert.equal(consoleState.mode, 'follow'); assert.equal(consoleState.offset, 0); assert.equal(visibleConsoleEntries(consoleState, 3).length, 3);

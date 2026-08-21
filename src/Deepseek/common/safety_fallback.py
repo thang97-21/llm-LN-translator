@@ -1,26 +1,38 @@
-"""Qwen → DeepSeek safety-refusal fallback with decision inheritance.
+"""Provider → DeepSeek safety-refusal fallback with decision inheritance.
 
-When Qwen's content moderation gate refuses a chapter (``QwenModerationError``,
-HTTP 400 family — e.g. code="InvalidParameter" + "inappropriate content"), the
-refusal is deterministic: retrying the same payload against the same gate fails
-identically. So the Qwen route does NOT retry. Instead it hands the chapter to
-the DeepSeek route — but not cold. Before the DeepSeek payload is built:
+Default behavior for every non-DeepSeek Phase 2 provider: when the provider
+refuses a chapter on content-safety grounds, the refusal is deterministic —
+retrying the same payload against the same gate/model fails identically. So
+the route does NOT retry. Instead it hands the chapter to the DeepSeek route
+— but not cold. Before the DeepSeek payload is built:
 
 1. The exact refusal code is captured from the exception.
 2. An inheritance agent (one DeepSeek call running on the PREP config from
-   config.yaml — model/endpoint/api_key) reads every EN chapter Qwen has
-   already produced, summarizes the translation decisions Qwen established
-   (names, honorifics, voice, terminology, style), and returns a summary.
+   config.yaml — model/endpoint/api_key) reads every EN chapter the source
+   provider has already produced, summarizes the translation decisions it
+   established (names, honorifics, voice, terminology, style), and returns
+   a summary.
 3. That summary is injected into the ``<translation_inheritance>`` block of
-   context.xml with a marker stating that this run succeeds from Qwen's safety
-   refusal and all translation decisions must inherit from Qwen.
+   context.xml with a marker stating that this run succeeds from a safety
+   refusal and all translation decisions must inherit from the source
+   provider.
 4. The chapter is then translated via the DeepSeek route (which embeds
-   context.xml verbatim in its system prompt, so the injected block reaches the
-   model without any prompt surgery).
+   context.xml verbatim in its system prompt, so the injected block reaches
+   the model without any prompt surgery).
 
 The ``<translation_inheritance>`` block is seeded ``<pending/>`` by the
-Librarian shell and left pending by prep; it is populated only at runtime, when
-a safety refusal fires.
+Librarian shell and left pending by prep; it is populated only at runtime,
+when a safety refusal fires.
+
+Provider contract: every non-DeepSeek translator (Qwen, Anthropic, OpenAI,
+and any future provider) is responsible for catching its own refusal signal
+— an API-level moderation exception (Qwen) or a normalized
+``LLMTermination.REFUSED`` response (Anthropic, OpenAI) — and, before giving
+up on the chapter, calling ``fallback_translate_chapter()`` here with its own
+``source_provider`` display name (e.g. ``"Qwen"``, ``"Anthropic"``,
+``"OpenAI"``). Wiring this fallback in is part of what it means to satisfy
+that contract, on the same footing as matching ``translate_volume``'s call
+signature — a new provider is not done until it does.
 """
 
 from __future__ import annotations
@@ -39,52 +51,67 @@ logger = logging.getLogger(__name__)
 
 _BLOCK_NAME = "translation_inheritance"
 _BLOCK_OWNER = "safety_fallback"
-_DEFAULT_MARKER = (
-    "This run succeeds from Qwen's safety refusal. "
-    "All translation decisions must inherit from Qwen."
-)
+
+# Every provider's AnthropicAPIError-style base class stamps one of these as
+# its generic, un-specific default `code` when no real code was extracted.
+# grab_refusal_code() must not report one of these as if it were meaningful.
+_GENERIC_PROVIDER_ERROR_CODES = {"qwen_api_error", "anthropic_api_error", "openai_api_error"}
 
 # QC audit artifact written to WORK/<vol_id>/QC/ on every fallback firing.
 _QC_ARTIFACT_NAME = "inheritance_translator.json"
-_QC_INSTRUCTION = (
-    "This volume contains chapters translated by DeepSeek after a Qwen content-moderation "
-    "refusal. Qwen established the translation decisions for every chapter before the "
-    "refused chapter; the chapters after it were produced by DeepSeek and must be verified "
-    "consistent with those decisions. mtl-qc MUST run a consistency copypass IN ADDITION to "
-    "the standard QC steps: cross-check every post-refusal chapter against the recorded "
-    "decisions in this file (names, honorifics, landmarks, epithets, voice, terminology) and "
-    "against the pre-refusal Qwen chapters, and report any cross-provider drift as a finding."
-)
+
+
+def _default_marker(source_provider: str) -> str:
+    return (
+        f"This run succeeds from {source_provider}'s safety refusal. "
+        f"All translation decisions must inherit from {source_provider}."
+    )
+
+
+def _qc_instruction(source_provider: str) -> str:
+    return (
+        f"This volume contains chapters translated by DeepSeek after a {source_provider} "
+        f"content-safety refusal. {source_provider} established the translation decisions for "
+        "every chapter before the refused chapter; the chapters after it were produced by "
+        "DeepSeek and must be verified consistent with those decisions. mtl-qc MUST run a "
+        "consistency copypass IN ADDITION to the standard QC steps: cross-check every "
+        "post-refusal chapter against the recorded decisions in this file (names, honorifics, "
+        f"landmarks, epithets, voice, terminology) and against the pre-refusal {source_provider} "
+        "chapters, and report any cross-provider drift as a finding."
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════
 # Refusal code capture
 # ══════════════════════════════════════════════════════════════════════════
 
-def grab_refusal_code(exc: BaseException) -> str:
-    """Return the exact Qwen refusal code for the audit trail.
+def grab_refusal_code(exc: BaseException, *, default: str = "content_refusal") -> str:
+    """Return the exact refusal code for the audit trail.
 
     Prefers the provider's ``code`` (e.g. ``InvalidParameter``), falling back
-    to the classified moderation code (``data_inspection_failed``). The error
-    base class stamps a generic ``qwen_api_error`` default when no code was
-    extracted — that is NOT a refusal code, so it is treated as absent.
+    to ``default`` — the caller's best label for its own refusal shape (Qwen's
+    real moderation-gate default is ``"data_inspection_failed"``; a provider
+    that only synthesizes a refusal from ``LLMTermination.REFUSED``, with no
+    distinct API-level code, should pass something like ``"model_refusal"``).
+    A provider's own generic ``*_api_error`` default `code` is NOT a refusal
+    code, so it is treated as absent.
     """
     code = getattr(exc, "code", None)
-    if code and str(code) != "qwen_api_error":
+    if code and str(code) not in _GENERIC_PROVIDER_ERROR_CODES:
         return str(code)
-    return "data_inspection_failed"
+    return default
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Inheritance agent — summarize Qwen's established translation decisions
+# Inheritance agent — summarize the source provider's established decisions
 # ══════════════════════════════════════════════════════════════════════════
 
 def _load_inherit_prompt() -> Tuple[str, str]:
     """Load the inheritance-agent prompt XML → (system, user template).
 
     The prompt file uses the same wrapper shape as the master prompts:
-    a <system> block and a <user> template with ``{prior_chapters}`` and
-    ``{context_xml}`` placeholders.
+    a <system> block (templated with ``{source_provider}``) and a <user>
+    template with ``{prior_chapters}`` and ``{context_xml}`` placeholders.
     """
     cfg = get_config_section("translation").get("safety_fallback", {}) or {}
     prompt_rel = str((cfg.get("inherit_agent") or {}).get(
@@ -118,9 +145,10 @@ def _prior_completed_chapters(work_dir: Path, exclude_chapter_id: str) -> List[s
     return sorted(ids, key=_chapter_sort_key)
 
 
-def _collect_prior_qwen_chapters(work_dir: Path, exclude_chapter_id: str) -> str:
+def _collect_prior_translated_chapters(work_dir: Path, exclude_chapter_id: str) -> str:
     """Concatenate every EN chapter already on disk, newest first, minus the
-    refused chapter itself. These are the decisions Qwen actually made."""
+    refused chapter itself. These are the decisions the source provider
+    actually made."""
     en_dir = Path(work_dir) / "EN"
     if not en_dir.is_dir():
         return "(no prior EN output found)"
@@ -136,21 +164,23 @@ def run_inheritance_agent(
     volume_id: str,
     chapter_id: str,
     refusal_code: str,
+    source_provider: str,
 ) -> str:
-    """One DeepSeek call on the PREP config: summarize Qwen's decisions.
+    """One DeepSeek call on the PREP config: summarize the source provider's decisions.
 
-    Reads the prior Qwen EN chapters + context.xml, prompts the agent, and
+    Reads the prior EN chapters + context.xml, prompts the agent, and
     returns the decision summary. Uses ``_call_deepseek_prep`` so the call
     inherits the prep section's model/endpoint/api_key exactly as configured.
     """
     system_instruction, user_template = _load_inherit_prompt()
-    prior = _collect_prior_qwen_chapters(work_dir, chapter_id)
+    system_instruction = system_instruction.format(source_provider=source_provider)
+    prior = _collect_prior_translated_chapters(work_dir, chapter_id)
     context_path = Path(work_dir) / "context.xml"
     context_xml = context_path.read_text(encoding="utf-8") if context_path.exists() else "(no context.xml)"
     user_message = user_template.format(prior_chapters=prior, context_xml=context_xml)
     logger.info(
-        "[SAFETY-FALLBACK] %s — running inheritance agent (refusal_code=%s)",
-        chapter_id, refusal_code,
+        "[SAFETY-FALLBACK] %s — running inheritance agent (source=%s, refusal_code=%s)",
+        chapter_id, source_provider, refusal_code,
     )
     return _call_deepseek_prep(system_instruction, user_message, volume_id=volume_id)
 
@@ -164,15 +194,17 @@ def _write_inheritance_translator_artifact(
     refusal_message: str,
     status_code: Optional[int],
     inherit_config: Dict[str, Any],
+    source_provider: str = "Qwen",
 ) -> Path:
     """Write the QC audit artifact for a safety-refusal handoff.
 
-    Recorded in ``WORK/<vol_id>/QC/inheritance_translator.json``: the exact
-    refusal (code + message + status), every chapter completed before the
-    refusal, and the inheritance config governing the DeepSeek run of the rest
-    of the volume. Carries a ``qc_instruction`` that later mtl-qc runs must
-    honor — if this file exists, the QC orchestrator runs a consistency
-    copypass alongside the standard steps.
+    Recorded in ``WORK/<vol_id>/QC/inheritance_translator.json``: which
+    provider triggered the fallback, the exact refusal (code + message +
+    status), every chapter completed before the refusal, and the inheritance
+    config governing the DeepSeek run of the rest of the volume. Carries a
+    ``qc_instruction`` that later mtl-qc runs must honor — if this file
+    exists, the QC orchestrator runs a consistency copypass alongside the
+    standard steps.
     """
     qc_dir = Path(work_dir) / "QC"
     qc_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +213,7 @@ def _write_inheritance_translator_artifact(
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "volume_id": volume_id,
+        "source_provider": source_provider,
         "refused_chapter": chapter_id,
         "refusal": {
             "error_code": refusal_code,
@@ -189,7 +222,7 @@ def _write_inheritance_translator_artifact(
         },
         "completed_chapters_before_refusal": _prior_completed_chapters(work_dir, chapter_id),
         "deepseek_inheritance_config": inherit_config or {},
-        "qc_instruction": _QC_INSTRUCTION,
+        "qc_instruction": _qc_instruction(source_provider),
     }
     path = qc_dir / _QC_ARTIFACT_NAME
     atomic_write_json(path, payload)
@@ -205,14 +238,15 @@ def build_inheritance_block(
     refusal_code: str,
     marker: str,
     summary: str,
+    source_provider: str = "qwen",
     generated_at: Optional[str] = None,
 ) -> str:
     """Build the ``<translation_inheritance>`` block XML fragment."""
     ts = generated_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return (
         f'<{_BLOCK_NAME} status="completed" owner="{_BLOCK_OWNER}" '
-        f'source="qwen" target="deepseek" refusal_code="{_xml_escape(refusal_code)}" '
-        f'generated_at="{ts}">\n'
+        f'source="{_xml_escape(source_provider.lower())}" target="deepseek" '
+        f'refusal_code="{_xml_escape(refusal_code)}" generated_at="{ts}">\n'
         f"  <marker>{_xml_escape(marker)}</marker>\n"
         f"  <decision_summary>\n{_xml_escape(summary)}\n  </decision_summary>\n"
         f"</{_BLOCK_NAME}>"
@@ -258,17 +292,19 @@ def fallback_translate_chapter(
     chapter_path: Path,
     chapter_id: str,
     refusal: BaseException,
+    source_provider: str = "Qwen",
+    refusal_code_default: str = "content_refusal",
     dry_run: bool = False,
     config: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Translate one Qwen-refused chapter via DeepSeek with decision inheritance.
+    """Translate one source-provider-refused chapter via DeepSeek with decision inheritance.
 
     Steps: capture refusal code → run inheritance agent → inject
     ``<translation_inheritance>`` into context.xml → build DeepSeekTranslator →
     translate the chapter → return the EN text.
 
     Returns the EN markdown text (the caller persists it via the normal
-    translate_and_persist_chapter path). Raises the original moderation error
+    translate_and_persist_chapter path). Raises the original refusal error
     if the fallback is disabled or cannot complete, so the run fails loudly
     rather than silently shipping a cold translation.
     """
@@ -278,11 +314,11 @@ def fallback_translate_chapter(
     if not cfg.get("enabled", True):
         raise refusal
 
-    marker = str(cfg.get("marker", _DEFAULT_MARKER))
-    refusal_code = grab_refusal_code(refusal)
+    marker = str(cfg.get("marker") or _default_marker(source_provider))
+    refusal_code = grab_refusal_code(refusal, default=refusal_code_default)
 
     try:
-        summary = run_inheritance_agent(work_dir, volume_id, chapter_id, refusal_code)
+        summary = run_inheritance_agent(work_dir, volume_id, chapter_id, refusal_code, source_provider)
         logger.info(
             "[SAFETY-FALLBACK] %s — inheritance summary %d chars", chapter_id, len(summary)
         )
@@ -290,12 +326,13 @@ def fallback_translate_chapter(
             refusal_code=refusal_code,
             marker=marker,
             summary=summary.strip() or "(inheritance agent returned no summary)",
+            source_provider=source_provider,
         )
         inject_inheritance_block(Path(work_dir) / "context.xml", block_xml)
     except Exception as exc:  # noqa: BLE001 - a failed inheritance step must not silently cold-translate
         logger.error(
             "[SAFETY-FALLBACK] %s — inheritance/injection failed (%s); re-raising original "
-            "moderation error so the run fails loudly.",
+            "refusal error so the run fails loudly.",
             chapter_id, exc,
         )
         raise refusal from exc
@@ -309,6 +346,7 @@ def fallback_translate_chapter(
             refusal_message=str(refusal),
             status_code=getattr(refusal, "status_code", None),
             inherit_config=cfg,
+            source_provider=source_provider,
         )
         logger.info(
             "[SAFETY-FALLBACK] %s — QC artifact written to QC/%s",
@@ -321,9 +359,9 @@ def fallback_translate_chapter(
         )
 
     logger.info(
-        "[SAFETY-FALLBACK] %s — switching to DeepSeek (inheritance block injected, "
+        "[SAFETY-FALLBACK] %s — switching to DeepSeek (source=%s, inheritance block injected, "
         "refusal_code=%s)",
-        chapter_id, refusal_code,
+        chapter_id, source_provider, refusal_code,
     )
     translator = DeepSeekTranslator(
         work_dir=work_dir,

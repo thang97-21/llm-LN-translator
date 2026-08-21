@@ -451,7 +451,7 @@ class DeepSeekClient:
 
         Delegates to src.Deepseek.common.token_telemetry.cost_breakdown_usd() — the
         pricing table now lives there as the single source of truth shared
-        with prep (src/prep/parallel_agent.py) and LOG/token_log.md, instead
+        with prep (src/utility/prep/parallel_agent.py) and LOG/token_log.md, instead
         of a second copy here that could silently drift out of sync with it
         after the next DeepSeek price change. Return shape is unchanged —
         existing callers of this method see no difference.

@@ -232,7 +232,7 @@ def test_dry_run_renderer_handles_block_shaped_system(tmp_path):
 
 
 def test_safety_fallback_block_build_and_inject(tmp_path):
-    from src.Qwen.safety_fallback import build_inheritance_block, inject_inheritance_block
+    from src.Deepseek.common.safety_fallback import build_inheritance_block, inject_inheritance_block
 
     marker = "This run succeeds from Qwen's safety refusal. All translation decisions must inherit from Qwen."
     block_xml = build_inheritance_block(
@@ -278,17 +278,17 @@ def test_safety_fallback_block_build_and_inject(tmp_path):
 
 def test_safety_fallback_grab_refusal_code():
     from src.Qwen.errors import QwenModerationError
-    from src.Qwen.safety_fallback import grab_refusal_code
+    from src.Deepseek.common.safety_fallback import grab_refusal_code
 
     err = QwenModerationError("inappropriate content", status_code=400, code="InvalidParameter")
     assert grab_refusal_code(err) == "InvalidParameter"
 
     bare = QwenModerationError("inappropriate content", status_code=400)
-    assert grab_refusal_code(bare) == "data_inspection_failed"
+    assert grab_refusal_code(bare, default="data_inspection_failed") == "data_inspection_failed"
 
 
 def test_safety_fallback_disabled_rejects(tmp_path):
-    from src.Qwen.safety_fallback import fallback_translate_chapter
+    from src.Deepseek.common.safety_fallback import fallback_translate_chapter
     from src.Qwen.errors import QwenModerationError
 
     err = QwenModerationError("inappropriate content", status_code=400, code="InvalidParameter")
@@ -313,7 +313,7 @@ def test_inherit_prompt_covers_landmarks_epithets_honorific_practice():
     landmarks — with prior Qwen output winning over metadata files. If any of
     these clauses is trimmed, the next DeepSeek fallback run silently loses the
     locks that ch8-11 needed."""
-    from src.Qwen.safety_fallback import _load_inherit_prompt
+    from src.Deepseek.common.safety_fallback import _load_inherit_prompt
 
     system, user = _load_inherit_prompt()
     assert "{prior_chapters}" in user and "{context_xml}" in user
@@ -334,7 +334,7 @@ def test_safety_fallback_writes_qc_inheritance_artifact(tmp_path):
     chapter completed before the refusal (naturally sorted), the inheritance
     config that governs the rest of the volume, and a binding instruction that
     mtl-qc runs a consistency copypass when the file exists."""
-    from src.Qwen.safety_fallback import (
+    from src.Deepseek.common.safety_fallback import (
         _prior_completed_chapters,
         _write_inheritance_translator_artifact,
     )

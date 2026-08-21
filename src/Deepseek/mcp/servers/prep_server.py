@@ -1,8 +1,8 @@
-"""Prep phase MCP tools — 1 tool, direct binding to src.utility.prep.agent.run_prep.
+"""Prep phase MCP tools — one tool bound to ``run_prep``.
 
-No subprocess, no main-pipeline dependency. See src/prep/agent.py for the
-actual single-DeepSeek-call logic; this is a thin ~20-line wrapper, the same
-pattern translator_server.py uses for DeepSeekTranslator.
+No subprocess, no main-pipeline dependency. The active default is a persisted
+multi-turn prep conversation: one JSON-node response per generated block,
+followed by deterministic atomic context.xml assembly.
 """
 
 from __future__ import annotations

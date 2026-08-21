@@ -1,12 +1,11 @@
-"""Translator phase MCP tools — 2 tools only, calling the bare DeepSeekTranslator in-process.
+"""Translator phase MCP tools calling the configured Phase 2 provider.
 
-Everything the original translator_server.py exposed beyond this (parallel
+Everything the original translator server exposed beyond this (parallel
 dispatch, Koji Fox / VN voice validators, series bible RAG, volume context
 aggregation) belongs to modules deliberately excluded from the lightweight
 client (see PLANNING.md Phase 4 "DELIBERATELY REMOVED" and the exclusion
-inventory). There is no subprocess CLI to shell out to here — the bare
-translator has no argparse entry point of its own, so these tools call
-DeepSeekTranslator directly.
+inventory). There is no subprocess CLI to shell out to here — provider
+facades expose the same in-process filesystem contract.
 """
 
 from __future__ import annotations

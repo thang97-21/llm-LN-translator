@@ -1,10 +1,10 @@
 # LLM Translator Operator Console
 
 The Ink console is the keyboard-first operator surface for the standalone
-DeepSeek pipeline. Python and MCP remain authoritative; this package supplies
-typed forms, preview/confirmation, local status views, and retained execution
-logs. A terminal menu that invents pipeline behavior would be worse than no
-menu, obviously.
+provider-selectable pipeline. Python and MCP remain authoritative; this package
+supplies typed forms, preview/confirmation, local status views, and retained
+execution logs. A terminal menu that invents pipeline behavior would be worse
+than no menu, obviously.
 
 ```powershell
 npm install
@@ -60,10 +60,11 @@ second acknowledgement. No free-form extra-flags escape hatch exists.
 
 ## Preflight and diagnostics
 
-Startup checks the selected Python interpreter, required imports, MCP handshake,
-and whether a DeepSeek key is present without displaying it. If the default
-interpreter lacks `lxml` or another requirement, Advanced Toolbox remains
-disabled and Diagnostics prints the exact repair command:
+Startup checks the selected Python interpreter, imports required by the active
+translation provider, MCP handshake, and that provider’s configured API-key
+variable without displaying it. If the default interpreter lacks `lxml`, the
+active SDK, or another requirement, Advanced Toolbox remains disabled and
+Diagnostics prints the exact repair command:
 
 ```powershell
 python -m pip install -r requirements.txt

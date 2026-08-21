@@ -83,6 +83,14 @@ def get_config_section(section: str) -> Dict[str, Any]:
     return config.get(section, {})
 
 
+def get_safety_fallback_config() -> Dict[str, Any]:
+    """Provider-agnostic ``translation.safety_fallback`` config — the
+    Qwen/Anthropic/OpenAI-to-DeepSeek content-refusal fallback. Not scoped
+    under any single provider's config block since every non-DeepSeek
+    provider shares this one mechanism by default."""
+    return get_config_section("translation").get("safety_fallback", {}) or {}
+
+
 # ============================================================================
 # CONTENT PROCESSING CONSTANTS
 # ============================================================================

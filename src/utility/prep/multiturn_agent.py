@@ -7,7 +7,7 @@ fires ~13 Flash calls concurrently (each blind to the others' output — see
 block_assembler.validate_cross_block_consistency, which exists precisely
 because that path can drift), this path fires one call PER BLOCK, in strict
 order, inside a single DeepSeekConversationManager conversation — the exact
-mechanism src/translator/deepseek_conversation.py already uses for
+mechanism src/Deepseek/translator/deepseek_conversation.py already uses for
 chapter-by-chapter translation. Because every turn is sequential, every later
 turn can see every earlier turn's actual committed output in its own
 conversation history, not just a shared static prefix — that ordering is
@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
-from src.Deepseek.common.atomic_io import atomic_write_text
+from src.Deepseek.common.atomic_io import atomic_write_json, atomic_write_text
 from src.Deepseek.common.config import PIPELINE_ROOT, WORK_DIR, get_config_section
 from src.utility.prep.agent import (
     PrepError,
@@ -53,6 +53,7 @@ from src.utility.prep.block_prompts import (
 )
 from src.utility.prep.json_xml_node import JsonNodeError, extract_json_node, node_to_element
 from src.utility.prep.parallel_agent import _build_client
+from src.utility.prep.web_search_chain import MetadataSearchChain
 from src.Deepseek.translator.deepseek_conversation import DeepSeekConversationManager
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,20 @@ def assemble_from_multiturn_artifacts(
     return root, validation_warnings
 
 
+def _extract_opf_search_fields(context_xml_text: str) -> Tuple[str, str]:
+    """Read only the title and author needed for one metadata search."""
+    try:
+        root = ET.fromstring(context_xml_text)
+        opf = root.find("opf_metadata")
+        data = json.loads(opf.text or "{}") if opf is not None else {}
+    except (ET.ParseError, json.JSONDecodeError, TypeError):
+        return "", ""
+    return (
+        str(data.get("dc_title_jp") or data.get("title") or "").strip(),
+        str(data.get("author_jp") or data.get("author") or "").strip(),
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Orchestration
 # ══════════════════════════════════════════════════════════════════════════
@@ -321,6 +336,17 @@ def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[
     cache_warn_threshold = float(cache_monitor_cfg.get("warn_threshold_cache_hit_ratio", 0.70))
 
     conversation_cfg = dict(mt_cfg.get("conversation", {}) or {})
+    conversation_cfg["conversation_kind"] = "prep"
+
+    title_jp, author_jp = _extract_opf_search_fields(existing_context_xml)
+    search_result = MetadataSearchChain(
+        prep_cfg.get("web_search", {}) or {}
+    ).search(title_jp, author_jp)
+    web_search_block = search_result.to_prompt_block()
+    atomic_write_json(
+        work_dir / ".context" / "prep_web_search.json",
+        search_result.to_dict(),
+    )
 
     from src.Deepseek.common.token_telemetry import count_tokens
     manager = DeepSeekConversationManager(
@@ -338,7 +364,12 @@ def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[
         volume_id=volume_id,
     )
 
-    system_prompt = build_multiturn_system_prompt()
+    system_prompt = build_multiturn_system_prompt(
+        existing_context_xml=existing_context_xml,
+        jp_chapters_block=jp_chapters_block,
+        bible_block=bible_block,
+        web_search_block=web_search_block,
+    )
     artifacts_dir = _artifacts_dir(work_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -353,14 +384,7 @@ def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[
     for index, block_name in enumerate(MULTITURN_BLOCK_ORDER):
         extra_note = _PRO_TASK_NOTE if block_name == "name_map" else ""
         task_suffix = build_multiturn_task_suffix(block_name, extra_note=extra_note)
-        if index == 0:
-            parts = [jp_chapters_block]
-            if bible_block:
-                parts.append(bible_block)
-            parts.append(task_suffix)
-            prompt = "\n\n".join(parts)
-        else:
-            prompt = task_suffix
+        prompt = task_suffix
 
         logger.info(
             "[PREP:multiturn] %s — turn %d/%d: %s",
@@ -449,6 +473,7 @@ def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[
         "calls": cache_log,
         "validation_warnings": validation_warnings,
         "conversation_state_path": str(manager.state_path),
+        "web_search": search_result.to_dict(),
     }
     logger.info(
         "[PREP:multiturn] %s — done. %d/%d blocks populated, cache hit ratio %.1f%%.",

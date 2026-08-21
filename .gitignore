@@ -4,12 +4,22 @@
 *.env.*.local
 
 # ── Development Files ─────────────────────────────────────────────────────
-## dev/
-DEV/
+dev/
 _design/
 _docs/
 *.tmp.md
-test/
+tests/
+
+# ── Agent/Skill Authoring (local only — never pushed) ──────────────────────
+# Vendored third-party API docs, agent/skill definitions, and QC calibration
+# samples that include full-text commercial ebook extracts. None of this is
+# the tool's own source code.
+.agents/
+.codex/
+.grok/
+
+# ── Foreign nested repositories (never vendor another project's history) ───
+epub-to-xtc-converter/
 
 # ── Claude Local Settings ───────────────────────────────────────────────────
 .claude/
@@ -65,7 +75,6 @@ cache/*
 # ── Copyrighted Workspaces ────────────────────────────────────────────────────────
 raw/
 work/
-scripts/
 
 # ── IDE-Workspace / Agent Authoring (local only — never pushed) ────────────
 # Only src/ (the actual DeepSeek MTLS source) and src/prompt/ (the shipped
@@ -76,3 +85,4 @@ scripts/
 /AGENTS.md
 /PLANNING.md
 bible/
+bibles/

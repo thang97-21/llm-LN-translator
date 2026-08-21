@@ -76,10 +76,9 @@ export function loadRuntimeConfigLines(): ConfigLine[] {
     let translatorIndent = 0;
     let sawAny = false;
     const parents: Array<{ indent: number }> = [];
-    // Show the active provider's menu: translation.provider selects which
-    // block (deepseek: or qwen:) the dashboard reflects.
-    const providerMatch = /^\s*provider:\s*(deepseek|qwen)\s*(?:#.*)?$/.exec(lines.join('\n'));
-    const menuKey = providerMatch?.[1] === 'qwen' ? 'qwen:' : 'deepseek:';
+    // Show the active provider menu, not a stale amalgam of every route.
+    const providerMatch = /^\s*provider:\s*(deepseek|qwen|openai|anthropic)\s*(?:#.*)?$/m.exec(lines.join('\n'));
+    const menuKey = `${providerMatch?.[1] ?? 'deepseek'}:`;
     for (const rawLine of lines) {
       const trimmed = rawLine.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
@@ -132,6 +131,9 @@ const CONFIG_LABELS: Readonly<Record<string, string>> = {
   checkpoint_force_ratio: 'Forced checkpoint threshold',
   fail_closed_on_checkpoint_error: 'Stop on checkpoint error',
   warn_threshold_cache_hit_ratio: 'Cache warning threshold',
+  warn_threshold_breakpoint_success_rate: 'Breakpoint success threshold',
+  warn_threshold_prefix_recovery: 'Prefix recovery threshold',
+  min_repeat_calls_before_warning: 'Minimum repeat calls',
   thinking_analytics: 'Thinking analytics',
   concurrent_chapters: 'Concurrent chapters',
   max_concurrent: 'Maximum concurrent chapters',
@@ -143,24 +145,37 @@ const CONFIG_LABELS: Readonly<Record<string, string>> = {
   max_delay_ms: 'Retry maximum delay',
   jitter_factor: 'Retry jitter',
   max_529_retries: 'Maximum overload retries',
+  anthropic_version: 'API version',
+  display: 'Thinking display',
+  poll_seconds: 'Poll interval (seconds)',
+  completion_window: 'Completion window',
 };
 
 function humanizeConfigKey(key: string): string {
   return CONFIG_LABELS[key] ?? key.replace(/_/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-// `endpoint` is the one field worth collapsing rather than color-coding: the
-// full URL only ever varies on that one path segment, and the two values
-// it distinguishes (DeepSeek's Anthropic-Messages-shaped route vs. its
-// OpenAI-shaped one) are what the operator actually needs to see at a glance.
+// Keep endpoint labels meaningful across the three provider-specific transports;
+// unknown custom endpoints remain visible verbatim rather than being mislabeled.
 function humanizeConfigValue(key: string, value: string): { text: string; boolState: 'on' | 'off' | null } {
-  if (key === 'endpoint') return { text: value.includes('/anthropic') ? 'Anthropic' : 'OpenAI', boolState: null };
+  if (key === 'endpoint') {
+    if (value.includes('api.openai.com')) return { text: 'OpenAI Responses', boolState: null };
+    if (value.includes('dashscope')) return { text: 'Qwen Anthropic Messages', boolState: null };
+    if (value.includes('api.deepseek.com/anthropic')) return { text: 'DeepSeek Anthropic Messages', boolState: null };
+    if (value.includes('api.deepseek.com')) return { text: 'DeepSeek OpenAI-compatible', boolState: null };
+    if (value.includes('api.anthropic.com')) return { text: 'Anthropic Messages', boolState: null };
+    return { text: value, boolState: null };
+  }
   if (value === 'true') return { text: 'Enabled', boolState: 'on' };
   if (value === 'false') return { text: 'Disabled', boolState: 'off' };
   if (value === 'on') return { text: 'On', boolState: 'on' };
   if (value === 'off') return { text: 'Off', boolState: 'off' };
   if (value === 'deepseek-v4-pro') return { text: 'DeepSeek V4 Pro', boolState: null };
   if (value === 'deepseek-v4-flash') return { text: 'DeepSeek V4 Flash', boolState: null };
+  if (value === 'gpt-5.6-luna') return { text: 'GPT-5.6 Luna', boolState: null };
+  if (value === 'claude-sonnet-5') return { text: 'Claude Sonnet 5', boolState: null };
+  if (value === 'claude-opus-5') return { text: 'Claude Opus 5', boolState: null };
+  if (value === 'claude-fable-5') return { text: 'Claude Fable 5', boolState: null };
   return { text: value, boolState: null };
 }
 function listFiles(dir: string, suffix: string): string[] { if (!existsSync(dir)) return []; try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(suffix)).map((entry) => path.join(dir, entry.name)).sort((a, b) => a.localeCompare(b)); } catch { return []; } }

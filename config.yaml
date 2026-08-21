@@ -26,11 +26,11 @@ paths:
 # phase_routing:
 #   translate: run_translator
 
-# ── Prep (Unified DeepSeek Context Build) ───────────────────────────────────
-# Single DeepSeek API call that fills every <pending> block in the Librarian's
-# barebone context.xml — no Gemini, no ChromaDB, no main-pipeline subprocess.
-# V4 Flash is not used here: structured 15-block XML output needs the Pro
-# tier's instruction-following, not the Flash tier's throughput.
+# ── Prep (Cached Multi-turn Context Build) ──────────────────────────────────
+# One persisted DeepSeek conversation fills 15 generated blocks as JSON nodes;
+# the Librarian-owned opf_metadata block makes 16 prep data blocks in total.
+# The final JSON-to-XML assembly is deterministic and atomic.
+# No Gemini, ChromaDB, or main-pipeline subprocess is involved.
 prep:
   model: deepseek-v4-flash
   endpoint: https://api.deepseek.com/anthropic
@@ -48,6 +48,45 @@ prep:
   # has continuity context instead of reinventing names from scratch.
   bible_dir: bibles/
 
+  # ── Web Search Lock (metadata_localization / blk-17) ─────────────────────
+  # Prep's web-search tool is URL-LOCKED: every grounding query for author /
+  # illustrator / publisher / title must be scoped to locked_url, built from
+  # keyword_format. Mirrors the Web Search Lock in .github/agents/mtl-prep.agent.md
+  # and blk-17-metadata-localization.agent.md — this is the config-layer
+  # declaration of record so the CLI/agent prep path reads the same lock.
+  web_search:
+    enabled: true
+    # The first provider preserves the exact Bookwalker URL contract. The
+    # remaining providers are discovery/corroboration fallbacks only.
+    providers:
+      - bookwalker_direct
+      - brave
+      - ndl
+      - serpapi
+      - tavily
+      - exa
+    locked_url: https://bookwalker.jp/search/?qcat=&word=
+    keyword_format: "[Japanese title] + [Author in Japanese] + Bookwalker"
+    allowed_hosts:
+      - bookwalker.jp
+      - ndlsearch.ndl.go.jp
+    timeout_seconds: 20
+    max_results: 5
+    # Values are environment-variable names, never credentials.
+    api_key_env:
+      brave: BRAVE_SEARCH_API_KEY
+      serpapi: SERPAPI_API_KEY
+      tavily: TAVILY_API_KEY
+      exa: EXA_API_KEY
+    endpoints:
+      brave: https://api.search.brave.com/res/v1/web/search
+      ndl: https://ndlsearch.ndl.go.jp/api/sru
+      serpapi: https://serpapi.com/search.json
+      tavily: https://api.tavily.com/search
+      exa: https://api.exa.ai/search
+    tavily_search_depth: basic
+    tavily_exact_match: true
+
   # ── Parallel Cache-Warmed Prep (PARALLEL_PREP_GUIDE.md) ───────────────────
   # Alternative to the single unified Pro call above: one Pro call extracts
   # character_roster + name_map (establishes the JP-chapters prefix in
@@ -61,10 +100,12 @@ prep:
   # cost twice over ($0.048 wasted + $0.072 fallback vs. $0.048 if it hadn't
   # truncated). flash_max_output_tokens raised 16000 -> 32000 in response.
   parallel:
-    enabled: true
-    fallback_to_unified: true          # on any failure, retry with the
-                                        # proven unified Pro call above
-                                        # instead of failing prep outright
+    # Disabled while multi_turn is active; the two strategies are mutually
+    # exclusive to prevent a failure from multiplying API spend.
+    enabled: false
+    fallback_to_unified: false         # do not launch a second expensive
+                                        # strategy automatically after failure;
+                                        # keep artifacts for an explicit retry
     flash_model: deepseek-v4-flash
     flash_thinking_budget: 32000        # 0 disables extended thinking for
                                         # Flash calls entirely. Must stay
@@ -88,27 +129,20 @@ prep:
     max_concurrent_flash_calls: 20    # well under Flash's documented 2500
                                         # concurrent-request ceiling
 
-  # ── Multi-turn Prep with Prefix Cache (src/prep/multiturn_agent.py) ───────
-  # Third alternative to the unified single-call path and the parallel
-  # cache-warmed fan-out above: one PERSISTED, SEQUENTIAL DeepSeek conversation
-  # (src/translator/deepseek_conversation.py::DeepSeekConversationManager —
-  # the same mechanism the translator uses for chapter-by-chapter multi-turn
-  # translation), one API call per block, in the exact order the Librarian's
-  # placeholder context.xml already defines. Unlike the parallel path's 12
-  # concurrent Flash calls (each blind to the others' output), every turn here
-  # sees every earlier turn's actual output through the growing conversation
-  # history — that ordering is what buys consistency the parallel path can
-  # only check for after the fact (validate_cross_block_consistency). Each
-  # turn returns its block as a small JSON envelope (not raw XML); a
-  # deterministic script (multiturn_agent.py's assembly step) converts and
-  # wires every artifact into context.xml only at the end.
+  # ── Multi-turn Prep with Prefix Cache (src/utility/prep/multiturn_agent.py) ─
+  # Active default: one persisted, sequential DeepSeek conversation, one JSON
+  # node turn per generated block. The fixed system prefix carries the prep
+  # instructions, context shell, full JP source, optional bible, and one-time
+  # metadata-search evidence. Each user turn carries only its block task.
+  # Earlier accepted JSON turns remain visible as locked conversation history;
+  # final JSON-to-XML assembly is deterministic and atomic.
   #
-  # Checked BEFORE prep.parallel.enabled in run_prep()'s dispatch — do not
-  # enable both at once. fallback_to_unified mirrors the parallel path's
-  # safety net on any failure.
+  # run_prep() rejects multi_turn + parallel together. Automatic fallback is
+  # disabled by default so malformed output keeps artifacts for explicit retry.
   multi_turn:
     enabled: true
-    fallback_to_unified: true
+    conversation_kind: prep
+    fallback_to_unified: false   # retain artifacts; retry explicitly to avoid double spend
     flash_model: deepseek-v4-flash
     thinking_budget: 64000              # 0 disables extended thinking
     effort: max                        # output_config.effort for every turn
@@ -143,11 +177,11 @@ translation:
   # ════════════════════════════════════════════════════════════════════════
   # GENERAL — provider route + shared prompt/log settings. These apply to
   # whichever provider is selected; provider-specific knobs live in the
-  # `deepseek:` and `qwen:` menus below.
+  # `deepseek:`, `qwen:`, `openai:`, and `anthropic:` menus below.
   # ════════════════════════════════════════════════════════════════════════
 
-  # Phase 2 provider route: deepseek | qwen.
-  provider: qwen                 # deepseek | qwen
+  # Phase 2 provider route: deepseek | qwen | openai | anthropic.
+  provider: openai                 # deepseek | qwen | openai | anthropic
 
   # Master prompt selection. The base prompt consolidates all 13 RAG module
   # policies inline — no external RAG modules, ChromaDB, or vector stores
@@ -432,7 +466,7 @@ translation:
       top_p: 0.95
     thinking:
       enabled: true
-      budget_tokens: 48000
+      budget_tokens: 56000
       # Anthropic-compatible multi-turn preserves thinking by returning
       # prior assistant thinking blocks in conversation history (not a
       # request header). preserve_thinking is NOT supported on this route
@@ -476,6 +510,201 @@ translation:
       partial_prefix: true
 
   # ════════════════════════════════════════════════════════════════════════
+  # OPENAI RESPONSES ROUTE MENU — read by src/OpenAI/config.py when
+  # provider: openai. The client uses the native OpenAI Responses API.
+  # ════════════════════════════════════════════════════════════════════════
+  openai:
+    # GPT-5.6 Luna trades peak throughput for the lowest current GPT-5.6
+    # price tier. It has a 1.05M-token context window and a 128K output cap.
+    model: gpt-5.6-luna
+    endpoint: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    organization_env: OPENAI_ORG_ID
+    project_env: OPENAI_PROJECT_ID
+    http_timeout_seconds: 600
+    master_prompt: src/OpenAI/prompts/master_prompt_openai_en.md
+
+    generation:
+      # Includes both visible output and reasoning tokens on GPT-5.6.
+      max_output_tokens: 128000
+      service_tier: default            # auto | default | flex | scale | priority | fast — NEVER "standard", that literal does not exist in this enum
+      text:
+        verbosity: high
+
+    reasoning:
+      # Keep the standard model mode unless an operator explicitly selects
+      # pro. Effort is independent and defaults to the maximum literary pass.
+      mode: pro                 # standard | pro
+      effort: xhigh                    # none | minimal | low | medium | high | xhigh | max
+      context: all_turns             # auto | current_turn | all_turns
+      include_encrypted_content: true
+
+      # Reasoning summary text (a model-generated PARAPHRASE of its
+      # reasoning, not the raw chain-of-thought — OpenAI never exposes raw
+      # reasoning tokens via the API). This is the ONLY thing that can ever
+      # populate THINKING/<chapter>_THINKING.md for this route; without it
+      # the request never asks for summary text and the log writer silently
+      # writes nothing, every chapter, regardless of thinking_log.enabled.
+      # Two dependencies outside this config's control: (1) the API account
+      # must complete OpenAI's organization verification before summarizers
+      # are returned at all — see
+      # https://help.openai.com/en/articles/10910291-api-organization-verification
+      # (2) not every model tier supports summaries; gpt-5.6-luna's own
+      # model page does not list summary support among its features, unlike
+      # plain gpt-5.6. Set to null to stop requesting a summary entirely.
+      summary: auto                  # auto | concise | detailed | null
+
+    caching:
+      # GPT-5.6 explicit cache breakpoints support only the 30-minute TTL.
+      mode: explicit                 # explicit | implicit | disabled
+      ttl: 30m
+      cache_monitor:
+        enabled: true
+        # Explicit-only mode intentionally caches the fixed developer prefix,
+        # not the entire rolling two-chapter request. Breakpoint recovery is
+        # the health signal; total coverage remains a cost metric.
+        warn_threshold_breakpoint_success_rate: 0.90
+        warn_threshold_prefix_recovery: 0.90
+        min_repeat_calls_before_warning: 2
+
+    streaming:
+      enabled: true
+
+    conversation:
+      # Responses are replayed locally; store:false avoids relying on remote
+      # response state. Complete raw output items, including encrypted
+      # reasoning, are preserved in this ledger for valid next-turn replay.
+      enabled: true
+      store: false
+      persistence_file: .context/openai_conversation.json
+      recent_verbatim_chapters: 2
+      context_window: 1050000
+      max_input_tokens: 922000
+      soft_notice_ratio: 0.60
+      compact_ratio: 0.75
+      hard_trim_ratio: 0.90
+
+    continuation:
+      enabled: true
+      max_continuations: 3
+
+    retry:
+      max_retries: 5
+      base_delay_ms: 500
+      max_delay_ms: 32000
+      jitter_factor: 0.25
+      max_429_retries: 3
+
+    optimizations:
+      eps_guidance: true
+      voice_block: true
+
+  # ════════════════════════════════════════════════════════════════════════
+  # ANTHROPIC (CLAUDE) ROUTE MENU — read by src/Anthropic/config.py when
+  # provider: anthropic. Uses the real Anthropic Messages API directly
+  # (not an Anthropic-compatible passthrough the way DeepSeek/Qwen do).
+  #
+  # Scoped, deliberately, to the current Claude-5 family that shares one
+  # capability profile end to end: claude-sonnet-5, claude-opus-5,
+  # claude-fable-5 — all three adaptive-thinking-only, 1M context, 128K max
+  # output, and a hard 400 on any non-default temperature/top_p/top_k
+  # regardless of thinking state. Claude Haiku 4.5 (the one current-family
+  # model still on manual budget_tokens thinking, 200K context, 64K output)
+  # is out of scope for this route by design, not omission.
+  # ════════════════════════════════════════════════════════════════════════
+  anthropic:
+    model: claude-sonnet-5        # claude-sonnet-5 | claude-opus-5 | claude-fable-5
+    endpoint: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    anthropic_version: "2023-06-01"
+    http_timeout_seconds: 600
+    master_prompt: src/Anthropic/prompts/master_prompt_anthropic_en.md
+
+    generation:
+      # Uniform across all three supported models: 128K is the shared
+      # max-output ceiling for claude-sonnet-5/opus-5/fable-5.
+      max_output_tokens: 128000
+      # temperature / top_p / top_k are intentionally absent. Non-default
+      # values on any of them are a hard 400 on every model this route
+      # supports, regardless of thinking state — the client never sends them.
+
+    # ── Adaptive Thinking ────────────────────────────────────────────────────
+    thinking:
+      # Master toggle. claude-fable-5 rejects thinking:{type:"disabled"}
+      # outright — the client keeps thinking on for that model even if this
+      # is set to false.
+      enabled: true
+
+      # "summarized" returns readable thinking text (billed the same either
+      # way); "omitted" returns an empty thinking field for faster
+      # time-to-first-text-token. Defaults to "omitted" on the raw API —
+      # set to "summarized" here so THINKING/*.md logs actually capture text.
+      display: summarized              # summarized | omitted
+
+      # output_config.effort — steers reasoning depth in adaptive mode.
+      # Default on the API is "high"; xhigh/max cost more but reason deeper.
+      effort: high                     # max | xhigh | high | medium | low
+
+    # ── Prompt Caching ───────────────────────────────────────────────────────
+    caching:
+      enabled: true
+      # 5m is the default TTL (1.25x write / 0.1x read pricing multiplier);
+      # 1h costs 2x on write but survives longer thinking-heavy sessions.
+      ttl: 5m                          # 5m | 1h
+      cache_monitor:
+        enabled: true
+        warn_threshold_cache_hit_ratio: 0.70
+
+    # ── Batch API ────────────────────────────────────────────────────────────
+    # Opt-in async path (src/Anthropic/batch.py): submits every pending
+    # chapter as one Message Batches job instead of translating sequentially.
+    # Never a silent fallback from the synchronous path — a deliberate
+    # cost/latency trade the operator switches on explicitly.
+    batch:
+      enabled: false
+      # No anthropic-beta headers are ever sent on this route (sync or
+      # batch) — deliberately: a beta flag tied to a dated feature can go
+      # stale/unrecognized server-side and turn into a hard 400 on every
+      # request that carries it. Batch requests use the plain 128K ceiling.
+      poll_seconds: 60
+      completion_window: 24h
+      persistence_file: .context/anthropic_batch_state.json
+
+    # ── Streaming ───────────────────────────────────────────────────────────
+    streaming:
+      enabled: true
+
+    # ── Persistent Conversation ─────────────────────────────────────────────
+    conversation:
+      enabled: true
+      recent_verbatim_chapters: 2
+      persistence_file: .context/anthropic_conversation.json
+      context_window: 1000000
+      soft_notice_ratio: 0.60
+      compact_ratio: 0.75
+      hard_trim_ratio: 0.90
+
+    # ── Output Continuation ──────────────────────────────────────────────────
+    continuation:
+      enabled: true
+      max_continuations: 3
+
+    # ── Retry & Resilience ───────────────────────────────────────────────────
+    retry:
+      max_retries: 5
+      base_delay_ms: 500
+      max_delay_ms: 32000
+      jitter_factor: 0.25
+      max_429_retries: 3
+      # Anthropic's distinct overloaded_error/529 — tracked separately from
+      # the general retry ceiling, same reasoning DeepSeek applies to its own.
+      max_529_retries: 3
+
+    optimizations:
+      eps_guidance: true
+      voice_block: true
+
+  # ════════════════════════════════════════════════════════════════════════
   # SAFETY-REFUSAL FALLBACK (Qwen → DeepSeek)
   # ════════════════════════════════════════════════════════════════════════
   # When Qwen's content moderation refuses a chapter (QwenModerationError,
@@ -493,10 +722,21 @@ translation:
   # them. The block is seeded <pending/> by the Librarian and left pending
   # by prep; it is populated only at runtime when a safety refusal fires.
   safety_fallback:
+    # Default ON for every non-DeepSeek Phase 2 provider — Qwen, Anthropic,
+    # OpenAI, and any future provider added to this route. Not a per-provider
+    # opt-in: src/Deepseek/common/safety_fallback.py is the one shared
+    # mechanism every provider's translate_chapter is expected to call on a
+    # content-safety refusal, the same way every provider must match
+    # translate_volume's call signature — see that module's docstring for
+    # the contract new providers are expected to satisfy.
     enabled: true
-    fallback_provider: deepseek            # only deepseek is wired today
+    fallback_provider: deepseek            # the only fallback target — DeepSeek is the one
+                                            # route with no content-moderation gate of its own
     block_name: translation_inheritance    # context.xml block injected on refusal
-    marker: "This run succeeds from Qwen's safety refusal. All translation decisions must inherit from Qwen."
+    # No static marker here on purpose: leaving this unset lets the code
+    # build "This run succeeds from <Provider>'s safety refusal..." with the
+    # actual source provider's name. Setting a marker string here overrides
+    # that for every provider verbatim — only do so deliberately.
     # The inheritance agent runs on the PREP config (model/endpoint/api_key)
     # — same credentials and endpoint prep uses, one-shot summarization call.
     inherit_agent:
@@ -544,13 +784,23 @@ builder:
   # point converter_path at the checkout. Do not vendor it into this repo.
   xtc:
     enabled: false
-    converter_path: ""        # path to the epub-to-xtc-converter checkout
+    # Cloned outside this repo per the "do not vendor" note above.
+    converter_path: "D:/epub-to-xtc-converter"
     node_bin: ""              # blank = find 'node' on PATH
     format: xtc               # xtc (1-bit) | xtch (2-bit grayscale, ~2x size)
-    # Required: rendering rasterizes text and this repo ships no fonts.
-    # Use a HINTED face (Roboto, Tahoma, Verdana) — hinting is what stays
-    # legible once the page is dithered to one bit.
-    font_path: ""
+    # XTEINK-spec'd Bookerly (serif, matches the Kindle reading face). The
+    # converter's own registerFont() call only ever loads ONE face per run
+    # (converter.js: a single registerFontFromMemory() call, no bold/italic
+    # slot anywhere in cli/settings.js's schema) — CREngine synthesizes
+    # bold/italic algorithmically from this Regular face rather than using
+    # true hinted variants. Bookerly-Bold/-Italic/-BoldItalic.ttf sit beside
+    # this file in the converter's fonts/ dir for if that ever gets patched
+    # to support multiple registered faces; they are not consumed today.
+    # The device's original Bookerly XTEINK_*.cpfont files (dev/Bookerly/)
+    # are a different, CrossPoint-firmware-native bitmap format ("CPFONT"
+    # magic header) for the device's own on-firmware renderer — CREngine's
+    # FreeType-based rasterizer cannot load them; only real TTF/OTF works.
+    font_path: "D:/epub-to-xtc-converter/fonts/Bookerly-Regular.ttf"
     timeout_seconds: 1800
     # Passed through to the converter's settings.json verbatim (deep-merged
     # over the defaults its own `init` generates). The schema belongs to that

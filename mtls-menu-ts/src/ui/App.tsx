@@ -101,15 +101,13 @@ export function App() {
   const volumeItems = useMemo(() => sortVolumes(filterVolumes(volumes, workspace.search), workspace.sort), [volumes, workspace.search, workspace.sort]);
   // Search composes with the Provider gate: only the selected provider's
   // settings are ever shown, so the Configuration screen mirrors config.yaml's
-  // GENERAL → deepseek:/qwen: layout. provider read from the full list so the
-  // gate survives a search that excludes the provider field itself.
+  // GENERAL → provider-specific layout. Provider is read from the full list so
+  // the gate survives a search that excludes the provider field itself.
   //
   // Pulling the provider string OUT of the useMemo and into the dependency
-  // array ensures the gate re-fires when the user changes translation.provider
-  // in the config panel — even if React batches the configFields state update
-  // such that the array reference doesn't change between renders.  The string
-  // value ('deepseek' vs 'qwen') is the actual signal; the array reference is
-  // merely the container.
+  // array is intentional: configFields is mutated in place by inline edits,
+  // such that the array reference doesn't change between renders. The provider
+  // value is the actual signal; the array reference is merely the container.
   const activeProviderValue = useMemo(() => activeProvider(configFields), [configFields]);
   const filteredConfigFields = useMemo(() => {
     const searched = configFields.filter((field) => fuzzyMatch(workspace.search, `${field.label} ${field.section} ${field.description}`));
