@@ -1,10 +1,10 @@
-# LLM Translator - DeepSeek/Qwen/OpenAI/Anthropic-Powered
+# LLM Translator - DeepSeek/Qwen/OpenAI/Anthropic/Z.AI-Powered
 
 **Selectable-provider pipeline** for Japanese → English light novel translation.
 Extract, prep, translate, QC, build — and remember the series for next time.
 
 Phase 2 selects one isolated translation route through `translation.provider`:
-`deepseek`, `qwen`, `openai`, or `anthropic`. Each route owns its native
+`deepseek`, `qwen`, `openai`, `anthropic`, or `glm`. Each route owns its native
 client, prompt, conversation ledger, cache policy, continuation behavior, and
 error handling; selecting one does not silently alter any of the others.
 
@@ -73,7 +73,7 @@ venv\Scripts\activate   # Windows
 pip install -r requirements.txt
 
 # 4. Set your API key(s) in .env, matching whichever provider(s) you use:
-#    DEEPSEEK_API_KEY, QWEN_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
+#    DEEPSEEK_API_KEY, QWEN_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ZAI_API_KEY
 
 # 5. Drop an EPUB in raw/
 copy "C:\path\to\your-light-novel.epub" raw\      # Windows
@@ -98,7 +98,7 @@ Writing the series bible (so the *next* volume in the series detects the
 sequel automatically) is an MCP/IDE-agent action, not a CLI step — see
 [Series Continuity](#series-continuity--the-bible-writer) below.
 
-A TypeScript Ink/React terminal console (`mtls-menu-ts/`) is available as an
+A TypeScript Ink/React terminal console (`ts/`) is available as an
 alternative operator UI — `npm install` inside that directory, then
 `mtl-ts.bat` / `mtl-ts.sh` from the project root.
 
@@ -120,7 +120,7 @@ raw/                          ← Drop EPUBs here
     Fifteen JSON-node turns assembled deterministically into context.xml
     │
     ▼
-[Phase 2: Translator]         ← src/Deepseek/, src/Qwen/, src/OpenAI/, src/Anthropic/
+[Phase 2: Translator]         ← src/Deepseek/, src/Qwen/, src/OpenAI/, src/Anthropic/, src/GLM/
     One isolated route per provider — own client, prompt, conversation ledger, cache policy
     │
     ▼
@@ -141,7 +141,7 @@ output/<vol_id>.epub          ← Finished English light novel
 
 ### Providers
 
-Four isolated Phase 2 routes, selected by `translation.provider`. Specs as
+Five isolated Phase 2 routes, selected by `translation.provider`. Specs as
 configured in `config.yaml`:
 
 | Provider | Model | Context Window | Max Output | Reasoning Control |
@@ -150,6 +150,7 @@ configured in `config.yaml`:
 | Qwen | `qwen3.7-max` | 1M tokens | 128K tokens | Native thinking, 56K token budget |
 | OpenAI | `gpt-5.6-luna` | 1.05M tokens (922K configured input guard) | 128K tokens | `reasoning.mode: pro`, `reasoning.effort: xhigh`, `context: all_turns` |
 | Anthropic | `claude-sonnet-5` | 1M tokens | 128K tokens | Adaptive thinking (`type: adaptive`), `effort: high` |
+| Z.AI | `GLM-5.3-FLASH` | 1M tokens | 128K tokens | Deep Thinking , `effort: max` |
 
 Every route receives the same prepared `context.xml` (voice guidance,
 terminology locks, scene/emotional guidance) and enforces the same
@@ -326,7 +327,7 @@ One control surface per provider in `config.yaml`, selected by
 
 ```yaml
 translation:
-  provider: deepseek        # deepseek | qwen | openai | anthropic
+  provider: deepseek        # deepseek | qwen | openai | anthropic | glm
 
   deepseek:
     model: deepseek-v4-pro
@@ -363,6 +364,7 @@ mtls/
 │   ├── Qwen/                    ← Qwen route
 │   ├── OpenAI/                  ← OpenAI Responses route
 │   ├── Anthropic/               ← Anthropic Messages route
+│   ├── GLM/                     ← OpenAI Messages route
 │   ├── utility/
 │   │   ├── librarian/           ← Phase 1: EPUB extraction
 │   │   ├── prep/                ← context.xml builder
@@ -372,7 +374,7 @@ mtls/
 ├── scripts/
 │   └── mtl.py                   ← CLI: extract, prep, translate, qc, build, run, list, status
 │
-└── mtls-menu-ts/                ← TypeScript Ink/React terminal console (optional)
+└── ts/                          ← TypeScript Ink/React terminal console (optional)
 ```
 
 ---

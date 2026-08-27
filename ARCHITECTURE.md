@@ -1,4 +1,4 @@
-# MTLS Architecture Map — LLM Translator (Lightweight Client)
+# Architecture Map — LLM Translator (Lightweight Client)
 
 Reference document for anyone maintaining this codebase. Every claim below is grounded
 in a file actually opened in this repo — paths and line numbers are cited so you can
@@ -24,7 +24,7 @@ flowchart LR
     B -->|JP/*.md, manifest.json,\ncontext.xml skeleton| W[(work/vol_id/)]
     W -->|mtl.py prep| C[Prep\nsrc/utility/prep/]
     C -->|fills context.xml| W
-    W -->|mtl.py translate| D[Translator — Phase 2\n4-provider isolated routes]
+    W -->|mtl.py translate| D[Translator — Phase 2\n5-provider isolated routes]
     D -->|EN/*.md| W
     W -->|mtl.py qc| E[QC gate\nsrc/utility/qc/]
     W -->|mtl.py build| F[Builder\nsrc/builder/]
@@ -50,7 +50,7 @@ D:/MTLS/
 ├── output/                 # Final built EPUBs (+ optional .xtc/.xtch)
 ├── bibles/                 # Cross-volume series continuity (term_lock.json, verbatim_anchors.json, series_pack.json) — created on first write
 ├── dev/                    # Reference material, not shipped logic (RAGs/, integration notes, font assets)
-├── tests/                  # test_openai_provider.py, test_qwen_provider.py (no dedicated DeepSeek file — see Known Gaps)
+├── tests/                  # test_deepseek_pricing.py, test_glm_provider.py, test_openai_provider.py, test_qwen_provider.py (no dedicated DeepSeek or Anthropic *provider* file — see Known Gaps)
 ├── src/
 │   ├── __init__.py
 │   ├── Deepseek/           # DeepSeek Phase-2 route + ALL shared cross-provider infrastructure
@@ -60,13 +60,14 @@ D:/MTLS/
 │   │   └── mcp/            # MCP server + 6 tool-server modules (server.py, harness.py, runtime.py, servers/*.py)
 │   ├── Qwen/               # Qwen Phase-2 route (client, agent, conversation, safety_fallback, prompts/)
 │   ├── OpenAI/              # OpenAI Responses Phase-2 route (client, agent, conversation, response, prompts/)
-│   ├── Anthropic/          # EMPTY STUB — planned 4th route, not implemented (see Known Gaps)
+│   ├── Anthropic/          # Anthropic Messages Phase-2 route (client, agent, conversation, batch, response, prompts/)
+│   ├── GLM/                # Z.AI GLM Phase-2 route (client, agent, conversation, prompts/) — Chat Completions
 │   ├── builder/             # Phase-4 EPUB assembly + device profiles + XTC/XTCH export
 │   └── utility/
 │       ├── librarian/       # Phase-1 EPUB extraction (largest single module, 3576 lines)
-│       ├── prep/            # context.xml builder (unified / parallel / multi_turn paths)
+│       ├── prep/            # context.xml builder (deepseek multi_turn/parallel ladder, or minimax/glm cache-loop tier)
 │       └── qc/               # Filesystem-only QC gate (zero API calls)
-└── mtls-menu-ts/            # Standalone Ink/React terminal UI — pure client, no pipeline logic of its own
+└── ts/                      # Standalone Ink/React terminal UI — pure client, no pipeline logic of its own
 ```
 
 ## Phase 1 — Librarian (`src/utility/librarian/`)
@@ -94,7 +95,14 @@ Reads `config.yaml`'s `paths:` (13-18) block; no other top-level key.
 
 `translator/context_manager.py` only **reads** an existing `context.xml`
 (`load_context_xml`, 12 lines) — it never builds one. The actual builder is
-`src/utility/prep/agent.py::run_prep(volume_id, series_id=None)`, dispatching in order:
+`src/utility/prep/agent.py::run_prep(volume_id, series_id=None)`. It first reads
+`prep.provider` (`agent.py:458`, config.yaml:37, `deepseek | minimax | glm`) — when
+the value is `minimax` or `glm` it dispatches straight to `_run_cache_loop_prep`
+(`agent.py:368-431,459-460`), a shared cache-loop tier reusing
+`src/Deepseek/prep/prep_cache_client.py`'s OpenAI/Anthropic-style wire path with a
+per-provider prefix file (`.dsh/prep/prefix_glm.md` for GLM, `.dsh/prep/prefix.md`
+otherwise) and reasoning-effort default. For `deepseek` (the fallback default), it
+dispatches in order:
 
 1. `prep.multi_turn.enabled` → `multiturn_agent.run_multiturn_prep` —
    one persisted sequential DeepSeek conversation, 15 JSON-node turns, and atomic assembly.
@@ -112,7 +120,9 @@ its stable-prefix contract. Sequel detection
 (`agent.py:~239`), which writes `context.xml` atomically, updates
 `manifest.json.pipeline_state.prep`, and extracts `TRANSLATION_BRIEF.md`.
 
-Reads `config.yaml`'s `prep:` block (34-149) in full.
+Reads `config.yaml`'s `prep:` block (34-220) in full — the block grew considerably
+with the `minimax:`/`glm:` cache-loop tiers alongside the original `deepseek`-path
+knobs.
 
 Series continuity (`src/utility/bible/agent.py::run_write_bible`) is a **separate,
 real, wired module** — merges one volume's populated `context.xml` into
@@ -121,23 +131,25 @@ Note: `src/Deepseek/mcp/runtime.py` carries a stale comment claiming "series bib
 are out of scope for the lightweight client" — that is outdated; `bible_server.py`
 and this module are real and MCP-wired (`write_bible` tool).
 
-## Phase 2 — Translator: 4-Provider Isolated-Route Architecture
+## Phase 2 — Translator: 5-Provider Isolated-Route Architecture
 
-**Exactly three providers are wired today: DeepSeek, Qwen, OpenAI.** A fourth,
-`src/Anthropic/`, exists as an **empty stub directory** — confirmed via `glob` with
-`gitignore=false, hidden=true` returning zero files, and `grep` for `"Anthropic"`
-across `scripts/mtl.py` and `src/Deepseek/translator/provider.py` returning zero
-matches. It is not in `config.yaml`'s provider enum, not in any dispatch `elif`
-branch, not referenced by the TypeScript TUI. Treat it as **planned, not
-implemented** — see "Adding the 4th Provider" under Maintenance Recipes.
+**Five providers are wired today: DeepSeek, Qwen, OpenAI, Anthropic, GLM.** All five
+are real, dispatched packages — confirmed directly against the module contents
+(`src/Anthropic/` carries `agent.py, batch.py, client.py, config.py, context.py,
+conversation.py, errors.py, optimization.py, prompt_loader.py, response.py,
+prompts/`; `src/GLM/` carries the same isolated-route shape minus `batch.py`/
+`response.py`) and against both dispatch sites below. There is no empty-stub
+provider directory in this codebase as of this revision.
 
 ### Dispatch
 
 Single source of truth: `src/Deepseek/translator/provider.py::get_translator_class()`
-/ `get_volume_translator()`, and `scripts/mtl.py::_resolve_translate_volume()`
-(`mtl.py:70-81`). Both read `config.yaml`'s `translation.provider` (line 160,
-`deepseek | qwen | openai`) and dispatch via a hardcoded 3-branch `if/elif`; anything
-else raises `ValueError`.
+/ `get_volume_translator()` (5 branches each: `qwen`, `openai`, `anthropic`, `glm`,
+`deepseek`, in that literal order, `provider.py:10-29`), and
+`scripts/mtl.py::_resolve_translate_volume()` (`mtl.py:75-83`, same 5 branches). Both
+read `config.yaml`'s `translation.provider` (line 229, enum
+`deepseek | qwen | openai | anthropic | glm`); an unrecognized value raises
+`ValueError` naming all five.
 
 ### Isolated-Route Convention
 
@@ -157,7 +169,8 @@ rationale and a step-by-step guide to adding/debugging a route).
 | DeepSeek | `src/Deepseek/translator/` | `deepseek-v4-pro` | `thinking.budget_tokens` + DRDI (prose-injected CoT scaffolding — no native effort knob) | `deepseek_optimization.py` (DRDI/DOVB/CCT), `thinking_density.py` (density-map telemetry) |
 | Qwen | `src/Qwen/` | `qwen3.8-max` | Native hybrid thinking | `safety_fallback.py` (moderation-refusal → DeepSeek inheritance) |
 | OpenAI | `src/OpenAI/` | `gpt-5.6-luna` | `reasoning.summary` (opt-in, model-generated paraphrase — **not** raw CoT; requires org verification + model-tier support, neither detectable from this codebase) | `response.py` (lossless Responses-payload decoder) |
-| Anthropic | `src/Anthropic/` | — | — | **Empty stub. Not implemented.** |
+| Anthropic | `src/Anthropic/` | `claude-sonnet-5` (`claude-opus-5`/`claude-fable-5` also selectable) | Adaptive thinking (`thinking.enabled`), 128K max output uniform across all three models | `batch.py` (extra module no other route has), `response.py` (Messages-payload decoder) |
+| GLM | `src/GLM/` | `glm-5.3-flash` (`glm-5.3` for the flagship tier) | Native thinking with `reasoning_effort` (`low`/`high`/`max`), implicit prefix caching, cannot be fully disabled | GLM-owned prompt, context, conversation, and moderation handling |
 
 Shared infrastructure every provider's `agent.py` imports from `src/Deepseek/`
 (despite the package name, these are cross-provider, not DeepSeek-specific):
@@ -166,12 +179,17 @@ the normalized contract every client returns), `common/token_telemetry.py`
 (pricing table + `log_call()` → `WORK/<vol>/LOG/token_log_*.md`),
 `common/atomic_io.py` (`atomic_write_text`/`atomic_write_json`, Windows-lock-retry
 safe writes), `translator/thinking_output.py` (`split_thinking_from_output`,
-`merge_thinking_log` — shared by all three real routes),
+`merge_thinking_log` — shared by all five routes, confirmed via direct import in
+`src/Anthropic/agent.py:39` and `src/GLM/agent.py:17`),
 `translator/thinking_density.py` (`build_density_report` — shared density-map
 renderer for `THINKING/density_map.html`), `translator/dry_run.py`
-(`write_dry_run_prompt` — shared dry-run payload writer for all three routes).
+(`write_dry_run_prompt` — shared dry-run payload writer for all five routes).
 
-Reads `config.yaml`'s `translation:` block (152-599) — see Config Reference.
+Provider-specific prompt and context assembly remains isolated: `src/GLM/context.py`
+owns its parser implementations rather than re-exporting `src/Qwen/context.py`, so
+future Qwen parser changes cannot silently alter GLM behavior.
+
+Reads `config.yaml`'s `translation:` block (221-855) — see Config Reference.
 
 ## Phase QC — Filesystem-Only Gate (`src/utility/qc/agent.py`)
 
@@ -245,7 +263,7 @@ Verified end-to-end this session: a real production EPUB rendered through
 `export_xtc()` with this exact wiring produced a genuine 1395-page, 67 MB `.xtc`
 container with a valid CrossPoint header.
 
-Reads `config.yaml`'s `builder:` block (602-664) — see Config Reference.
+Reads `config.yaml`'s `builder:` block (856-919) — see Config Reference.
 
 ## Entry Points
 
@@ -264,9 +282,28 @@ Reads `config.yaml`'s `builder:` block (602-664) — see Config Reference.
 | `list` | Iterates `WORK_DIR` subdirectories directly |
 | `status <volume_id>` | Reads `manifest.json` directly |
 
-`mtl.bat`/`mtl.sh` auto-detect a venv, check core imports
+`mtl.bat`/`mtl.sh` resolve the runtime interpreter, check core imports
 (`anthropic, yaml, dotenv, lxml, bs4, PIL, tiktoken`), auto-install
 `requirements.txt` if missing, then pass arguments through raw.
+
+**Interpreter policy.** The runtime uses the machine's **system Python** (3.14 on
+this machine), where the pipeline's dependencies are installed. The project
+`.venv/` is **development and testing only** — it exists so `pytest` can run
+against a pinned environment, and no runtime path may use it. All three
+resolution sites (`mtl.bat`, `mtl.sh`, `ts/src/core/mtls.ts::pythonCommand`)
+deliberately carry **no project-venv probe**; each honours the
+`LLM_TRANSLATOR_PYTHON` environment variable first (full path to an interpreter)
+and otherwise falls back to `python` on Windows / `python3` elsewhere. Do not
+re-add a venv probe: the launchers auto-`pip install` into whatever interpreter
+they resolve, so a probe would quietly install the pipeline's dependencies into
+the test environment and leave the two disagreeing about which interpreter runs
+a phase.
+
+Tests run through the venv explicitly: `.venv/Scripts/python.exe -m pytest tests/`.
+Note that `tmp_path`-based tests can hit a `PermissionError [WinError 5]` on the
+stale `%LOCALAPPDATA%\Temp\pytest-of-<user>` directory; pass
+`--basetemp=<clean dir>` to sidestep it. With a clean basetemp the full suite is
+50 passed / 0 failed.
 
 ### MCP Server (`src/Deepseek/mcp/`)
 
@@ -280,7 +317,7 @@ Reads `config.yaml`'s `builder:` block (602-664) — see Config Reference.
 MCP server builds. `mcp_config.py::redact_config()` strips API keys/tokens/secrets
 before any config is echoed back to a client.
 
-### TypeScript TUI (`mtls-menu-ts/`, launched via `mtl-ts.bat`/`mtl-ts.sh`)
+### TypeScript TUI (`ts/`, launched via `mtl-ts.bat`/`mtl-ts.sh`)
 
 Standalone Ink (React-for-terminals) console — **pure client, zero pipeline logic
 of its own** (`core/mtls.ts` comment: "Python and MCP remain authoritative"). Every
@@ -292,9 +329,24 @@ operator-only UI metadata (`core/capabilities.ts`), or (c) local filesystem read
 for dashboard/volumes/diagnostics views. `core/configSchema.ts` mirrors ~90
 editable `config.yaml` leaves; `core/configFile.ts` rewrites exactly one line in
 place per edit, preserving indentation/comments. Run via `mtl-ts.bat` (auto
-`npm install` + `npm start`) or manually from `mtls-menu-ts/`.
+`npm install` + `npm start`) or manually from `ts/`.
 
-## Config Reference (`config.yaml`, 779 lines)
+**Visual layer.** `ui/components.tsx` centralizes status/severity color as a `Tone`
+lookup (`good`/`warn`/`bad`/`neutral`/`plain`/`active` → `Color`, `components.tsx:12-23`)
+rather than each panel choosing its own red/green/yellow ternary; `ui/table.ts`
+right/left-pads list columns to actual terminal display width via `string-width`
+(`table.ts:18`), not JS string length, because volume titles are Japanese and a
+naive `.padEnd()` misaligns on the first full-width character. `ui/Splash.tsx` is a
+one-time launch screen (`ink-big-text` + `ink-gradient`, auto-dismissing after ~1s
+or on the first keypress, gated in `App.tsx` by `splashDone`, `App.tsx:56,150,254`)
+— it costs nothing on any subsequent frame; the persistent `Header` carries no
+gradient or banner. `core/syncStdout.ts::synchronizedOutputStdout` (`syncStdout.ts:13`)
+wraps the stdout passed into Ink's `render()` (`app/index.tsx`) with DEC private
+mode 2026 ("Synchronized Output") markers around each frame write, so a supporting
+terminal paints Ink's erase-then-redraw as one atomic frame instead of two visible
+steps; it no-ops safely on a non-TTY stream or an unsupporting terminal.
+
+## Config Reference (`config.yaml`, 1032 lines)
 
 ### Top-Level Keys
 
@@ -302,43 +354,51 @@ place per edit, preserving indentation/comments. Run via `mtl-ts.bat` (auto
 |---|---|---|
 | `project` | 7-10 | target_language/name/version identity |
 | `paths` | 13-18 | input/work/output/prompt/log directory roots |
-| `phase_routing` | 20-27 (commented out) | Optional override for `mcp/harness.py`'s phase→MCP-tool routing (has built-in defaults) |
-| `prep` | 34-149 | context.xml builder config — unified/parallel/multi_turn paths (see Prep section) |
-| `translation` | 152-599 | Phase 2 — provider route + all 3 provider menus (see below) |
-| `builder` | 602-664 | EPUB assembly — fonts/device_profile/images/xtc (see Phase 4 section) |
-| `logging` | 666-670 | level/file/cost_tracking |
-| `mcp_harness` | 675-698 | Persona injection + per-phase MCP subagent enable/model knobs |
-| `qc` | 710-779 (EOF) | QC-agent-family model/thinking/per-agent budget overrides, golden-sample calibration |
+| `phase_routing` | ~20-27 (commented out) | Optional override for `mcp/harness.py`'s phase→MCP-tool routing (has built-in defaults) |
+| `prep` | 34-220 | context.xml builder config — `provider` selector (deepseek/minimax/glm) + all three tiers (see Prep section) |
+| `translation` | 221-855 | Phase 2 — provider route + all 5 provider menus (see below) |
+| `builder` | 856-919 | EPUB assembly — fonts/device_profile/images/xtc (see Phase 4 section) |
+| `logging` | 920-928 | level/file/cost_tracking |
+| `mcp_harness` | 929-963 | Persona injection + per-phase MCP subagent enable/model knobs |
+| `qc` | 964-1032 (EOF) | QC-agent-family model/thinking/per-agent budget overrides, golden-sample calibration |
 
 ### `translation:` Second-Level Keys
 
 | Key | Lines | Purpose |
 |---|---|---|
-| `provider` | 160 | Route selector: `deepseek \| qwen \| openai` |
-| `master_prompt` | 170 | DeepSeek-route-**only** prompt path (ignored by qwen/openai) |
-| `master_prompt_v2` | 175 | V2 literacy-anchor variant, auto-selected for sequel volumes |
-| `thinking_log` | 185-201 | `enabled`/`output_dir`/`density_map:` — shared across all 3 real routes |
-| `deepseek` | 203-424 | DeepSeek route menu — model/endpoint/generation/thinking/caching/conversation |
-| `qwen` | 425-491 | Qwen route menu — mirrors deepseek's structure |
-| `openai` | 492-589 | OpenAI Responses route menu — model/reasoning(effort/mode/context/summary)/generation/caching |
-| `safety_fallback` | 590-599 | Qwen→DeepSeek moderation-refusal inheritance fallback (`fallback_provider: deepseek` — only wired target) |
+| `provider` | 229 | Route selector: `deepseek \| qwen \| openai \| anthropic \| glm` |
+| `master_prompt` | 239 | DeepSeek-route-**only** prompt path (ignored by the other 4 routes) |
+| `master_prompt_v2` | 244 | V2 literacy-anchor variant, auto-selected for sequel volumes |
+| `thinking_log` | 254-~271 | `enabled`/`output_dir`/density-map — shared across all real routes |
+| `deepseek` | 272-493 | DeepSeek route menu — model/endpoint/generation/thinking/caching/conversation |
+| `qwen` | 494-561 | Qwen route menu — mirrors deepseek's structure |
+| `glm` | 562-624 | GLM route menu — model/endpoint/generation/`reasoning.effort`/master_prompt |
+| `openai` | 625-723 | OpenAI Responses route menu — model/reasoning(effort/mode/context/summary)/generation/caching |
+| `anthropic` | 724-832 | Anthropic Messages route menu — model/endpoint/`anthropic_version`/adaptive-thinking/generation |
+| `safety_fallback` | 833-855 | Any non-DeepSeek provider → DeepSeek moderation-refusal inheritance fallback (`fallback_provider: deepseek` — only wired target) |
 
 ## Testing
 
-Conventions shared by `tests/test_openai_provider.py` (18 tests) and
-`tests/test_qwen_provider.py` (14 tests): every LLM client instantiated with
+Conventions shared by `tests/test_openai_provider.py` (18 tests), `tests/test_qwen_provider.py`
+(14 tests), and `tests/test_glm_provider.py`: every LLM client instantiated with
 `dry_run=True` (credential-free, no network call), assertions driven by the real
-config accessor (`get_openai_config()`/`get_qwen_config()`) rather than hardcoded
-model strings — model names "roll" — and `tmp_path` fixtures for anything touching
-a conversation ledger, `THINKING/` log, or `context.xml` file. No `pytest.ini`/
-`conftest.py` exists; config accessors re-read `config.yaml` on every call with no
-caching, so there's no cross-test contamination motivating process isolation.
+config accessor (`get_openai_config()`/`get_qwen_config()`/GLM's equivalent) rather
+than hardcoded model strings — model names "roll" — and `tmp_path` fixtures for
+anything touching a conversation ledger, `THINKING/` log, or `context.xml` file.
+`tests/test_deepseek_pricing.py` is narrower — it exercises `token_telemetry.py`'s
+peak/off-peak DeepSeek rate tables, not the `DeepSeekTranslator` route itself. No
+`pytest.ini`/`conftest.py` exists; config accessors re-read `config.yaml` on every
+call with no caching, so there's no cross-test contamination motivating process
+isolation.
 
-**Known gap**: no `tests/test_deepseek_provider.py`. DeepSeek's route is exercised
-only indirectly — via shared `llm_types`/`token_telemetry` imports, one provider-
-selection assertion in the Qwen test file, and one dry-run-manifest-bypass test
-driven side-by-side with Qwen's. `DeepSeekClient`, `DeepSeekConversationManager`,
-and the DRDI/DOVB optimization modules have **zero direct unit coverage**.
+**Known gaps**: no `tests/test_deepseek_provider.py` and no
+`tests/test_anthropic_provider.py`. DeepSeek's route is exercised only indirectly —
+via shared `llm_types`/`token_telemetry` imports, one provider-selection assertion in
+the Qwen test file, and one dry-run-manifest-bypass test driven side-by-side with
+Qwen's; `DeepSeekClient`, `DeepSeekConversationManager`, and the DRDI/DOVB
+optimization modules have **zero direct unit coverage**. Anthropic has no dedicated
+test file at all despite being a fully wired route — `AnthropicTranslator`, its
+`batch.py`, and its adaptive-thinking config path are untested.
 
 Verifying a fix in this repo: run the affected test file's functions in a genuinely
 fresh Python process (not a long-lived interactive kernel — `get_config_section()`
@@ -347,8 +407,7 @@ do; see `mtls-llm-provider-client` skill for the specific gotcha).
 
 ## Known Gaps & Dead Code (for maintainer awareness)
 
-- **`src/Anthropic/`** — empty stub, 4th provider planned but not implemented.
-- **No `tests/test_deepseek_provider.py`** — see Testing above.
+- **No `tests/test_deepseek_provider.py` or `tests/test_anthropic_provider.py`** — see Testing above.
 - **`css_processor.py`/`font_processor.py`** (`src/builder/`) — exist but have no
   callers anywhere in the repo per `config.py`'s own docstring caveat. `DEFAULT_CSS`
   in `agent.py` is the live stylesheet.
@@ -363,23 +422,31 @@ do; see `mtls-llm-provider-client` skill for the specific gotcha).
 
 ## Maintenance Recipes
 
-### Adding the 4th Provider (Anthropic, or any new route)
+### Adding a 6th Provider (or any new route)
 
-1. Scaffold `src/Anthropic/` mirroring the OpenAI package exactly: `client.py`,
-   `config.py`, `agent.py` (`AnthropicTranslator` class + `translate_volume` entry
-   point), `conversation.py`, `errors.py`, `context.py`, `optimization.py`,
-   `prompt_loader.py`, `prompts/`.
-2. Add a `translation.anthropic:` block to `config.yaml` mirroring `openai:`'s shape.
-3. Add the third dispatch branch in **both** `scripts/mtl.py::_resolve_translate_volume()`
-   (`mtl.py:70-81`) and `src/Deepseek/translator/provider.py::get_translator_class()`/
-   `get_volume_translator()` — both currently hardcode exactly 3 branches.
-4. Update `config.yaml:160`'s comment and the `ValueError` message in both dispatch
-   sites to include `anthropic` in the enum.
-5. Add `tests/test_anthropic_provider.py` mirroring `test_openai_provider.py`'s
-   structure (dry_run payload tests, config-contract enum tests, conversation
-   replay tests using the *real* production call shape from `agent.py`).
+Five routes exist today (DeepSeek, Qwen, OpenAI, Anthropic, GLM); this recipe is the
+pattern all five followed, generalized for the next one:
+
+1. Scaffold `src/<Provider>/` mirroring an existing package of the same wire family
+   (OpenAI Responses-style, or Anthropic Messages-style, or GLM's plain Chat
+   Completions) exactly: `client.py`, `config.py`, `agent.py`
+   (`<Provider>Translator` class + `translate_volume` entry point), `conversation.py`,
+   `errors.py`, `context.py`, `optimization.py`, `prompt_loader.py`, `prompts/`.
+2. Add a `translation.<provider>:` block to `config.yaml` mirroring the closest
+   existing route's shape.
+3. Add the new dispatch branch in **both** `scripts/mtl.py::_resolve_translate_volume()`
+   (`mtl.py:75-83`) and `src/Deepseek/translator/provider.py::get_translator_class()`/
+   `get_volume_translator()` (`provider.py:10-29`,`33-57`) — both currently hardcode
+   exactly 5 branches each.
+4. Update `config.yaml:229`'s comment and the `ValueError` message in both dispatch
+   sites to include the new provider in the enum.
+5. Add `tests/test_<provider>_provider.py` mirroring `test_openai_provider.py`'s or
+   `test_glm_provider.py`'s structure (dry_run payload tests, config-contract enum
+   tests, conversation replay tests using the *real* production call shape from
+   `agent.py`) — note that even wired routes here can end up without one (Anthropic
+   currently has none; see Known Gaps).
 6. If exposing via the TypeScript TUI, add a field spec block to
-   `mtls-menu-ts/src/core/configSchema.ts` and a preflight import/API-key check to
+   `ts/src/core/configSchema.ts` and a preflight import/API-key check to
    `preflight.ts`.
 7. Read the `mtls-llm-provider-client` managed skill first — it documents the
    specific, real failure classes hit building the OpenAI route (SDK/API field
@@ -392,7 +459,7 @@ do; see `mtls-llm-provider-client` skill for the specific gotcha).
 Add an entry to `PROFILES` in `src/builder/device_profiles.py` (screen dims,
 `image_box`/`cover_box`, `jpeg_quality`, `grayscale`, `stylesheet`, `budgets`). No
 other file needs touching — `resolve_profile()`, the CLI's `--profile` choices
-(`PROFILE_NAMES`), and `mtls-menu-ts`'s profile picker all read the registry
+(`PROFILE_NAMES`), and `ts`'s profile picker all read the registry
 dynamically.
 
 ### Debugging a Translation Failure
