@@ -9,6 +9,8 @@ _design/
 _docs/
 *.tmp.md
 tests/
+docs/
+dsh/
 
 # ── Agent/Skill Authoring (local only — never pushed) ──────────────────────
 # Vendored third-party API docs, agent/skill definitions, and QC calibration
@@ -17,7 +19,7 @@ tests/
 .agents/
 .codex/
 .grok/
-dsh/
+.dsh/
 
 # ── Foreign nested repositories (never vendor another project's history) ───
 epub-to-xtc-converter/
