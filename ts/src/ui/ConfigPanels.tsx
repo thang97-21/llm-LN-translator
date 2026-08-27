@@ -1,12 +1,13 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import type { ConfigLine } from '../core/types.js';
 import type { ConfigFieldState } from '../core/configFile.js';
 import { activeProvider, buildConfigRenderLines, formatConfigValue } from '../core/configSchema.js';
+import { deepseekPricingStatusAt, usdPerMillion } from '../core/deepseekPricing.js';
 import type { ConfigEditState, ConfigStatus } from './workspaceMachine.js';
 
 export function RuntimeConfigPanel({ lines, offset, rows }: { lines: readonly ConfigLine[]; offset: number; rows: number }) {
-  const viewport = Math.max(6, rows - 8);
+  const viewport = Math.max(3, rows - 14);
   const start = Math.max(0, Math.min(Math.max(0, lines.length - viewport), offset));
   const visible = lines.slice(start, start + viewport);
   const sectionCount = lines.filter((line) => line.kind === 'group').length;
@@ -22,6 +23,27 @@ export function RuntimeConfigPanel({ lines, offset, rows }: { lines: readonly Co
       const valueColor = line.boolState === 'on' ? 'green' : line.boolState === 'off' ? 'red' : 'yellow';
       return <Text key={key} wrap="truncate-end">  {indent}{line.label}: <Text color={valueColor}>{line.value}</Text></Text>;
     })}
+  </Box>;
+}
+
+// This is a display clock, not an operator setting. DeepSeek defines windows
+// in UTC; the status helper converts the computer's local time before the
+// price period is chosen, then refreshes often enough to catch a boundary.
+export function DeepSeekPricingPanel() {
+  const [clock, setClock] = useState(() => new Date());
+  useEffect(() => {
+    const interval = setInterval(() => setClock(new Date()), 30_000);
+    return () => clearInterval(interval);
+  }, []);
+  const status = deepseekPricingStatusAt(clock);
+  const flash = status.ratesByModel['deepseek-v4-flash'];
+  const pro = status.ratesByModel['deepseek-v4-pro'];
+  return <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={status.period === 'peak' ? 'yellow' : 'green'} paddingX={1}>
+    <Text bold>DeepSeek V4 tariff · <Text color={status.period === 'peak' ? 'yellow' : 'green'}>{status.label}</Text></Text>
+    <Text color="gray">  Computer local: {status.localTime} · DeepSeek schedule: {status.utcTime}</Text>
+    <Text>  {status.modelDisplayNames['deepseek-v4-flash']} / 1M: cache {usdPerMillion(flash!.cache_hit)} · input {usdPerMillion(flash!.cache_miss)} · output {usdPerMillion(flash!.output)}</Text>
+    <Text>  {status.modelDisplayNames['deepseek-v4-pro']} / 1M: cache {usdPerMillion(pro!.cache_hit)} · input {usdPerMillion(pro!.cache_miss)} · output {usdPerMillion(pro!.output)}</Text>
+    <Text color="gray">  Peak windows: 01:00–04:00 and 06:00–10:00 UTC · source: DeepSeek pricing docs</Text>
   </Box>;
 }
 

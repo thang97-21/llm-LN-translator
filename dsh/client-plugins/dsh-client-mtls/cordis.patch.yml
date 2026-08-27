@@ -1,0 +1,7 @@
+# dsh-client-mtls bundle patch: seat the plugin as a loader entry. The
+# client-modules node half only qualifies a package into the boot manifest
+# when it is a live loader entry, so this insert is what makes the browser
+# half visible at all.
+- insert:
+    - id: mtls-client-harness
+      name: dsh-client-mtls

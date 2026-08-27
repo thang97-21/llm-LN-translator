@@ -1,0 +1,247 @@
+# The `mtls` agent preset — MTLS pipeline desk.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS IS A COPY OF THE `mirei` PRESET (itself the shipped `standard` plus the
+# dynamic-register persona row and tuned rows) WITH THREE CHANGES:
+#   1. the `persona` row now points at `./lib/mtls-register/index.js` — a
+#      dependency-free register that reads the MERGED MTLS persona
+#      (`.dsh/persona/mirei-mtls.md` in the workspace) live at each assembly,
+#      with a neutral branch for delegated subagents;
+#   2. a DISABLED `dsh-mcp-client` row is staged for Phase 5 (bridge to
+#      `python src/mcp/server.py` — the MTLS 6-tool MCP stdio server);
+#   3. comments adjusted for the MTLS desk.
+#
+# When DSH updates, diff this file against the shipped `standard` composition
+# and carry the changes across; the only things that must NOT come back are the
+# stock persona row and the two tuned rows' stock values.
+#
+# WHY THE PERSONA ROW IS A RELATIVE PATH: a preset is stored
+# profile-independently under `$DSH_HOME/.agent-presets`, so its module
+# references must be profile-independent too. A `.`-prefixed specifier resolves
+# against THIS FILE's directory instead of the booted profile — stable
+# whichever profile is running. `mtls-register` imports only `node:` builtins,
+# so loading it by path costs it no transitive resolution.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
+# standing scope; every session naming it joins by scope parentage, so the
+# tools and prompt sections registered here cover each joined agent while a
+# session's own state stays keyed per Session/Agent inside the plugins. The
+# host composition keeps everything a preset must not own: the registries
+# themselves, the sandbox and approval stack, persistence, and the model route.
+#
+# A service row here MUST sit inside a group carrying an `isolate` realm.
+# Without one it publishes into the root realm, where it is process-global.
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+# The MTLS persona: a dynamic register reading the merged register file
+# (Standard Mirei + MTLS pipeline doctrine) from the workspace. Delegated
+# subagents get a neutral executor statement instead of the register.
+- id: persona
+  name: ./lib/mtls-register/index.js
+  config:
+    personaPath: D:/MTLS/.dsh/persona/mirei-mtls.md
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+# `shell-env` stays in the HOST composition; both shell tools consume the
+# host registry from here; their executors are host-plane too.
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+# The skill REGISTRY lives in the host composition; these rows register into
+# THIS preset's layer of it. The merged catalog also carries the deployment's
+# global registrations.
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+
+# ── plan mode ───────────────────────────────────────────────────────────────
+
+- id: planning
+  name: cordis:group
+  group: true
+  isolate:
+    planMode: true
+  config:
+    - id: plan-mode
+      name: '@deepseek-ai/dsh-plan-mode'
+      config:
+        section: |
+              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+              Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+              Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+              Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+# ── compaction ──────────────────────────────────────────────────────────────
+
+# `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner
+# must share this realm rather than sit outside it. MTLS QC cites long evidence
+# spans, so pruning starts late and keeps the decisive head (mirei tuning).
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 16384
+        headChars: 8192
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+
+# The `subagents` registry and its spawn/fork backends live in the HOST
+# composition; this preset contributes the delegation TOOLS that resolve it.
+# `workflows` is different — nothing outside an agent reads it — so every row
+# that reaches it shares one entry-local realm here.
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        backgroundMode: continuable
+
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: continuable
+
+    - id: tool-subagent-codex
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: codex
+        toolName: subagent_codex
+        enableRunInBackground: false
+        maxDepth: provider-managed
+
+    - id: tool-subagent-claude-code
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: claude-code
+        toolName: subagent_claude_code
+        enableRunInBackground: false
+        maxDepth: provider-managed
+
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+
+    - id: tool-ralph
+      name: '@deepseek-ai/dsh-tool-ralph'
+      config:
+        subagentProvider: spawn
+        maxRounds: 16
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+# The `web` service and its search provider stay in the host composition; only
+# the model-facing tool is per-session. Fetch is ON — blk-17's Bookwalker
+# grounding and QC calibration need both halves.
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+
+- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    mode: both
+
+# ── MCP bridge (Phase 5 — DISABLED, wiring verified) ───────────────────────
+# Bridge to the MTLS 6-server / 20-tool MCP stdio server
+# (`src/Deepseek/mcp/server.py`, stdio default — verified: server constructs
+# and lists 20 tools under the repo venv). Invocation uses `-c` with a
+# sys.path insert because the module imports `src.Deepseek.*` and must not
+# depend on the client's working directory. Remove `disabled` to go live;
+# a session restart is required for the row to load.
+- id: mcp
+  name: '@deepseek-ai/dsh-mcp-client'
+  disabled: true
+  config:
+    name: mtls-mcp
+    transport: stdio
+    command: python
+    args:
+      - -c
+      - "import sys; sys.path.insert(0, 'D:/MTLS'); from src.Deepseek.mcp.server import main; main()"

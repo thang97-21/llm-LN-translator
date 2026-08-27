@@ -17,6 +17,7 @@ tests/
 .agents/
 .codex/
 .grok/
+dsh/
 
 # ── Foreign nested repositories (never vendor another project's history) ───
 epub-to-xtc-converter/

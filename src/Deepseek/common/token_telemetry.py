@@ -10,8 +10,11 @@ Three responsibilities live here, and nowhere else:
    constants. That file now delegates estimate_usage_cost_usd() here instead
    of keeping its own copy — one pricing table, not two that can silently
    drift apart after the next DeepSeek price change.
-   Source: https://api-docs.deepseek.com/quick_start/pricing (verified live
-   2026-07-27 — permanent 75%-off pricing effective 2026-05-31).
+   DeepSeek's own rates are peak/off-peak clock-sensitive (see
+   deepseek_pricing.json, deepseek_pricing_status()) rather than a single
+   flat number — the JSON file is shared with the operator console so the
+   visible tariff and the estimator can't wander into separate realities
+   after the next price revision.
 
 2. **Token counting** (count_tokens) — local only, no network, no auth.
    Briefly routed through DeepSeek's official HuggingFace tokenizers
@@ -64,13 +67,26 @@ from src.Deepseek.common.config import WORK_DIR
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════════════
-# Pricing — USD per 1M tokens. Re-verify against the pricing page before
-# trusting this after any real gap in time; DeepSeek's rates move.
+# Pricing — USD per 1M tokens. DeepSeek's own tariff is peak/off-peak
+# clock-sensitive and lives in the JSON file below (shared with the operator
+# console) rather than as a flat module constant.
 # ══════════════════════════════════════════════════════════════════════════
 
+_DEEPSEEK_PRICING_PATH = Path(__file__).with_name("deepseek_pricing.json")
+_DEEPSEEK_PRICING_DOCUMENT = json.loads(_DEEPSEEK_PRICING_PATH.read_text(encoding="utf-8"))
+DEEPSEEK_PRICING_SOURCE = str(_DEEPSEEK_PRICING_DOCUMENT["source"])
+DEEPSEEK_PEAK_UTC_WINDOWS = tuple(
+    (int(window[0]), int(window[1])) for window in _DEEPSEEK_PRICING_DOCUMENT["peak_utc_windows"]
+)
+DEEPSEEK_PRICING_PER_MTOK: Dict[str, Dict[str, Dict[str, float]]] = {
+    str(model): {
+        str(period): {str(metric): float(rate) for metric, rate in rates.items()}
+        for period, rates in periods.items()
+    }
+    for model, periods in _DEEPSEEK_PRICING_DOCUMENT["models"].items()
+}
+
 PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
-    "deepseek-v4-pro": {"cache_hit": 0.003625, "cache_miss": 0.435, "output": 0.87},
-    "deepseek-v4-flash": {"cache_hit": 0.0028, "cache_miss": 0.14, "output": 0.28},
     # QwenCloud text-only pricing (USD / 1M tokens), verified 2026-08-06 against
     # https://www.qwencloud.com/models/{qwen3.8-max,qwen3.7-plus,qwen3.7-flash}.
     # cache_hit = implicit (automatic) cache read; cache_write = explicit cache
@@ -81,10 +97,13 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
     "qwen3.8-max":  {"cache_hit": 0.25, "cache_miss": 2.0, "cache_write": 2.5,  "output": 6.0},
     "qwen3.7-plus": {"cache_hit": 0.08, "cache_miss": 0.4, "cache_write": 0.5,  "output": 1.6},
     "qwen3.7-flash":{"cache_hit": 0.006,"cache_miss": 0.03,"cache_write": 0.038,"output": 0.13},
-    # OpenAI GPT-5.6 Luna text pricing (USD / 1M tokens), verified 2026-08-10
-    # against https://developers.openai.com/api/docs/models/gpt-5.6-luna.
-    # The long-context tier above 272K input tokens is selected below from the
-    # actual request size rather than exposed as an operator-controlled knob.
+    # OpenAI GPT-5.6 family text pricing (USD / 1M tokens), verified 2026-08-17
+    # against https://developers.openai.com/api/docs/pricing. Sol/Terra/Luna
+    # are the three snapshot tiers; the long-context surcharge above 272K
+    # input tokens is applied in _rates_for_model from the actual request
+    # size rather than exposed as an operator-controlled knob.
+    "gpt-5.6-sol":  {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25, "output": 30.00},
+    "gpt-5.6-terra":{"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50, "output": 12.00},
     "gpt-5.6-luna": {"cache_hit": 0.02, "cache_miss": 0.20, "cache_write": 0.25, "output": 1.20},
     # Anthropic Claude-5 family pricing (USD / 1M tokens), verified 2026-08-20
     # against https://platform.claude.com/docs/en/about-claude/models/overview.
@@ -99,12 +118,64 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
 }
 
 
-def _rates_for_model(model_name: str, *, input_tokens: int = 0) -> Dict[str, float]:
+def deepseek_pricing_status(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Return the current DeepSeek tariff using the host computer's local clock.
+
+    DeepSeek publishes its schedule in UTC. ``datetime.now().astimezone()``
+    obtains the machine's local timezone (including daylight-saving rules), then
+    this function converts that instant to UTC before choosing the tariff. An
+    aware ``now`` is accepted for deterministic tests and audit replay; a naïve
+    value is interpreted as local machine time, matching the normal path.
+    """
+    local_now = now if now is not None else datetime.now().astimezone()
+    if local_now.tzinfo is None:
+        local_now = local_now.astimezone()
+    utc_now = local_now.astimezone(timezone.utc)
+    is_peak = any(start <= utc_now.hour < end for start, end in DEEPSEEK_PEAK_UTC_WINDOWS)
+    period = "peak" if is_peak else "off_peak"
+    return {
+        "period": period,
+        "label": "Peak" if is_peak else "Off-peak",
+        "local_time": local_now.isoformat(timespec="minutes"),
+        "local_timezone": local_now.tzname() or "local time",
+        "utc_time": utc_now.isoformat(timespec="minutes"),
+        "peak_utc_windows": DEEPSEEK_PEAK_UTC_WINDOWS,
+        "rates_per_mtok": DEEPSEEK_PRICING_PER_MTOK["deepseek-v4-pro"][period],
+        "rates_by_model_per_mtok": {
+            model: periods[period] for model, periods in DEEPSEEK_PRICING_PER_MTOK.items()
+        },
+        "source": DEEPSEEK_PRICING_SOURCE,
+    }
+
+
+def _rates_for_model(
+    model_name: str,
+    *,
+    input_tokens: int = 0,
+    pricing_at: Optional[datetime] = None,
+) -> Dict[str, float]:
     name = str(model_name or "").strip().lower()
     if name.startswith("gpt-5.6"):
+        if name == "gpt-5.6" or name.startswith("gpt-5.6-sol"):
+            model = "gpt-5.6-sol"
+        elif name.startswith("gpt-5.6-terra"):
+            model = "gpt-5.6-terra"
+        elif name.startswith("gpt-5.6-luna"):
+            model = "gpt-5.6-luna"
+        else:
+            # An unrecognized GPT-5.6 snapshot must not inherit Luna's
+            # economy rate. The documented alias is Sol, so that is the
+            # conservative estimate until a newer snapshot has a table entry.
+            model = "gpt-5.6-sol"
+        rates = PRICING_PER_MTOK[model]
         if int(input_tokens) > 272_000:
-            return {"cache_hit": 0.04, "cache_miss": 0.40, "cache_write": 0.50, "output": 1.80}
-        return PRICING_PER_MTOK["gpt-5.6-luna"]
+            return {
+                "cache_hit": rates["cache_hit"] * 2,
+                "cache_miss": rates["cache_miss"] * 2,
+                "cache_write": rates["cache_write"] * 2,
+                "output": rates["output"] * 1.5,
+            }
+        return rates
     if name in PRICING_PER_MTOK:
         return PRICING_PER_MTOK[name]
     if name.startswith("claude-"):
@@ -123,9 +194,8 @@ def _rates_for_model(model_name: str, *, input_tokens: int = 0) -> Dict[str, flo
         # priciest Qwen tier — a cost ledger that guesses low is worse than
         # useless, because nobody audits a number that looks cheap.
         return PRICING_PER_MTOK["qwen3.8-max"]
-    if "flash" in name:
-        return PRICING_PER_MTOK["deepseek-v4-flash"]
-    return PRICING_PER_MTOK["deepseek-v4-pro"]  # default: the pricier tier, never silently undercount
+    model = "deepseek-v4-flash" if "flash" in name else "deepseek-v4-pro"
+    return DEEPSEEK_PRICING_PER_MTOK[model][deepseek_pricing_status(pricing_at)["period"]]
 
 
 def cost_breakdown_usd(
@@ -136,6 +206,7 @@ def cost_breakdown_usd(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     cache_creation_included_in_input: bool = False,
+    pricing_at: Optional[datetime] = None,
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """Full cost breakdown dict — same shape src/translator/deepseek_client.py's
@@ -145,8 +216,14 @@ def cost_breakdown_usd(
     ``cache_creation_included_in_input`` is true for native OpenAI Responses,
     where ``usage.input_tokens`` already contains cache-write tokens. Other
     providers retain the established accounting semantics by default.
+
+    ``pricing_at`` only matters for DeepSeek's clock-sensitive peak/off-peak
+    tariff (see deepseek_pricing_status()); every other provider ignores it.
     """
-    rates = _rates_for_model(model_name, input_tokens=input_tokens)
+    model_name_normalized = str(model_name or "").strip().lower()
+    is_deepseek = not model_name_normalized.startswith(("qwen", "gpt-5.6", "claude-"))
+    rate_status = deepseek_pricing_status(pricing_at) if is_deepseek else None
+    rates = _rates_for_model(model_name, input_tokens=input_tokens, pricing_at=pricing_at)
     uncached_input = max(
         0,
         int(input_tokens)
@@ -172,6 +249,9 @@ def cost_breakdown_usd(
         "output_rate_per_mtok": rates["output"],
         "cache_read_rate_per_mtok": rates["cache_hit"],
         "cache_write_rate_per_mtok": cache_write_rate,
+        "pricing_period": rate_status["period"] if rate_status else None,
+        "pricing_local_time": rate_status["local_time"] if rate_status else None,
+        "pricing_utc_time": rate_status["utc_time"] if rate_status else None,
     }
 
 
@@ -342,16 +422,25 @@ def _build_header(volume_id: str, work_dir: Path, model: str, provider: str = "d
     jp_chars, jp_tokens_est = _measure_jp_source(work_dir, model)
     run_started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     run_stamp = _session_stamp_for_volume(volume_id)
+    normalized_provider = str(provider or "unknown").strip().lower()
+    pricing_line = ""
+    if normalized_provider == "deepseek":
+        rate_status = deepseek_pricing_status()
+        pricing_line = (
+            f"- **DeepSeek tariff at run start:** {rate_status['label']} "
+            f"(computer local {rate_status['local_time']}; UTC {rate_status['utc_time']})\n"
+        )
 
     return (
         f"# Token & Cost Log - {volume_id}\n\n"
-        f"- **Provider:** {str(provider or 'unknown').strip().lower()}\n"
+        f"- **Provider:** {normalized_provider}\n"
         f"- **Run started:** {run_started} (stamp `{run_stamp}`)\n"
         f"- **Title (JP):** {title}\n"
         f"- **Author (JP):** {author}\n"
         f"- **Publisher:** {publisher}\n"
         f"- **JP source size:** {jp_chars:,} characters across JP/*.md\n"
         f"- **Estimated input tokens (whole volume, local tiktoken approximation):** {jp_tokens_est:,}\n\n"
+        f"{pricing_line}"
         "One row per API call made THIS RUN across prep and/or translator — each "
         "invocation of this process gets its own dated log file rather than "
         "appending into (or blending with) an earlier run's; see "

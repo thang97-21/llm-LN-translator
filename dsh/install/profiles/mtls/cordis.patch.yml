@@ -1,0 +1,36 @@
+# Profile patch layer for the `mtls` profile — MTLS pipeline desk.
+#
+# Phase 4 of the MTLS → DSH integration. This profile boots sessions on the
+# `mtls` preset (registered at $DSH_HOME/.agent-presets/mtls), which carries
+# the dynamic register row reading the merged persona from the workspace.
+#
+# Two rows only:
+#
+# Row `agent-presets` names the default preset. `roots` is deliberately
+# absent: the desktop launcher pushes its own agent-presets patch AFTER the
+# profile layer, spreading the composed config and then overwriting `roots`
+# with the shipped preset root — so a root stated here would be discarded.
+# `includeUserRoot` defaults true, which appends $DSH_HOME/.agent-presets as a
+# writable root unconditionally.
+#
+# Row `system-prompt` is @deepseek-ai/dsh-system-prompt — the GLOBAL
+# deployment persona, an inline string registered unconditionally as section
+# `deployment:persona` at order 0. This is belt-and-suspenders only: for
+# agents composed from the `mtls` preset, the preset's own register row
+# shadows this at the same order (scoped sections shadow global ones). It
+# remains the fallback for any agent on this profile whose preset carries no
+# persona row. Patch semantics replace a row's whole `config`
+# (cordis-plugin-include: target[key] = value, no deep merge).
+#
+# The `!!js` scalar is evaluated once, at entry activation. Editing the
+# persona file therefore does not hot-reload on its own; touch this file (or
+# restart) to pick the text up.
+- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+  config:
+    persona: !!js 'process.getBuiltinModule("node:fs").readFileSync("D:/MTLS/.dsh/persona/mirei-mtls.md", "utf8")'
+
+- id: agent-presets
+  name: '@deepseek-ai/dsh-agent-presets'
+  config:
+    default: mtls

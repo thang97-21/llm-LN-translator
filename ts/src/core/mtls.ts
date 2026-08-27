@@ -77,7 +77,11 @@ export function loadRuntimeConfigLines(): ConfigLine[] {
     let sawAny = false;
     const parents: Array<{ indent: number }> = [];
     // Show the active provider menu, not a stale amalgam of every route.
-    const providerMatch = /^\s*provider:\s*(deepseek|qwen|openai|anthropic)\s*(?:#.*)?$/m.exec(lines.join('\n'));
+    // Scoped to the translation block: prep.provider (the prep-model route)
+    // sits at the same indent earlier in the file and would shadow this match.
+    const joined = lines.join('\n');
+    const translationStart = joined.indexOf('\ntranslation:');
+    const providerMatch = /^\s*provider:\s*(deepseek|qwen|openai|anthropic)\s*(?:#.*)?$/m.exec(translationStart >= 0 ? joined.slice(translationStart) : joined);
     const menuKey = `${providerMatch?.[1] ?? 'deepseek'}:`;
     for (const rawLine of lines) {
       const trimmed = rawLine.trim();
@@ -170,8 +174,8 @@ function humanizeConfigValue(key: string, value: string): { text: string; boolSt
   if (value === 'false') return { text: 'Disabled', boolState: 'off' };
   if (value === 'on') return { text: 'On', boolState: 'on' };
   if (value === 'off') return { text: 'Off', boolState: 'off' };
-  if (value === 'deepseek-v4-pro') return { text: 'DeepSeek V4 Pro', boolState: null };
-  if (value === 'deepseek-v4-flash') return { text: 'DeepSeek V4 Flash', boolState: null };
+  if (value === 'deepseek-v4-pro') return { text: 'DeepSeek-V4-Pro-0813', boolState: null };
+  if (value === 'deepseek-v4-flash') return { text: 'DeepSeek-V4-Flash-0731', boolState: null };
   if (value === 'gpt-5.6-luna') return { text: 'GPT-5.6 Luna', boolState: null };
   if (value === 'claude-sonnet-5') return { text: 'Claude Sonnet 5', boolState: null };
   if (value === 'claude-opus-5') return { text: 'Claude Opus 5', boolState: null };

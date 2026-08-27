@@ -20,7 +20,11 @@ export type PreflightRequirements = {
 };
 
 export function resolvePreflightRequirements(configText: string): PreflightRequirements {
-  const provider = (/^\s{2}provider:\s*(deepseek|qwen|openai|anthropic)\s*(?:#.*)?$/m.exec(configText)?.[1] ?? 'deepseek').toLowerCase();
+  // Scope to the translation block: prep.provider (the prep-model route)
+  // sits at the same 2-space indent earlier in the file and would otherwise
+  // shadow this match, flipping the detected provider and API key.
+  const translationSection = configText.slice(Math.max(0, configText.indexOf('\ntranslation:')));
+  const provider = (/^\s{2}provider:\s*(deepseek|qwen|openai|anthropic)\s*(?:#.*)?$/m.exec(translationSection)?.[1] ?? 'deepseek').toLowerCase();
   const apiKeyEnv = providerApiKeyEnv(configText, provider) ?? DEFAULT_API_KEY_ENVS[provider] ?? 'DEEPSEEK_API_KEY';
   return {
     provider,

@@ -7,6 +7,7 @@ loader, and the content-processing regex constants that Librarian + Builder
 feature flags, no grammar RAG / vector store / world policy references.
 """
 
+import copy
 import os
 import sys
 from pathlib import Path
@@ -78,9 +79,15 @@ def load_config() -> Dict[str, Any]:
 
 
 def get_config_section(section: str) -> Dict[str, Any]:
-    """Get a top-level section from config.yaml (e.g. 'translation', 'builder')."""
+    """Get a top-level section from config.yaml (e.g. 'translation', 'builder').
+
+    Returns a deep copy, not a reference into the process-wide cache — a
+    caller that locally overrides a nested key (an operator-style summary
+    disable, a test fixture) must not permanently corrupt config.yaml's
+    in-memory state for every other caller in the same process.
+    """
     config = load_config()
-    return config.get(section, {})
+    return copy.deepcopy(config.get(section, {}))
 
 
 def get_safety_fallback_config() -> Dict[str, Any]:

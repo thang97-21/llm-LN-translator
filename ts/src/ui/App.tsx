@@ -15,7 +15,7 @@ import { useDirectoryWatcher, useFileWatcher } from './useFileWatcher.js';
 import { useMouseScroll } from './useMouseScroll.js';
 import { useTerminalSize } from './useTerminalSize.js';
 import { ConsolePanel } from './ConsolePanel.js';
-import { ConfigurationPanel, DeveloperPanel, RuntimeConfigPanel } from './ConfigPanels.js';
+import { ConfigurationPanel, DeepSeekPricingPanel, DeveloperPanel, RuntimeConfigPanel } from './ConfigPanels.js';
 import { FormPanel } from './FormPanel.js';
 import { CapabilityList, Header, Inspector, Navigation } from './panels.js';
 import { NAV, initialWorkspace, reducer, type FormState, type Workspace } from './workspaceMachine.js';
@@ -241,7 +241,7 @@ export function App() {
     }
   });
 
-  const dashboard = <Box flexDirection="column"><RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} /><DeveloperPanel dryRunDefault={devDryRunDefault} /></Box>;
+  const dashboard = <Box flexDirection="column"><RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} /><DeepSeekPricingPanel /><DeveloperPanel dryRunDefault={devDryRunDefault} /></Box>;
   const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} epubs={epubs} recentVolumes={recentVolumes} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'configuration' ? <ConfigurationPanel fields={filteredConfigFields} cursor={workspace.itemIndex} rows={rows} edit={workspace.configEdit} status={workspace.configStatus} query={workspace.search} /> : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
   const inspector = <Inspector volume={activeVolume} />;
   const footer = footerText(workspace);

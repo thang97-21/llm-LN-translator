@@ -1,0 +1,8 @@
+{
+  "name": "mtls-register",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "Dynamic persona register for the MTLS agent preset — reads the merged Mirei+MTLS persona from the workspace at every assembly."
+}

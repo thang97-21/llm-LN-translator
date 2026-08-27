@@ -32,6 +32,27 @@ paths:
 # The final JSON-to-XML assembly is deterministic and atomic.
 # No Gemini, ChromaDB, or main-pipeline subprocess is involved.
 prep:
+  # The default is the direct MiniMax-M3 cache loop. The original DeepSeek
+  # unified, multi-turn, and parallel paths remain selectable recovery routes.
+  provider: minimax                 # minimax | deepseek
+  minimax:
+    model: MiniMax-M3
+    endpoint: https://api.minimax.io/anthropic
+    api_key_env: MINIMAX_API_KEY
+    max_output_tokens: 512000
+    context_window: 1000000
+    http_timeout_seconds: 900
+    # Keep the static prefix + volume source package byte-identical across
+    # block calls. MiniMax-M3 uses passive prefix caching; explicit markers
+    # are reserved for a compatible M2.x model if both values are changed.
+    cache:
+      mode: passive                 # passive | explicit
+      threshold_tokens: 512
+    # False avoids spending another provider's budget behind the operator's
+    # back. Set true only when DeepSeek is an intentional recovery route.
+    fallback_to_deepseek: false
+
+  # DeepSeek recovery-path defaults. Read only when prep.provider is deepseek.
   model: deepseek-v4-flash
   endpoint: https://api.deepseek.com/anthropic
   api_key_env: DEEPSEEK_API_KEY
@@ -171,6 +192,16 @@ prep:
       persistence_file: .context/deepseek_prep_multiturn_conversation.json
       cache_user_id: true
       context_window: 1000000
+
+  # Per-block reasoning archive for the multi-turn conversation — whichever
+  # block was filled — name choices, canon grounding, schema decisions.
+  # Already paid for (reasoning tokens bill as output regardless); archiving
+  # it per block is a free audit trail for the assembler's validation and
+  # LPPM-style review. Mirrors translation.thinking_log.
+  thinking_log:
+    enabled: true
+    output_dir: THINKING              # work/<vol_id>/THINKING/ (prep subdir)
+    capture_reasoning: true           # persist reasoning_details/thinking per block
 
 # ── Translation Pipeline ────────────────────────────────────────────────────
 translation:

@@ -22,7 +22,7 @@ export type ConfigFieldSpec = {
 };
 
 const MODEL_CHOICES = ['deepseek-v4-pro', 'deepseek-v4-flash'] as const;
-const MODEL_LABELS = ['DeepSeek V4 Pro', 'DeepSeek V4 Flash'] as const;
+const MODEL_LABELS = ['DeepSeek-V4-Pro-0813', 'DeepSeek-V4-Flash-0731'] as const;
 const PROVIDER_CHOICES = ['deepseek', 'qwen', 'openai', 'anthropic'] as const;
 const PROVIDER_LABELS = ['DeepSeek', 'Qwen', 'OpenAI', 'Anthropic'] as const;
 // Frontier-class (*-max) names roll between versions, so both live here —
@@ -55,6 +55,11 @@ const ANTHROPIC_MODEL_LABELS = ['Claude Sonnet 5', 'Claude Opus 5', 'Claude Fabl
 const ANTHROPIC_DISPLAY_CHOICES = ['summarized', 'omitted'] as const;
 const ANTHROPIC_EFFORT_CHOICES = ['max', 'xhigh', 'high', 'medium', 'low'] as const;
 const ANTHROPIC_TTL_CHOICES = ['5m', '1h'] as const;
+const PREP_PROVIDER_CHOICES = ['minimax', 'deepseek'] as const;
+const PREP_PROVIDER_LABELS = ['MiniMax — official Anthropic API', 'DeepSeek — recovery paths'] as const;
+const MINIMAX_MODEL_CHOICES = ['MiniMax-M3', 'MiniMax-M3-highspeed', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] as const;
+const MINIMAX_MODEL_LABELS = ['MiniMax M3', 'MiniMax M3 High Speed', 'MiniMax M2.7 — explicit cache capable', 'MiniMax M2.7 High Speed — explicit cache capable'] as const;
+const MINIMAX_CACHE_MODE_CHOICES = ['passive', 'explicit'] as const;
 
 export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
 // ─── Project ─────────────────────────────────────────────────────────────────────
@@ -71,6 +76,22 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'paths.log_dir', menu: 'Paths', section: 'File System Paths', label: 'Log Directory', kind: 'text', description: 'Debug and cost logs are written here.' },
 
 // ─── Prep ────────────────────────────────────────────────────────────────────────
+  { path: 'prep.provider', menu: 'Prep', section: 'Provider', label: 'Provider', kind: 'enum', choices: PREP_PROVIDER_CHOICES, choiceLabels: PREP_PROVIDER_LABELS,
+    description: 'MiniMax uses the official Anthropic-compatible Messages endpoint and cache loop. DeepSeek keeps the legacy unified, multi-turn, and parallel recovery routes.' },
+  { path: 'prep.minimax.model', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'Model', kind: 'enum', choices: MINIMAX_MODEL_CHOICES, choiceLabels: MINIMAX_MODEL_LABELS,
+    description: 'MiniMax-M3 keeps the existing passive cached-prefix economy; M2.7 is the explicit-cache fallback model family.' },
+  { path: 'prep.minimax.endpoint', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'Endpoint', kind: 'text',
+    description: 'Official international Anthropic-compatible endpoint. Keep https://api.minimax.io/anthropic unless operating in MiniMax China.' },
+  { path: 'prep.minimax.max_output_tokens', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'Maximum Output Tokens', kind: 'integer', min: 1,
+    description: 'Per-block output ceiling for the cache loop.' },
+  { path: 'prep.minimax.context_window', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'Context Window', kind: 'integer', min: 1,
+    description: 'Input ceiling used by the cache-loop guard before a block call is sent.' },
+  { path: 'prep.minimax.cache.mode', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'Cache Mode', kind: 'enum', choices: MINIMAX_CACHE_MODE_CHOICES,
+    description: 'Passive keeps M3 automatic prefix caching. Explicit adds Anthropic cache_control to the stable system prefix and requires an M2.x model.' },
+  { path: 'prep.minimax.http_timeout_seconds', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'Request Timeout', kind: 'integer', min: 1,
+    description: 'Per-block Anthropic SDK timeout in seconds.' },
+  { path: 'prep.minimax.fallback_to_deepseek', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'DeepSeek Recovery', kind: 'boolean',
+    description: 'Off by default: a failed MiniMax block fails loudly instead of charging a second provider without an explicit operator choice.' },
   { path: 'prep.model', menu: 'Prep', section: 'Context Build', label: 'Model', kind: 'enum', choices: MODEL_CHOICES, choiceLabels: MODEL_LABELS,
     description: 'Model for the single call that fills context.xml. Flash trades instruction-following for throughput — Pro is required for reliable 15-block structured output.' },
   { path: 'prep.endpoint', menu: 'Prep', section: 'Context Build', label: 'Endpoint', kind: 'enum', choices: ENDPOINT_CHOICES, choiceLabels: ENDPOINT_LABELS,
@@ -85,6 +106,12 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Cache-warmed 14-call Pro+Flash fan-out (PARALLEL_PREP_GUIDE.md) instead of the single unified Pro call above. Falls back to the unified call on failure if fallback_to_unified stays on.' },
   { path: 'prep.multi_turn.enabled', menu: 'Prep', section: 'Context Build', label: 'Multi-turn Context Build', kind: 'boolean',
     description: 'One persisted, sequential DeepSeek conversation (same prefix-cache mechanism the translator uses) — one call per block, in placeholder order, each turn able to see every earlier block it already committed. Checked before Parallel Context Build; do not enable both at once. Falls back to the unified call on failure if fallback_to_unified stays on.' },
+  { path: 'prep.thinking_log.enabled', menu: 'Prep', section: 'Thinking Log', label: 'Status', kind: 'boolean',
+    description: 'Archive prep reasoning to disk. Reasoning tokens bill either way; this only controls the audit trail.' },
+  { path: 'prep.thinking_log.output_dir', menu: 'Prep', section: 'Thinking Log', label: 'Output Directory', kind: 'text',
+    description: "Subdirectory under the volume's work dir where prep thinking logs are written." },
+  { path: 'prep.thinking_log.capture_reasoning', menu: 'Prep', section: 'Thinking Log', label: 'Capture Reasoning', kind: 'boolean',
+    description: 'Persist reasoning per block for assembler validation and LPPM-style review.' },
 
 // ─── Translation ─────────────────────────────────────────────────────────────────
   { path: 'translation.provider', menu: 'Translation', section: 'Provider', label: 'Provider', kind: 'enum', choices: PROVIDER_CHOICES, choiceLabels: PROVIDER_LABELS,
