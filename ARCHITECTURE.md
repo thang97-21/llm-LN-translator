@@ -6,7 +6,7 @@ verify or re-anchor after a refactor shifts them.
 
 ## Scope Disambiguation
 
-**This repo (`D:/MTLS`) is the standalone "LLM Translator" lightweight client.** It is
+**This repo is the standalone "LLM Translator" lightweight client.** It is
 a deliberately small (~150-line translator vs. a ~2500-line predecessor), self-contained
 pipeline: extract → prep → translate → qc → build. It is **not** the larger "MTL_STUDIO"
 production pipeline (Librarian/Metadata Processor/Planner/Post-Processor/Auditors,
