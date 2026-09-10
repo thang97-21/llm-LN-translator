@@ -11,7 +11,7 @@ LLM Translator/ root (or invoke via mtl.bat, which cd's there for you) so the
     translate <vol_id> [--no-thinking-log] [--dry-run]
                              Phase 2: JP -> EN via the configured provider
                              (translation.provider in config.yaml: deepseek |
-                             qwen | openai | anthropic). Saves the provider's
+                             qwen | openai | anthropic | glm). Saves the provider's
                              per-chapter reasoning to work/<vol_id>/THINKING/ by
                              default; --no-thinking-log skips that. --dry-run
                              (developer flag) assembles each chapter's full API
@@ -78,11 +78,13 @@ def _resolve_translate_volume():
         from src.OpenAI.agent import translate_volume as _tv
     elif provider == "anthropic":
         from src.Anthropic.agent import translate_volume as _tv
+    elif provider == "glm":
+        from src.GLM.agent import translate_volume as _tv
     elif provider == "deepseek":
         from src.Deepseek.translator.agent import translate_volume as _tv
     else:
         raise ValueError(
-            f"Unsupported translation provider: {provider!r}; expected deepseek, qwen, openai, or anthropic"
+            f"Unsupported translation provider: {provider!r}; expected deepseek, qwen, openai, anthropic, or glm"
         )
     return _tv
 
@@ -101,7 +103,11 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 def cmd_prep(args: argparse.Namespace) -> int:
     try:
-        receipt = run_prep(args.volume_id, series_id=args.series_id)
+        receipt = run_prep(
+            args.volume_id,
+            series_id=args.series_id,
+            force_rerun=getattr(args, "force_rerun", False),
+        )
     except PrepError as exc:
         print(f"\nPrep failed: {exc}")
         return 1
@@ -260,6 +266,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument(
         "--series-id", type=str, default=None,
         help="Explicit series bible to load (default: auto-detect from bibles/ by JP title match)",
+    )
+    p_prep.add_argument(
+        "--force-rerun", action="store_true", default=False,
+        help="Re-ask every multi-turn block instead of reusing the completed artifacts under "
+             "work/<vol>/.context/multiturn/. Without this a repeat run costs only the turns "
+             "that never finished; pass it to redo a block that parsed but reads badly.",
     )
     p_prep.set_defaults(func=cmd_prep)
 

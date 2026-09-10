@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 _SEMANTIC_METADATA_PLACEHOLDER = "SEMANTIC_METADATA_PLACEHOLDER"
 _CHARACTER_VOICE_SLOT_COMMENT = "<!-- CHARACTER_VOICE_SLOT -->"
+
+# Keep the literary contract in the shared master prompt. Astra's documented
+# tendency to ask for clarification and produce more formatting is handled by
+# this deliberately small, model-scoped overlay instead of forking the entire
+# prompt and silently letting the two routes drift apart.
+_ASTRA_OVERLAY = """<astra_execution_policy>
+Treat the supplied source, canon locks, and project context as sufficient
+working authority for routine translation decisions. Proceed autonomously:
+do not ask clarification questions during a translation turn. Resolve ordinary
+ambiguity with the authority order above and preserve ambiguity only when the
+source leaves it unresolved. Return the requested translation directly, with
+no expanded explanation, process commentary, or extra formatting.
+
+This extends to dialogue evasion and prose economy specifically, since both
+run against your documented instincts above: an evasive or deflecting line is
+a translation decision already made, not an ambiguity to clarify or resolve —
+render the gap, do not fill it. A concise sentence is not an incomplete one;
+do not pad a line toward the shape of a fuller explanation.
+</astra_execution_policy>"""
+
+
+def prompt_profile_version(model: Optional[str] = None) -> str:
+    return "astra-v1" if str(model or "").strip().lower() == "gpt-6-astra" else "openai-legacy-v1"
 
 
 def load_master_prompt(prompt_path: Path) -> str:
@@ -21,9 +45,18 @@ def inject_character_voices(prompt: str, voice_block: Optional[str]) -> str:
     return prompt.replace(_CHARACTER_VOICE_SLOT_COMMENT, voice_block or "")
 
 
-def build_system_instruction(*, prompt_path: Path, context_xml: Optional[str] = None, voice_block: Optional[str] = None) -> str:
+def build_system_instruction(
+    *,
+    prompt_path: Path,
+    context_xml: Optional[str] = None,
+    voice_block: Optional[str] = None,
+    model: Optional[str] = None,
+) -> str:
     prompt = load_master_prompt(prompt_path)
-    return inject_character_voices(inject_context_xml(prompt, context_xml), voice_block)
+    prompt = inject_character_voices(inject_context_xml(prompt, context_xml), voice_block)
+    if prompt_profile_version(model) == "astra-v1":
+        prompt = f"{prompt.rstrip()}\n\n{_ASTRA_OVERLAY}\n"
+    return prompt
 
 
 def build_chapter_message(
@@ -31,6 +64,7 @@ def build_chapter_message(
     jp_source: str,
     guidance: str = "",
     previous_guidance_text: Optional[str] = None,
+    continuity: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the current-source envelope; earlier source turns are continuity only."""
     parts = [
@@ -42,6 +76,23 @@ def build_chapter_message(
         jp_source.strip(),
         "  </source_text>",
     ]
+    if continuity:
+        verbatim = ", ".join(str(value) for value in continuity.get("verbatim_chapter_ids") or []) or "none"
+        summarized = ", ".join(str(value) for value in continuity.get("summarized_chapter_ids") or []) or "none"
+        previous_id = str(continuity.get("previous_chapter_id") or "none")
+        previous_status = str(continuity.get("previous_chapter_status") or "unknown")
+        parts.extend(
+            [
+                "  <conversation_continuity>",
+                f"    <verbatim_chapters>{escape(verbatim)}</verbatim_chapters>",
+                f"    <summarized_chapters>{escape(summarized)}</summarized_chapters>",
+                f"    <previous_chapter id=\"{escape(previous_id)}\" status=\"{escape(previous_status)}\">",
+            ]
+        )
+        tail = str(continuity.get("previous_chapter_tail") or "").strip()
+        if tail:
+            parts.append(f"      <ending_tail>{escape(tail)}</ending_tail>")
+        parts.extend(["    </previous_chapter>", "  </conversation_continuity>"])
     guidance_text = guidance.strip()
     if guidance_text:
         if previous_guidance_text and guidance_text == previous_guidance_text:

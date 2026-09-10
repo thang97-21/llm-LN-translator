@@ -3,7 +3,7 @@ Block-specific prompt assembly for the cache-warmed parallel prep path.
 
 Reuses ROLE / LOCALIZATION_POLICY / BLOCK_SCHEMA text straight out of
 src/Deepseek/prompt/prep_prompt_deepseek_en.xml (the unified path's prompt) instead of
-re-authoring 15 blocks' worth of instructions a second time — one drift
+re-authoring 16 blocks' worth of instructions a second time — one drift
 surface is enough. See PARALLEL_PREP_GUIDE.md §3 for why the system prompt
 below must be byte-identical across EVERY call in a run, Pro's included: the
 block-specific instruction is the one thing allowed to vary, so it lives
@@ -35,7 +35,7 @@ from typing import Dict, Tuple
 from src.Deepseek.common.config import PIPELINE_ROOT, get_config_section
 
 # ══════════════════════════════════════════════════════════════════════════
-# Block ownership — must sum to the 15 fillable blocks in the barebone
+# Block ownership — must sum to the 16 fillable blocks in the barebone
 # context.xml (character_attribute_anchors is the one block no lightweight
 # client here ever touches; see prep_prompt_deepseek_en.xml OUTPUT_CONTRACT).
 # ══════════════════════════════════════════════════════════════════════════
@@ -54,6 +54,7 @@ FLASH_BLOCKS: Tuple[str, ...] = (
     "eps_arc_tracker",
     "eps_signals",
     "scene_plans",
+    "chapter_signals",
     "illustration_context",
     "translation_brief",
 )
@@ -83,6 +84,7 @@ MULTITURN_BLOCK_ORDER: Tuple[str, ...] = (
     "eps_arc_tracker",
     "scene_plans",
     "eps_signals",
+    "chapter_signals",
     "illustration_context",
     "translation_brief",
 )
@@ -106,7 +108,14 @@ _block_schema_cache: Dict[str, str] | None = None
 
 def _prompt_path() -> Path:
     prep_cfg = get_config_section("prep")
-    path = Path(prep_cfg.get("prompt", "src/Deepseek/prompt/prep_prompt_deepseek_en.xml"))
+    provider = str(prep_cfg.get("provider", "deepseek") or "deepseek").strip().lower()
+    provider_cfg = prep_cfg.get(provider, {}) or {}
+    path = Path(
+        provider_cfg.get(
+            "prompt",
+            prep_cfg.get("prompt", "src/Deepseek/prompt/prep_prompt_deepseek_en.xml"),
+        )
+    )
     return path if path.is_absolute() else PIPELINE_ROOT / path
 
 

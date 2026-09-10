@@ -15,12 +15,21 @@ setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
-set "VENV_PYTHON=%SCRIPT_DIR%venv\Scripts\python.exe"
+REM ---------------------------------------------------------------------------
+REM Runtime interpreter resolution.
+REM The project .venv is DEVELOPMENT AND TESTING ONLY and is deliberately never
+REM used here — the pipeline runs on this machine's system Python (3.14).
+REM Pin a specific interpreter by setting LLM_TRANSLATOR_PYTHON to its full path.
+REM Do NOT re-add a project-venv probe: dependencies are installed system-wide,
+REM and auto-pip below would otherwise install into the wrong environment.
+REM ---------------------------------------------------------------------------
 set "PYTHON_CMD="
 
-if exist "%VENV_PYTHON%" (
-    set "PYTHON_CMD=%VENV_PYTHON%"
-    goto :found_python
+if defined LLM_TRANSLATOR_PYTHON (
+    if exist "%LLM_TRANSLATOR_PYTHON%" (
+        set "PYTHON_CMD=%LLM_TRANSLATOR_PYTHON%"
+        goto :found_python
+    )
 )
 
 python --version >nul 2>&1

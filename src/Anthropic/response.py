@@ -14,7 +14,9 @@ from src.Deepseek.common.llm_types import (
 from src.Deepseek.common.token_telemetry import cost_breakdown_usd
 
 
-def response_to_llm_response(response: Any, *, model: str, streamed: bool) -> LLMResponse:
+def response_to_llm_response(
+    response: Any, *, model: str, streamed: bool, batch: bool = False, cache_ttl: str = "5m"
+) -> LLMResponse:
     """Convert a Messages response without discarding replay-critical content.
 
     ``thinking``/``redacted_thinking`` blocks must round-trip byte-exact in a
@@ -35,12 +37,22 @@ def response_to_llm_response(response: Any, *, model: str, streamed: bool) -> LL
         cache_read_tokens=_as_int(usage_raw.get("cache_read_input_tokens")),
         cache_write_tokens=_as_int(usage_raw.get("cache_creation_input_tokens")),
     )
+    # batch=True halves every rate: a Message Batches result is billed at
+    # 50% of the synchronous price, and a route that exists to capture that
+    # discount must not report the undiscounted figure.
     costs = cost_breakdown_usd(
         model_name=model,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         cache_read_tokens=usage.cache_read_tokens,
         cache_creation_tokens=usage.cache_write_tokens,
+        # The Messages API's three token counts are disjoint: input_tokens
+        # already excludes cache reads and cache writes. Without this the
+        # fresh-token figure collapses to zero whenever the cached prefix is
+        # larger than the chapter envelope - which is always.
+        cache_read_included_in_input=False,
+        cache_ttl=cache_ttl,
+        batch=batch,
     )
     visible_text = "".join(block.text for block in blocks if block.type == "text")
     thinking_text = "\n".join(block.text for block in blocks if block.type == "reasoning" and block.text) or None
@@ -65,6 +77,7 @@ def response_to_llm_response(response: Any, *, model: str, streamed: bool) -> LL
         cache_read_cost_usd=float(costs["cache_read_cost_usd"]),
         cache_creation_cost_usd=float(costs["cache_creation_cost_usd"]),
         total_cost_usd=float(costs["total_cost_usd"]),
+        batch_pricing=batch,
         provider_metadata={
             "raw_response": raw,
             "raw_content": raw_content,

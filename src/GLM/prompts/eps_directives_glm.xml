@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  GLM EPS Strategy Directives — per-chapter analytical posture.
+
+  OWNERSHIP: this file is prompt-side (Claude). src/GLM/optimization.py parses it,
+  selects by band, and returns (directive_text, reasoning_effort). optimization.py
+  carries no directive prose of its own and no band->effort table of its own.
+  See docs/glm-route-interface.md §5.
+
+  The reasoning_effort attribute is the SINGLE source of truth for the band->effort
+  mapping. Do not duplicate it in Python.
+
+  DEEP THINKING IS THE STANDING POLICY (operator decision, 2026-08-27).
+  Every band carries reasoning_effort="max" — Z.ai's documented default and
+  recommended setting for deep inference (Guide/Deep Thinking.md:27). Depth no
+  longer varies by band; only POSTURE does.
+
+  THE CONSEQUENCE, AND WHY THE LOW BANDS READ AS THEY DO.
+  While effort varied, the request-level knob did part of the restraining. It no
+  longer does. On a COOL or COLD chapter the model now arrives with full analytical
+  depth at material that does not reward it, and the ONLY thing standing between
+  that and ornamented, over-determined prose is the directive text below plus the
+  master prompt's MARKEDNESS_GATE. The low-band directives are therefore written to
+  aim thoroughness at precision rather than at interpretation. Do not soften them.
+
+  DELIVERY: the selected directive is wrapped in <GLM_STRATEGY_DIRECTIVE> and placed
+  in the USER turn — never in the system message. Moving it into the system message
+  invalidates the cached prefix on every band change (interface §6.1).
+
+  Directives are re-sent per chapter, so they are kept deliberately lean. Standing
+  policy lives in the master prompt; only the posture that VARIES by band lives here.
+  Consecutive chapters in the same band collapse to CONTINUE (interface §4).
+
+  Directives never mention reasoning_effort, token budgets, or thinking depth — those
+  are request-level API concerns and the model is not instructed about its own effort
+  level (interface §6.2). Restraint is expressed as WHERE ATTENTION BELONGS, never as
+  how much of it there is.
+-->
+<eps_directives>
+
+  <directive band="HOT" reasoning_effort="max">
+    This chapter carries the arc's highest emotional load. Work the full analysis before
+    drafting a line.
+
+    Resolve every zero-subject sentence to a named speaker and referent — at this
+    temperature a mis-attributed line rewrites the scene. Track where the register
+    breaks: a character losing composure under pressure is a source-marked event, not
+    noise to smooth. Honor it.
+
+    Run the kanji perception pass at full attention. Marked items are dense here —
+    authors reach for graph-versus-reading gaps precisely at emotional peaks. Where a
+    passage moves into classical, epistolary, or verse register, adopt the 信達雅 frame:
+    accuracy first, then fluency, then formal beauty, in that order and never inverted.
+    Elegance that costs accuracy is a failure, not a flourish.
+
+    Where an effect cannot survive into English, say so in your analysis rather than
+    inventing an English effect that was never in the source. Silence is preferable to
+    compensation the author did not earn.
+  </directive>
+
+  <directive band="WARM" reasoning_effort="max">
+    Elevated register, active emotional current, but not the arc's peak.
+
+    Resolve speaker and referent for every ambiguous sentence. Attend to interpersonal
+    distance — 敬語 tier, address forms, and the direction any shift is travelling.
+    Movement between registers is usually the scene's actual content.
+
+    Run the kanji perception pass. Mark and analyze genuine marked items; pass over
+    conventional orthography without comment. A thorough reading of this chapter is one
+    that catches every marked item — not one that finds a marked item in every line.
+  </directive>
+
+  <directive band="NEUTRAL" reasoning_effort="max">
+    Baseline narrative. Standard analytical posture, no reduction in rigor.
+
+    Resolve speaker and referent. Hold voice separation across the active cast — the
+    quiet chapters are where distinct voices silently converge into one narrator, and
+    the drift is invisible until several chapters later. That convergence is the real
+    risk in this band, and it is worth the whole of your attention.
+
+    Run the kanji perception pass at normal attention. Most orthography here is
+    conventional; treat it as such and move on.
+  </directive>
+
+  <directive band="COOL" reasoning_effort="max">
+    Expository, transitional, or procedural material. Translate cleanly and directly.
+
+    Two-Step posture: render the source faithfully, then read your own English once for
+    naturalness and fix what reads as translated. Do not manufacture literary weight the
+    passage does not carry — over-elevating flat exposition is a defect, not care.
+
+    Thoroughness in this band means verifying accuracy, not discovering depth. Direct it
+    at referents, terminology locks, tense, and continuity with prior chapters. A
+    scrupulous reading of expository prose still concludes that the prose is expository.
+
+    Kanji perception applies to register stratum only. Do not hunt for marked items in
+    routine prose; conventional orthography is read for meaning and passed over.
+  </directive>
+
+  <directive band="COLD" reasoning_effort="max">
+    Minimal emotional load — logistics, recap, scene-setting, mechanical description.
+
+    Two-Step posture. Accuracy and clarity are the whole job. Keep locked terminology
+    exact and keep the prose out of the way.
+
+    Attention here belongs to precision — names, numbers, times, places, referents,
+    locked terms, agreement with what earlier chapters established. It does not belong
+    to interpretation. Finding nothing to interpret in a COLD chapter is the correct
+    result, and reporting that plainly is the correct analysis.
+
+    Kanji perception applies to register stratum only. Finding significance in ordinary
+    orthography here is a failure mode, not diligence — a COLD chapter rendered with
+    HOT-band ornament reads as deliberate craft and survives review, which makes it
+    worse than flatness, not better.
+  </directive>
+
+</eps_directives>

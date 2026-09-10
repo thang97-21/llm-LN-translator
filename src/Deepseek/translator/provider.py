@@ -19,11 +19,15 @@ def get_translator_class(provider: str | None = None) -> Any:
         from src.Anthropic.agent import AnthropicTranslator
 
         return AnthropicTranslator
+    if selected == "glm":
+        from src.GLM.agent import GLMTranslator
+
+        return GLMTranslator
     if selected == "deepseek":
         from src.Deepseek.translator.agent import DeepSeekTranslator
 
         return DeepSeekTranslator
-    raise ValueError(f"Unsupported translation provider: {selected!r}; expected deepseek, qwen, openai, or anthropic")
+    raise ValueError(f"Unsupported translation provider: {selected!r}; expected deepseek, qwen, openai, anthropic, or glm")
 
 
 def get_volume_translator(provider: str | None = None) -> Any:
@@ -38,6 +42,10 @@ def get_volume_translator(provider: str | None = None) -> Any:
         return translate_volume
     if selected == "anthropic":
         from src.Anthropic.agent import translate_volume
+
+        return translate_volume
+    if selected == "glm":
+        from src.GLM.agent import translate_volume
 
         return translate_volume
     if selected == "deepseek":

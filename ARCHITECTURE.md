@@ -59,7 +59,7 @@ D:/MTLS/
 │   │   ├── common/         # config.py, atomic_io.py, llm_types.py, token_telemetry.py, os_config.py, interactive.py
 │   │   └── mcp/            # MCP server + 6 tool-server modules (server.py, harness.py, runtime.py, servers/*.py)
 │   ├── Qwen/               # Qwen Phase-2 route (client, agent, conversation, safety_fallback, prompts/)
-│   ├── OpenAI/              # OpenAI Responses Phase-2 route (client, agent, conversation, response, prompts/)
+│   ├── OpenAI/              # OpenAI Responses Phase-2 route (client, agent, conversation, batch, response, prompts/)
 │   ├── Anthropic/          # Anthropic Messages Phase-2 route (client, agent, conversation, batch, response, prompts/)
 │   ├── GLM/                # Z.AI GLM Phase-2 route (client, agent, conversation, prompts/) — Chat Completions
 │   ├── builder/             # Phase-4 EPUB assembly + device profiles + XTC/XTCH export
@@ -96,8 +96,15 @@ Reads `config.yaml`'s `paths:` (13-18) block; no other top-level key.
 `translator/context_manager.py` only **reads** an existing `context.xml`
 (`load_context_xml`, 12 lines) — it never builds one. The actual builder is
 `src/utility/prep/agent.py::run_prep(volume_id, series_id=None)`. It first reads
-`prep.provider` (`agent.py:458`, config.yaml:37, `deepseek | minimax | glm`) — when
-the value is `minimax` or `glm` it dispatches straight to `_run_cache_loop_prep`
+`prep.provider` (`agent.py:458`, config.yaml:37, `deepseek | minimax | glm | openai`) —
+when the value is `openai` it dispatches to `src/OpenAI/prep.py::run_openai_prep`,
+which reuses the DeepSeek-derived system prompt and per-block JSON-node schemas.
+The native Responses Batch route submits every active block in one durable job,
+records accepted jobs before polling, and falls back to synchronous Responses
+calls when `prep.openai.batch.enabled` is false. Completed nodes are resumed
+from `.context/openai_prep/` and assembled by the same deterministic XML path.
+When the value is `minimax` or `glm` it dispatches straight to
+`_run_cache_loop_prep`
 (`agent.py:368-431,459-460`), a shared cache-loop tier reusing
 `src/Deepseek/prep/prep_cache_client.py`'s OpenAI/Anthropic-style wire path with a
 per-provider prefix file (`.dsh/prep/prefix_glm.md` for GLM, `.dsh/prep/prefix.md`
@@ -116,7 +123,7 @@ does **not** reuse `DeepSeekClient` — it has its own minimal Anthropic-SDK cal
 prep-specific conversation history, so the translator's client config cannot silently alter
 its stable-prefix contract. Sequel detection
 (`discover_series_bible`, `agent.py:~180-215`) matches this volume's JP title against
-`bibles/<series_id>/series_pack.json`. All three paths converge on `_finalize_and_write`
+`bibles/<series_id>/series_pack.json`. All routes converge on `_finalize_and_write`
 (`agent.py:~239`), which writes `context.xml` atomically, updates
 `manifest.json.pipeline_state.prep`, and extracts `TRANSLATION_BRIEF.md`.
 
@@ -168,7 +175,7 @@ rationale and a step-by-step guide to adding/debugging a route).
 |---|---|---|---|---|
 | DeepSeek | `src/Deepseek/translator/` | `deepseek-v4-pro` | `thinking.budget_tokens` + DRDI (prose-injected CoT scaffolding — no native effort knob) | `deepseek_optimization.py` (DRDI/DOVB/CCT), `thinking_density.py` (density-map telemetry) |
 | Qwen | `src/Qwen/` | `qwen3.8-max` | Native hybrid thinking | `safety_fallback.py` (moderation-refusal → DeepSeek inheritance) |
-| OpenAI | `src/OpenAI/` | `gpt-5.6-luna` | `reasoning.summary` (opt-in, model-generated paraphrase — **not** raw CoT; requires org verification + model-tier support, neither detectable from this codebase) | `response.py` (lossless Responses-payload decoder) |
+| OpenAI | `src/OpenAI/` | `gpt-5.6-terra` (Astra-ready) | `reasoning.summary` (opt-in, model-generated paraphrase — **not** raw CoT; requires org verification + model-tier support, neither detectable from this codebase) | `response.py` (lossless Responses-payload decoder), model-scoped fallback ledgers |
 | Anthropic | `src/Anthropic/` | `claude-sonnet-5` (`claude-opus-5`/`claude-fable-5` also selectable) | Adaptive thinking (`thinking.enabled`), 128K max output uniform across all three models | `batch.py` (extra module no other route has), `response.py` (Messages-payload decoder) |
 | GLM | `src/GLM/` | `glm-5.3-flash` (`glm-5.3` for the flagship tier) | Native thinking with `reasoning_effort` (`low`/`high`/`max`), implicit prefix caching, cannot be fully disabled | GLM-owned prompt, context, conversation, and moderation handling |
 
@@ -355,7 +362,7 @@ steps; it no-ops safely on a non-TTY stream or an unsupporting terminal.
 | `project` | 7-10 | target_language/name/version identity |
 | `paths` | 13-18 | input/work/output/prompt/log directory roots |
 | `phase_routing` | ~20-27 (commented out) | Optional override for `mcp/harness.py`'s phase→MCP-tool routing (has built-in defaults) |
-| `prep` | 34-220 | context.xml builder config — `provider` selector (deepseek/minimax/glm) + all three tiers (see Prep section) |
+| `prep` | 34-220 | context.xml builder config — `provider` selector (deepseek/minimax/glm/openai) + all four routes (see Prep section) |
 | `translation` | 221-855 | Phase 2 — provider route + all 5 provider menus (see below) |
 | `builder` | 856-919 | EPUB assembly — fonts/device_profile/images/xtc (see Phase 4 section) |
 | `logging` | 920-928 | level/file/cost_tracking |

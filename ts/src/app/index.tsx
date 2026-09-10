@@ -2,6 +2,7 @@ import './watchAudit.js';
 import { render } from 'ink';
 import { App } from '../ui/App.js';
 import { closeMcpClient } from '../core/mcpClient.js';
+import { synchronizedOutputStdout } from '../core/syncStdout.js';
 
 const ENTER_ALT_SCREEN = '\x1b[?1049h';
 const LEAVE_ALT_SCREEN = '\x1b[?1049l';
@@ -21,5 +22,5 @@ function disableMouseTracking(): void { if (mouseTracking) { process.stdout.writ
 enterAlternateScreen();
 enableMouseTracking();
 process.on('exit', () => { disableMouseTracking(); leaveAlternateScreen(); });
-const app = render(<App />);
+const app = render(<App />, { stdout: synchronizedOutputStdout() });
 void app.waitUntilExit().finally(() => closeMcpClient().finally(() => { disableMouseTracking(); leaveAlternateScreen(); }));

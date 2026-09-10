@@ -15,7 +15,9 @@ from src.Deepseek.common.llm_types import (
 from src.Deepseek.common.token_telemetry import cost_breakdown_usd
 
 
-def response_to_llm_response(response: Any, *, model: str, streamed: bool) -> LLMResponse:
+def response_to_llm_response(
+    response: Any, *, model: str, streamed: bool, batch: bool = False
+) -> LLMResponse:
     """Convert a Responses object without discarding replay-critical output items.
 
     A native response may contain output messages, encrypted reasoning items,
@@ -58,6 +60,7 @@ def response_to_llm_response(response: Any, *, model: str, streamed: bool) -> LL
         cache_read_tokens=usage.cache_read_tokens,
         cache_creation_tokens=usage.cache_write_tokens,
         cache_creation_included_in_input=True,
+        batch=batch,
     )
     visible_text = "".join(block.text for block in blocks if block.type == "text")
     reasoning_text = "\n".join(block.text for block in blocks if block.type == "reasoning") or None
@@ -82,12 +85,14 @@ def response_to_llm_response(response: Any, *, model: str, streamed: bool) -> LL
         cache_read_cost_usd=float(costs["cache_read_cost_usd"]),
         cache_creation_cost_usd=float(costs["cache_creation_cost_usd"]),
         total_cost_usd=float(costs["total_cost_usd"]),
+        batch_pricing=batch,
         provider_metadata={
             "raw_response": raw,
             "raw_output": raw_output,
             "streamed": streamed,
             "status": status,
             "incomplete_details": incomplete,
+            "batch_pricing": batch,
         },
     )
 

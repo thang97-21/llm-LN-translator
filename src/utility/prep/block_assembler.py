@@ -115,4 +115,14 @@ def validate_cross_block_consistency(root: ET.Element) -> List[str]:
                         f"eps_signals[{chapter_el.get('id')}]: character '{name}' not in character_roster"
                     )
 
+    chapter_signals = root.find("chapter_signals")
+    if chapter_signals is not None:
+        for chapter_el in chapter_signals.findall("chapter"):
+            for speaker_el in chapter_el.findall("speaker"):
+                name = speaker_el.get("name")
+                if name and name not in canonical_names:
+                    warnings.append(
+                        f"chapter_signals[{chapter_el.get('id')}]: speaker '{name}' not in character_roster"
+                    )
+
     return warnings

@@ -2,7 +2,7 @@
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
-set "MENU_DIR=%SCRIPT_DIR%mtls-menu-ts"
+set "MENU_DIR=%SCRIPT_DIR%ts"
 
 if not exist "%MENU_DIR%\node_modules" (
     echo Installing TypeScript menu dependencies...

@@ -37,3 +37,14 @@ def get_anthropic_retry_config() -> Dict[str, Any]:
 
 def get_anthropic_batch_config() -> Dict[str, Any]:
     return get_anthropic_config().get("batch", {}) or {}
+
+
+def get_anthropic_caching_config() -> Dict[str, Any]:
+    return get_anthropic_config().get("caching", {}) or {}
+
+
+def get_anthropic_telemetry_config() -> Dict[str, Any]:
+    """Per-call token/cost logging for the Anthropic route. On by default:
+    this is the most expensive pipeline in the project and the one whose
+    spend is least visible without it."""
+    return get_anthropic_config().get("telemetry", {}) or {}

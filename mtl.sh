@@ -14,11 +14,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VENV_PYTHON="$SCRIPT_DIR/venv/bin/python"
+# -----------------------------------------------------------------------------
+# Runtime interpreter resolution.
+# The project .venv is DEVELOPMENT AND TESTING ONLY and is deliberately never
+# used here — the pipeline runs on the machine's system Python.
+# Pin a specific interpreter by setting LLM_TRANSLATOR_PYTHON to its full path.
+# Do NOT re-add a project-venv probe: dependencies are installed system-wide,
+# and the auto-pip step below would otherwise install into the wrong environment.
+# -----------------------------------------------------------------------------
 PYTHON_CMD=""
 
-if [ -x "$VENV_PYTHON" ]; then
-    PYTHON_CMD="$VENV_PYTHON"
+if [ -n "${LLM_TRANSLATOR_PYTHON:-}" ] && [ -x "${LLM_TRANSLATOR_PYTHON}" ]; then
+    PYTHON_CMD="$LLM_TRANSLATOR_PYTHON"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_CMD="python3"
 elif command -v python >/dev/null 2>&1; then

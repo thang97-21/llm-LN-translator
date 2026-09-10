@@ -11,6 +11,7 @@ const DEFAULT_API_KEY_ENVS: Readonly<Record<string, string>> = {
   qwen: 'DASHSCOPE_API_KEY',
   openai: 'OPENAI_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
+  glm: 'ZAI_API_KEY',
 };
 
 export type PreflightRequirements = {
@@ -24,14 +25,14 @@ export function resolvePreflightRequirements(configText: string): PreflightRequi
   // sits at the same 2-space indent earlier in the file and would otherwise
   // shadow this match, flipping the detected provider and API key.
   const translationSection = configText.slice(Math.max(0, configText.indexOf('\ntranslation:')));
-  const provider = (/^\s{2}provider:\s*(deepseek|qwen|openai|anthropic)\s*(?:#.*)?$/m.exec(translationSection)?.[1] ?? 'deepseek').toLowerCase();
+  const provider = (/^\s{2}provider:\s*(deepseek|qwen|openai|anthropic|glm)\s*(?:#.*)?$/m.exec(translationSection)?.[1] ?? 'deepseek').toLowerCase();
   const apiKeyEnv = providerApiKeyEnv(configText, provider) ?? DEFAULT_API_KEY_ENVS[provider] ?? 'DEEPSEEK_API_KEY';
   return {
     provider,
     apiKeyEnv,
     // deepseek/qwen speak an Anthropic-*compatible* endpoint and anthropic
     // speaks the real Anthropic Messages API — both need the same SDK import.
-    imports: `${BASE_IMPORTS},${provider === 'openai' ? 'openai' : 'anthropic'}`,
+    imports: `${BASE_IMPORTS},${provider === 'openai' || provider === 'glm' ? 'openai' : 'anthropic'}`,
   };
 }
 

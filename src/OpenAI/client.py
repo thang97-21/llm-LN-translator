@@ -10,9 +10,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.Deepseek.common.llm_types import LLMApiFamily, LLMResponse
+from src.Deepseek.common.chapter_signals import normalize_reasoning_effort
 from src.Deepseek.common.token_telemetry import cost_breakdown_usd
 from src.OpenAI.config import get_openai_config
 from src.OpenAI.errors import RetryPolicy, call_with_retry, classify_exception
+from src.OpenAI.prompt_loader import prompt_profile_version
 from src.OpenAI.response import as_dict, response_to_llm_response
 
 logger = logging.getLogger(__name__)
@@ -49,10 +51,12 @@ class OpenAIClient:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         dry_run: bool = False,
+        config: Optional[Dict[str, Any]] = None,
     ):
-        cfg = get_openai_config()
+        cfg = copy.deepcopy(config if config is not None else get_openai_config())
         self._cfg = cfg
         self.model = model or str(cfg.get("model", "gpt-5.6-luna"))
+        self.prompt_profile = prompt_profile_version(self.model)
         self.api_key_env = str(cfg.get("api_key_env", "OPENAI_API_KEY"))
         self.api_key = api_key or os.getenv(self.api_key_env)
         if not self.api_key and not dry_run:
@@ -116,7 +120,7 @@ class OpenAIClient:
     def cache_telemetry(self) -> Dict[str, Any]:
         return copy.deepcopy(self._cache_telemetry)
 
-    def generate(
+    def build_request(
         self,
         *,
         prompt: str,
@@ -124,8 +128,15 @@ class OpenAIClient:
         input_items: Optional[List[Dict[str, Any]]] = None,
         dry_run: bool = False,
         stream: Optional[bool] = None,
-    ) -> LLMResponse:
-        """Build and execute a Responses request, or render it without a key."""
+        configuration_update: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build the wire-level Responses body without executing it.
+
+        The synchronous and Batch routes must use the same request shape. The
+        SDK accepts ``extra_body`` as an escape hatch, but OpenAI Batch receives
+        a raw JSONL body, so its prompt-cache options are emitted as the
+        documented top-level ``prompt_cache_options`` field here.
+        """
         cfg = self._cfg
         generation_cfg = cfg.get("generation", {}) or {}
         reasoning_cfg = cfg.get("reasoning", {}) or {}
@@ -133,14 +144,27 @@ class OpenAIClient:
         streaming_cfg = cfg.get("streaming", {}) or {}
         conversation_cfg = cfg.get("conversation", {}) or {}
 
-        # A preview is deliberately independent of old state. Passing a ledger
-        # accidentally must never cause a chapter preview to claim history it
-        # would not have in an actual isolated dry-run.
         base_input = _base_input(system_instruction, prompt)
         request_input = base_input if dry_run else (input_items or base_input)
+        mode = str(reasoning_cfg.get("mode", "standard") or "standard").lower()
+        if configuration_update and _is_astra_model(self.model) and mode == "standard":
+            request_input = _insert_configuration_update(request_input, configuration_update)
+        elif configuration_update:
+            if not _is_astra_model(self.model):
+                logger.warning(
+                    "[OPENAI-CONFIGURATION] ignoring configuration_update for non-Astra model %s",
+                    self.model,
+                )
+            else:
+                logger.warning(
+                    "[OPENAI-CONFIGURATION] ignoring configuration_update for Astra mode=%s; "
+                    "standard mode is required",
+                    mode,
+                )
         cache_mode = str(caching_cfg.get("mode", "explicit") or "explicit").lower()
         if cache_mode == "explicit":
             request_input = _with_explicit_cache_breakpoint(request_input)
+        effort = _reasoning_effort(self.model, reasoning_cfg.get("effort", "max"))
         request: Dict[str, Any] = {
             "model": self.model,
             "input": request_input,
@@ -149,7 +173,7 @@ class OpenAIClient:
             "service_tier": str(generation_cfg.get("service_tier", "default") or "default"),
             "reasoning": {
                 "mode": str(reasoning_cfg.get("mode", "standard") or "standard"),
-                "effort": str(reasoning_cfg.get("effort", "max") or "max"),
+                "effort": effort,
                 "context": str(reasoning_cfg.get("context", "all_turns") or "all_turns"),
             },
             "text": {
@@ -157,24 +181,39 @@ class OpenAIClient:
             },
         }
         if cache_mode in {"explicit", "implicit"}:
-            # Stable within a volume, invalidated by any developer prompt or
-            # context change, and free of title or user-identifying text.
             request["prompt_cache_key"] = _prompt_cache_key(self.model, system_instruction)
+            request["prompt_cache_options"] = {
+                "mode": cache_mode,
+                "ttl": str(caching_cfg.get("ttl", "30m") or "30m"),
+            }
         summary = reasoning_cfg.get("summary", "auto")
         if summary:
             request["reasoning"]["summary"] = str(summary)
         if bool(reasoning_cfg.get("include_encrypted_content", True)):
             request["include"] = ["reasoning.encrypted_content"]
-        if cache_mode in {"explicit", "implicit"}:
-            # Some supported SDK builds predate this generated Responses
-            # parameter. extra_body preserves the documented wire field without
-            # passing an unsupported Python keyword to Responses.create().
-            request["extra_body"] = {
-                "prompt_cache_options": {
-                    "mode": cache_mode,
-                    "ttl": str(caching_cfg.get("ttl", "30m") or "30m"),
-                }
-            }
+        return request
+
+    def generate(
+        self,
+        *,
+        prompt: str,
+        system_instruction: str,
+        input_items: Optional[List[Dict[str, Any]]] = None,
+        dry_run: bool = False,
+        stream: Optional[bool] = None,
+        configuration_update: Optional[str] = None,
+    ) -> LLMResponse:
+        """Build and execute a Responses request, or render it without a key."""
+        cfg = self._cfg
+        request = self.build_request(
+            prompt=prompt,
+            system_instruction=system_instruction,
+            input_items=input_items,
+            dry_run=dry_run,
+            stream=stream,
+            configuration_update=configuration_update,
+        )
+        streaming_cfg = cfg.get("streaming", {}) or {}
         use_stream = bool(streaming_cfg.get("enabled", True) if stream is None else stream)
         request_for_meta = {**request, "stream": use_stream}
         if dry_run:
@@ -183,7 +222,11 @@ class OpenAIClient:
                 model=self.model,
                 provider="openai",
                 api_family=LLMApiFamily.OPENAI_RESPONSES,
-                provider_metadata={"dry_run": True, "payload": request_for_meta},
+                provider_metadata={
+                    "dry_run": True,
+                    "payload": request_for_meta,
+                    "prompt_profile": self.prompt_profile,
+                },
             )
 
         retry_cfg = cfg.get("retry", {}) or {}
@@ -200,6 +243,7 @@ class OpenAIClient:
                 response = self._generate_streaming(request) if use_stream else self._generate_blocking(request)
                 self._record_cache_telemetry(response)
                 response.provider_metadata["cache_telemetry"] = self.cache_telemetry
+                response.provider_metadata["prompt_profile"] = self.prompt_profile
                 return response
             except Exception as exc:  # SDK failures need one provider-neutral boundary
                 raise classify_exception(exc) from exc
@@ -356,7 +400,52 @@ def _prompt_cache_key(model: str, system_instruction: str) -> str:
     digest = hashlib.sha256(
         (str(model) + "\0" + str(system_instruction)).encode("utf-8")
     ).hexdigest()[:24]
-    return f"mtls:{model}:{digest}"
+    return f"mtls:{model}:{prompt_profile_version(model)}:{digest}"
+
+
+def _reasoning_effort(model: str, configured: Any) -> str:
+    """Map legacy disabled/minimal values to Astra's lowest supported effort."""
+    return normalize_reasoning_effort(model, configured or "max")
+
+
+def _is_astra_model(model: str) -> bool:
+    return str(model).strip().lower() == "gpt-6-astra"
+
+
+def configuration_update_item(effort: str) -> Dict[str, Any]:
+    """Build the documented Responses input item for a reasoning update."""
+    return {
+        "type": "configuration_update",
+        "reasoning": {"effort": str(effort).strip().lower()},
+    }
+
+
+def _insert_configuration_update(
+    items: List[Dict[str, Any]],
+    effort: str,
+) -> List[Dict[str, Any]]:
+    """Insert an Astra update immediately before the next user message."""
+    prepared = list(items)
+    update = configuration_update_item(effort)
+    user_index = next(
+        (index for index in range(len(prepared) - 1, -1, -1) if prepared[index].get("role") == "user"),
+        None,
+    )
+    if user_index is None:
+        return [*prepared, update]
+
+    if user_index > 0 and prepared[user_index - 1].get("type") == "configuration_update":
+        previous_effort = (
+            prepared[user_index - 1].get("reasoning", {}) or {}
+        ).get("effort")
+        if str(previous_effort).strip().lower() == update["reasoning"]["effort"]:
+            return prepared
+        raise ValueError(
+            "configuration_update items cannot be adjacent before the same user message"
+        )
+
+    prepared.insert(user_index, update)
+    return prepared
 
 
 def _base_input(system_instruction: str, prompt: str) -> List[Dict[str, Any]]:

@@ -8,7 +8,7 @@ Path convention: Uses OEBPS standard paths (../Images/)
 """
 
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from html import escape
 
 try:
@@ -21,6 +21,32 @@ except ImportError:
 from src.Deepseek.common.config import SCENE_BREAK_MARKER, ILLUSTRATION_PLACEHOLDER_PATTERN, MARKDOWN_IMAGE_PATTERN
 from .config import COLLAPSE_BLANK_LINES, BLANK_LINE_FREQUENCY, get_epub_version
 
+# The EPUB semantic carried by a verse container. Presentation is deliberately
+# NOT part of this: the CSS hook stays class="poem" in every volume, because a
+# song and a poem are set on the page identically. Only the machine-readable
+# type differs, and a volume of lyrics should not announce itself to a reading
+# system as a book of poems. The builder resolves this from the volume's
+# <translation_policy> before conversion; anything unrecognised is refused
+# rather than written into the markup.
+VERSE_EPUB_TYPES = ("z3998:poem", "z3998:song", "z3998:verse")
+_DEFAULT_VERSE_EPUB_TYPE = "z3998:poem"
+_verse_epub_type = _DEFAULT_VERSE_EPUB_TYPE
+
+
+def set_verse_epub_type(value: Optional[str]) -> str:
+    """Set the verse container semantic. Returns the value actually in force."""
+    global _verse_epub_type
+    candidate = (value or "").strip()
+    _verse_epub_type = (
+        candidate if candidate in VERSE_EPUB_TYPES else _DEFAULT_VERSE_EPUB_TYPE
+    )
+    return _verse_epub_type
+
+
+def get_verse_epub_type() -> str:
+    return _verse_epub_type
+
+
 # Industry-standard image path (OEBPS format)
 IMAGES_PATH = "../Images"
 
@@ -32,6 +58,20 @@ CUSTOM_FOOTNOTE_DEF_COLON_RE = re.compile(r"^\*\*\*(.+?):\*\*\s*(.+?)\*$")
 CUSTOM_FOOTNOTE_DEF_SEP_RE = re.compile(r"^\*\*\*(.+?)\*\*\s*(?:[:：]|[-–—])\s*(.+?)\*$")
 NOTEREF_PLACEHOLDER_RE = re.compile(r"__NOTEREF_(\d+)__")
 STANDALONE_BR_RE = re.compile(r"^<br\s*/?>$", re.IGNORECASE)
+
+# Structured-block markers. A paragraph that is nothing but an HTML comment
+# is a production note and must never reach the reader as text; a run of
+# "- " or "1. " lines is a real list.
+HTML_COMMENT_ONLY_RE = re.compile(r"^<!--(.*?)-->$", re.DOTALL)
+BULLET_ITEM_RE = re.compile(r"^[-\u2022]\s+")
+NUMBERED_ITEM_RE = re.compile(r"^\d+[.)]\s+")
+
+# A body-level ATX sub-heading (## through ######) \u2014 e.g. a scene/episode
+# title embedded partway through a chapter. The chapter's own H1 is handled
+# separately upstream and never reaches this converter; anything matching
+# here is real structural content and must become a semantic heading, not
+# silently vanish or get flattened into an ordinary <p>.
+ATX_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+)$")
 
 
 class MarkdownToXHTML:
@@ -90,8 +130,32 @@ class MarkdownToXHTML:
         # Markdown blockquote support:
         # - Lyric blocks in memoir chapters use: > *line*
         # - Other blockquotes are rendered as quoted prose lines.
-        if stripped.startswith(">"):
+        # ">>" opens a message-board post reference (">>8"), not a nested
+        # quotation. Routing it to the blockquote path would set a reply as a
+        # quote; nothing in this pipeline nests blockquotes.
+        if stripped.startswith(">") and not stripped.startswith(">>"):
             return MarkdownToXHTML._convert_blockquote_block(para)
+
+        # A paragraph that is only an HTML comment is an editorial or
+        # production note. Escaping it prints "<!-- illustration: ... -->" to
+        # the reader, so keep it as a real comment: preserved in the file,
+        # invisible in the book.
+        comment = HTML_COMMENT_ONLY_RE.match(stripped)
+        if comment:
+            return "<!--%s-->" % comment.group(1).replace("--", "-")
+
+        # A body-level ATX sub-heading (## and deeper) — always single-line,
+        # so this must be checked before the multi-line structured-block path.
+        heading = ATX_HEADING_RE.match(stripped)
+        if heading:
+            level = len(heading.group(1))
+            heading_text = MarkdownToXHTML._render_inline_markdown(heading.group(2).strip())
+            return f'<h{level}>{heading_text}</h{level}>'
+
+        # Multi-line paragraphs carry deliberate structure (see below).
+        block_lines = [ln for ln in para.split("\n") if ln.strip()]
+        if len(block_lines) > 1 and "<img" not in para:
+            return MarkdownToXHTML._convert_structured_block(block_lines)
 
         # Check if paragraph contains inline image tags (normalize and preserve them)
         if '<img' in para and 'src=' in para:
@@ -106,7 +170,7 @@ class MarkdownToXHTML:
         return f'<p>{escaped_content}</p>'
 
     @staticmethod
-    def _convert_blockquote_line(stripped: str) -> str:
+    def _convert_blockquote_line(stripped: str, epub3: bool = False) -> str:
         """
         Convert markdown blockquote lines.
         - `> *...*` => lyric line
@@ -121,7 +185,8 @@ class MarkdownToXHTML:
 
         # Lyric lines in memoir chapters are consistently italicized in blockquotes.
         if block.startswith("*") and block.endswith("*"):
-            return f'<p class="lyric">{rendered}</p>'
+            verse_type = ' epub:type="z3998:verse"' if epub3 else ""
+            return f'<p class="lyric"{verse_type}>{rendered}</p>'
 
         return f'<p class="blockquote">{rendered}</p>'
 
@@ -134,20 +199,82 @@ class MarkdownToXHTML:
         > *line 1*
         >
         > *line 2*
+
+        Verse is wrapped in a <div class="poem"> container. Sibling <p> lines on
+        their own leave nothing for `break-inside: avoid` to hold, so a fixed-form
+        poem can be split across a page turn, and a runover line has no container
+        to hang its indent from — on a narrow screen the wrapped remainder starts
+        flush left and reads as one more line of verse. Where the line count is
+        part of the text rather than its presentation, that is a correctness
+        problem and not a cosmetic one. Quoted prose (`> text`, unemphasised) is
+        left unwrapped: it is a blockquote, not a poem.
+
+        epub:type is emitted for EPUB3 only. _build_epub2_chapter does not declare
+        the epub namespace, so an unconditional attribute would make every EPUB2
+        chapter invalid XHTML.
         """
+        epub3 = get_epub_version() == "EPUB3"
         lines = []
+        has_verse = False
         for raw in block.splitlines():
             stripped = raw.strip()
             if not stripped:
                 continue
             if stripped.startswith(">"):
-                lines.append(MarkdownToXHTML._convert_blockquote_line(stripped))
+                converted = MarkdownToXHTML._convert_blockquote_line(stripped, epub3)
+                if 'class="lyric"' in converted:
+                    has_verse = True
+                lines.append(converted)
             else:
                 # Mixed-content fallback: preserve non-blockquote lines as normal prose.
                 rendered = MarkdownToXHTML._render_inline_markdown(stripped)
                 lines.append(f'<p>{rendered}</p>')
 
-        return "\n".join(lines)
+        if not lines:
+            return ""
+        if not has_verse:
+            return "\n".join(lines)
+
+        poem_type = ' epub:type="%s"' % get_verse_epub_type() if epub3 else ""
+        body = "\n".join("  " + line for line in lines)
+        return f'<div class="poem"{poem_type}>\n{body}\n</div>'
+
+    @staticmethod
+    def _convert_structured_block(lines: List[str]) -> str:
+        """
+        Render a multi-line paragraph as the structure it actually is.
+
+        Prose in this pipeline arrives one paragraph per line, so a paragraph
+        that still contains newlines is never soft-wrapped text. Across the
+        whole library every such block is deliberate: an in-world notebook, a
+        message-board post and its header line, a crafting inventory, a cast
+        roster, a letter's dateline and signature, a word-game grid whose
+        columns line up. An unadorned <p> collapses all of them into one
+        running line, which destroys the only thing that made them readable.
+
+        Lists become real lists. Everything else keeps its line breaks, and
+        leading spaces are preserved as non-breaking spaces because in an
+        aligned block the indentation IS the content.
+        """
+        bullets = all(BULLET_ITEM_RE.match(ln.strip()) for ln in lines)
+        numbered = all(NUMBERED_ITEM_RE.match(ln.strip()) for ln in lines)
+
+        if bullets or numbered:
+            pattern = BULLET_ITEM_RE if bullets else NUMBERED_ITEM_RE
+            tag = "ul" if bullets else "ol"
+            items = [
+                "  <li>%s</li>"
+                % MarkdownToXHTML._render_inline_markdown(pattern.sub("", ln.strip(), count=1))
+                for ln in lines
+            ]
+            return '<%s class="doc-list">\n%s\n</%s>' % (tag, "\n".join(items), tag)
+
+        rendered = []
+        for ln in lines:
+            indent = len(ln) - len(ln.lstrip(" "))
+            body = MarkdownToXHTML._render_inline_markdown(ln.strip())
+            rendered.append(("&#160;" * indent) + body)
+        return '<p class="note">%s</p>' % "<br/>\n".join(rendered)
 
     @staticmethod
     def _render_inline_markdown(content: str) -> str:

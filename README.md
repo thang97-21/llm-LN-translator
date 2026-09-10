@@ -117,7 +117,7 @@ raw/                          ← Drop EPUBs here
     ▼
 [Prep: Cached Multi-turn]     ← src/utility/prep/
     One stable system prefix: prep policy + context shell + full JP source + bible + search evidence
-    Fifteen JSON-node turns assembled deterministically into context.xml
+    Sixteen JSON-node turns assembled deterministically into context.xml
     │
     ▼
 [Phase 2: Translator]         ← src/Deepseek/, src/Qwen/, src/OpenAI/, src/Anthropic/, src/GLM/
@@ -148,7 +148,7 @@ configured in `config.yaml`:
 |---|---|---:|---:|---|
 | DeepSeek | `deepseek-v4-pro` | 1M tokens | 384K tokens | 64K thinking budget + DRDI (EPS-band reasoning directives injected into the user turn — this route has no native effort parameter) |
 | Qwen | `qwen3.7-max` | 1M tokens | 128K tokens | Native thinking, 56K token budget |
-| OpenAI | `gpt-5.6-luna` | 1.05M tokens (922K configured input guard) | 128K tokens | `reasoning.mode: pro`, `reasoning.effort: xhigh`, `context: all_turns` |
+| OpenAI | `gpt-5.6-terra` (Astra-ready) | 1.05M tokens (922K configured input guard) | 128K tokens | `reasoning.mode: pro`, `reasoning.effort: xhigh`, `context: all_turns` |
 | Anthropic | `claude-sonnet-5` | 1M tokens | 128K tokens | Adaptive thinking (`type: adaptive`), `effort: high` |
 | Z.AI | `GLM-5.3-FLASH` | 1M tokens | 128K tokens | Deep Thinking , `effort: max` |
 
@@ -166,7 +166,8 @@ monitor, `conversation.py` maintains local replay state, and `response.py`
 normalizes Responses output and usage into the shared MTLS boundary types.
 
 **Request and conversation shape.** The route uses `store: false` and persists
-the complete replay ledger at `.context/openai_conversation.json`. Every request
+the complete replay ledger at the configured path. Astra and fallback profiles use
+model-scoped ledgers such as `.context/openai_conversation_gpt_6_astra.json`. Every request
 starts with a developer message containing the OpenAI master prompt plus the
 volume's prepared `context.xml`, followed by up to two recent chapter turns and
 the current Japanese chapter. Replay retains complete output items—including
@@ -176,7 +177,7 @@ visible output text is written as translated prose.
 **Explicit fixed-prefix caching.** The default cache policy is `explicit` with
 a 30-minute TTL. MTLS adds one explicit breakpoint to the developer
 `input_text` block and sends a deterministic `prompt_cache_key` derived from
-the configured model and that complete developer prefix. The key contains no
+the configured model, prompt profile, and that complete developer prefix. The key contains no
 title or user-identifying text and changes automatically when the model,
 master prompt, or injected context changes. Conversation replay and the
 current chapter come after the breakpoint, so they remain ordinary input under
@@ -201,6 +202,13 @@ A healthy fixed-prefix run may therefore report 100% breakpoint success, 100%
 prefix recovery, and only about 15% total coverage; those values describe a
 narrow but fully functioning cache rather than a cache failure.
 
+Astra remains opt-in in `config.yaml`; when selected, an eligible access or
+transport failure can pin the volume to the configured GPT-5.6 fallback. A
+fallback after an already committed Astra chapter records `fallback_pending`
+instead of silently mixing model-native conversation state. Set
+`translation.openai.fallback.resume_pending: true` only when explicitly
+resuming that boundary on GPT-5.6.
+
 **Artifacts.** Each OpenAI translator call adds cache reads, cache writes,
 ordinary input, output, the three cumulative ratios, net cache savings, and
 total estimated cost to `LOG/token_log_<run-stamp>.md`. Credential-free dry
@@ -211,6 +219,29 @@ API call, so they cannot report cache hits, writes, or billed savings.
 Logs created before `cache_write_tokens` telemetry was added retain valid cache
 read counts, but their write cost and net savings cannot be reconstructed
 exactly. Use a new live run when billing-accurate cache economics are required.
+
+**OpenAI Batch migration (Astra-ready).** `translation.openai.batch.enabled`
+is the explicit opt-in for the GPT-5.6 family. When `translation.openai.model`
+is set to `gpt-6-astra`, `batch.auto_for_astra: true` enables Batch by default;
+set it to `false` to force synchronous Astra calls. The checked-in route remains
+`gpt-5.6-terra` until Astra credentials are provisioned.
+
+Batch requests follow the Anthropic Fable 5.1 wave pattern while retaining
+OpenAI's persistent Responses reasoning ledger. Each wave freezes one replay
+prefix, submits chapter requests as JSONL to `/v1/responses`, and commits
+completed raw output (including encrypted reasoning items) in chapter order
+before the next wave is assembled. Chapters in the same wave intentionally do
+not see one another; lower `batch.wave_size` when continuity matters more than
+throughput. A one-chapter seed wave (`seed_chapters: 1`) establishes the first
+translation decisions without abandoning Batch pricing.
+
+`batch.persistence_file` stores submitted job IDs and file IDs atomically. An
+interrupted run drains that ledger before submitting new work, so it does not
+duplicate accepted jobs. Missing or transient result lines remain pending for a
+later retry; model-access failures may switch at a clean boundary to the
+configured GPT-5.6 fallback. If an Astra chapter has already committed and
+mixed-model continuation is disabled, the route records `fallback_pending`
+instead of silently combining incompatible reasoning state.
 
 ### Safety-Refusal Fallback
 
@@ -268,20 +299,31 @@ the final fallback. The active path fails closed — a turn or assembly error
 preserves its JSON artifacts for explicit retry rather than silently
 spending on a second strategy.
 
-**The 16-block shell.** The Librarian (`librarian/agent.py::_write_context_placeholder`)
+**The 17-block shell.** The Librarian (`librarian/agent.py::_write_context_placeholder`)
 writes `context.xml` immediately after extraction: `<opf_metadata>` populated
-in place from the EPUB's own OPF data, plus sixteen further blocks seeded
-`<pending/>`, each tagged with its owning agent. Of those sixteen, fourteen
+in place from the EPUB's own OPF data, plus seventeen further blocks seeded
+`<pending/>`, each tagged with its owning agent. Of those seventeen, fifteen
 are filled by the multi-turn prep conversation in one persisted sequential
 DeepSeek conversation — one JSON-node turn per block
 (`block_prompts.py::MULTITURN_BLOCK_ORDER`), assembled and schema-validated
 into XML after every turn — plus `chapter_titles_en`, a block prep creates
-fresh rather than inheriting from the Librarian's shell, for fifteen turns
+fresh rather than inheriting from the Librarian's shell, for sixteen turns
 total. The remaining two stay outside prep's own accounting: `character_attribute_anchors`
 is never generated by any path in this lightweight client (a block name
 inherited from the original heavier pipeline, permanently omitted here — see
 `block_prompts.py`'s own ownership comment), and `translation_inheritance`
 stays `<pending/>` unless the Safety-Refusal Fallback above actually fires.
+
+### Prep — OpenAI Responses / Batch Path
+
+Selecting `prep.provider: openai` uses the same `build_multiturn_system_prompt()`
+and `build_multiturn_task_suffix()` contract as the DeepSeek prep pipeline. One
+native Responses request is created for every active prep block; with
+`prep.openai.batch.enabled: true`, all of them are submitted in one durable
+OpenAI Batch job and tracked in `prep.openai.batch.persistence_file`. Completed
+JSON nodes are written under `.context/openai_prep/`, so an interrupted run can
+resume accepted work without resubmitting completed blocks. Set the flag to
+`false` to use the same block loop through synchronous Responses calls.
 
 **Metadata search.** Before the conversation starts, prep resolves the
 volume's Japanese title/author against `web_search_chain.py`'s

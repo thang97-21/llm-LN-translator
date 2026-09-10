@@ -32,7 +32,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from xml.etree import ElementTree as ET
 
 from src.Deepseek.common.atomic_io import atomic_write_json, atomic_write_text
@@ -57,6 +57,11 @@ from src.utility.prep.web_search_chain import MetadataSearchChain
 from src.Deepseek.translator.deepseek_conversation import DeepSeekConversationManager
 
 logger = logging.getLogger(__name__)
+
+# 1 retry per block turn — mirrors prep_cache_client.py's cache-loop retry
+# convention (call_provider's cfg.retries, default 1) for the same failure
+# class: an occasional malformed-JSON response, not a systemic fault.
+_MAX_TURN_ATTEMPTS = 2
 
 # Section names DeepSeekConversationManager._validate_checkpoint requires —
 # hardcoded there (deepseek_conversation.py's _CHECKPOINT_REQUIRED_SECTIONS),
@@ -237,6 +242,86 @@ def _artifacts_dir(work_dir: Path) -> Path:
     return work_dir / ".context" / "multiturn"
 
 
+def _dump_failed_turn(artifacts_dir: Path, block_name: str, attempt: int, raw: str) -> Optional[Path]:
+    """Persist a response that wouldn't parse, so the failure can be diagnosed.
+
+    commit_turn only runs after a successful parse, so without this the one
+    artifact a post-mortem actually needs is the only one never written. The
+    .txt suffix keeps these clear of assemble_from_multiturn_artifacts'
+    "*.json" glob. Best-effort: an I/O problem here must never mask the parse
+    error that is the real subject of the report.
+    """
+    path = artifacts_dir / f"{block_name}.attempt{attempt}.raw.txt"
+    try:
+        atomic_write_text(path, raw)
+    except OSError as exc:
+        logger.warning("[PREP:multiturn] could not save failed response to %s: %s", path, exc)
+        return None
+    return path
+
+
+def _reusable_artifact(
+    artifacts_dir: Path,
+    block_name: str,
+    represented_chapter_ids: Sequence[str],
+) -> Optional[Dict[str, Any]]:
+    """A prior run's artifact for this block, if it can safely be reused.
+
+    Reuse requires BOTH halves of a completed turn, not merely the file:
+
+      * <block>.json parses and carries the matching tag — a half-written or
+        hand-edited artifact is not a completed turn; and
+      * the conversation still accounts for the block.
+
+    The second condition is what makes skipping sound. This path's whole
+    premise is that turn N sees turns 1..N-1 in its own conversation history
+    (see the module docstring), so skipping a block whose conversation record
+    is gone would leave every later turn blind to it — yielding a context.xml
+    that looks complete while being quietly inconsistent, which is worse than
+    an honest failure. The case is not hypothetical: DeepSeekConversation-
+    Manager._load starts a clean prefix whenever schema/volume/model/endpoint
+    identity changes, so switching model leaves the artifacts on disk and the
+    history empty.
+
+    Callers pass represented_chapter_ids, NOT committed_chapter_ids. The
+    former counts a block that compaction folded into the checkpoint summary;
+    the latter only counts turns still held verbatim. Re-asking a compacted
+    block would spend a call and overwrite a good artifact with content that
+    may then contradict the summary already baked into the prefix — a worse
+    outcome than reusing it, and no different from what an uninterrupted run
+    that compacted would have produced anyway.
+
+    Returns None whenever anything is off. Re-asking one block costs a single
+    call; a wrong skip costs the volume's consistency.
+    """
+    path = artifacts_dir / f"{block_name}.json"
+    if not path.exists():
+        return None
+
+    if block_name not in set(represented_chapter_ids):
+        logger.info(
+            "[PREP:multiturn] %s exists but is absent from the conversation history — "
+            "re-running the turn so later blocks can still see it.",
+            path.name,
+        )
+        return None
+
+    try:
+        node = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("[PREP:multiturn] ignoring unreadable artifact %s: %s", path, exc)
+        return None
+
+    if not isinstance(node, dict) or node.get("tag") != block_name:
+        logger.warning(
+            "[PREP:multiturn] ignoring artifact %s — expected a JSON node tagged %r.",
+            path, block_name,
+        )
+        return None
+
+    return node
+
+
 def assemble_from_multiturn_artifacts(
     work_dir: Path,
     existing_context_xml: str,
@@ -293,7 +378,12 @@ def _extract_opf_search_fields(context_xml_text: str) -> Tuple[str, str]:
 # Orchestration
 # ══════════════════════════════════════════════════════════════════════════
 
-def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[str, Any]:
+def run_multiturn_prep(
+    volume_id: str,
+    series_id: Optional[str] = None,
+    *,
+    force_rerun: bool = False,
+) -> Dict[str, Any]:
     work_dir = WORK_DIR / volume_id
     context_path = work_dir / "context.xml"
     if not context_path.exists():
@@ -334,6 +424,12 @@ def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[
     cache_monitor_cfg = mt_cfg.get("cache_monitor", {}) or {}
     cache_monitor_enabled = bool(cache_monitor_cfg.get("enabled", True))
     cache_warn_threshold = float(cache_monitor_cfg.get("warn_threshold_cache_hit_ratio", 0.70))
+
+    # Resume. A block that already completed is not re-asked: a repeat run
+    # after a mid-run failure should cost the turns still outstanding, not all
+    # of them. --force-rerun overrides it, which is the only way to redo a
+    # block whose artifact parsed but reads badly.
+    resume_completed = bool(mt_cfg.get("resume_completed_blocks", True)) and not force_rerun
 
     conversation_cfg = dict(mt_cfg.get("conversation", {}) or {})
     conversation_cfg["conversation_kind"] = "prep"
@@ -382,44 +478,103 @@ def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[
     )
 
     for index, block_name in enumerate(MULTITURN_BLOCK_ORDER):
+        # Read fresh each iteration rather than snapshotted before the loop:
+        # commit_turn() calls truncate_from(), so re-running an EARLIER block
+        # drops every later block from the history. A stale snapshot would then
+        # skip a later block whose conversation record had just been discarded —
+        # precisely the blind-turn case _reusable_artifact exists to prevent.
+        # (That truncation is also what this guard eliminates at the root: with
+        # completed blocks skipped, no early turn is recommitted, so a restart
+        # no longer discards the turns that came after it.)
+        if resume_completed:
+            reusable = _reusable_artifact(
+                artifacts_dir, block_name, manager.represented_chapter_ids
+            )
+            if reusable is not None:
+                logger.info(
+                    "[PREP:multiturn] %s — turn %d/%d: %s already complete; reusing its "
+                    "artifact (no API call)",
+                    volume_id, index + 1, len(MULTITURN_BLOCK_ORDER), block_name,
+                )
+                artifacts[block_name] = reusable
+                cache_log.append({
+                    "call": f"multiturn_{block_name}",
+                    "reused": True,
+                    "cache_hit_tokens": 0,
+                    "cache_miss_tokens": 0,
+                    "output_tokens": 0,
+                })
+                continue
+
         extra_note = _PRO_TASK_NOTE if block_name == "name_map" else ""
         task_suffix = build_multiturn_task_suffix(block_name, extra_note=extra_note)
-        prompt = task_suffix
+        base_prompt = task_suffix
 
         logger.info(
             "[PREP:multiturn] %s — turn %d/%d: %s",
             volume_id, index + 1, len(MULTITURN_BLOCK_ORDER), block_name,
         )
 
-        prepared = manager.prepare_turn(
-            prompt=prompt,
-            system=system_prompt,
-            max_output_tokens=max_output_tokens,
-            checkpoint_callback=checkpoint_callback,
-        )
+        # A malformed-JSON turn is re-asked in place (same committed history,
+        # nothing truncated — see commit_turn/truncate_from) rather than
+        # aborting the whole run: by turn 5+ that would discard several
+        # already-paid-for committed blocks over one bad response.
+        node: Optional[Dict[str, Any]] = None
+        raw = ""
+        sent_prompt = base_prompt
+        cache_stats: Dict[str, int] = {"cache_hit_tokens": 0, "cache_miss_tokens": 0, "output_tokens": 0}
+        parse_error: Optional[JsonNodeError] = None
+        failed_raw_paths: List[Path] = []
+        for attempt in range(1, _MAX_TURN_ATTEMPTS + 1):
+            sent_prompt = base_prompt if parse_error is None else (
+                f"{base_prompt}\n\nYour previous response for this block was not valid JSON "
+                f"({parse_error}). Return ONLY one strictly valid JSON object this time — escape "
+                "every literal quote and newline inside string values."
+            )
+            prepared = manager.prepare_turn(
+                prompt=sent_prompt,
+                system=system_prompt,
+                max_output_tokens=max_output_tokens,
+                checkpoint_callback=checkpoint_callback,
+            )
+            raw, cache_stats = _call_deepseek_turn(
+                model=model,
+                system=prepared["system"],
+                messages=prepared["messages"],
+                max_output_tokens=max_output_tokens,
+                thinking_budget=thinking_budget,
+                effort=effort,
+                timeout_seconds=timeout_seconds,
+                base_url=base_url,
+                api_key=api_key,
+                volume_id=volume_id,
+                call_label=f"multiturn_{block_name}" if attempt == 1 else f"multiturn_{block_name}_retry{attempt - 1}",
+            )
+            try:
+                node = extract_json_node(raw, expected_tag=block_name)
+                parse_error = None
+                break
+            except JsonNodeError as exc:
+                parse_error = exc
+                dumped = _dump_failed_turn(artifacts_dir, block_name, attempt, raw)
+                if dumped is not None:
+                    failed_raw_paths.append(dumped)
+                logger.warning(
+                    "[PREP:multiturn] %s — turn '%s' attempt %d/%d returned malformed JSON: %s"
+                    " (response saved to %s)",
+                    volume_id, block_name, attempt, _MAX_TURN_ATTEMPTS, exc, dumped,
+                )
 
-        raw, cache_stats = _call_deepseek_turn(
-            model=model,
-            system=prepared["system"],
-            messages=prepared["messages"],
-            max_output_tokens=max_output_tokens,
-            thinking_budget=thinking_budget,
-            effort=effort,
-            timeout_seconds=timeout_seconds,
-            base_url=base_url,
-            api_key=api_key,
-            volume_id=volume_id,
-            call_label=f"multiturn_{block_name}",
-        )
         cache_log.append({"call": f"multiturn_{block_name}", **cache_stats})
 
-        try:
-            node = extract_json_node(raw, expected_tag=block_name)
-        except JsonNodeError as exc:
+        if parse_error is not None or node is None:
+            rejected = ", ".join(path.name for path in failed_raw_paths) or "(none saved)"
             raise MultiTurnPrepError(
-                f"turn '{block_name}' returned an invalid JSON artifact: {exc}. Raw "
-                f"artifacts for prior turns kept under {artifacts_dir} for inspection."
-            ) from exc
+                f"turn '{block_name}' returned an invalid JSON artifact after "
+                f"{_MAX_TURN_ATTEMPTS} attempts: {parse_error}. Raw artifacts for prior turns "
+                f"kept under {artifacts_dir} for inspection; the rejected response(s) for this "
+                f"turn were saved as {rejected}."
+            ) from parse_error
 
         artifact_path = artifacts_dir / f"{block_name}.json"
         atomic_write_text(artifact_path, json.dumps(node, ensure_ascii=False, indent=2))
@@ -427,7 +582,7 @@ def run_multiturn_prep(volume_id: str, series_id: Optional[str] = None) -> Dict[
 
         manager.commit_turn(
             chapter_id=block_name,
-            user_prompt=prompt,
+            user_prompt=sent_prompt,
             assistant_response=raw,
             canonical_output=raw,
             output_path=artifact_path,

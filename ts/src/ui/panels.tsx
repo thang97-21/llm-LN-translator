@@ -2,7 +2,7 @@ import { Box, Text } from 'ink';
 import { memo, useMemo } from 'react';
 import type { CapabilitySpec, Preflight, VolumeSummary } from '../core/types.js';
 import { fuzzyMatch, loadVolumeDetail } from '../core/mtls.js';
-import { Badge, PhaseStrip, ProgressBar, riskColor } from './components.js';
+import { Badge, PhaseStrip, ProgressBar, riskColor, toneColor } from './components.js';
 import { layoutForColumns } from './layout.js';
 import { NAV } from './workspaceMachine.js';
 
@@ -12,7 +12,7 @@ import { NAV } from './workspaceMachine.js';
 // so passing it whole would re-render Header/Navigation on all of that too.
 export const Header = memo(function Header({ activeVolume, preflight, columns, compact }: { activeVolume: string | null; preflight: Preflight; columns: number; compact?: boolean }) {
   const active = activeVolume ?? 'none';
-  const status = <Text wrap="truncate-end">volume: <Text color={activeVolume ? 'green' : 'yellow'}>{active}</Text> · python <Badge label={preflight.pythonStatus} color={preflight.pythonStatus === 'ready' ? 'green' : 'red'} /> · MCP <Badge label={preflight.mcpStatus} color={preflight.mcpStatus === 'ready' ? 'green' : preflight.mcpStatus === 'checking' ? 'yellow' : 'red'} /> · API key <Badge label={preflight.apiKeyPresent ? 'present' : 'missing'} color={preflight.apiKeyPresent ? 'green' : 'yellow'} /></Text>;
+  const status = <Text wrap="truncate-end">volume: <Text color={toneColor(activeVolume ? 'good' : 'warn')}>{active}</Text> · python <Badge label={preflight.pythonStatus} color={toneColor(preflight.pythonStatus === 'ready' ? 'good' : 'bad')} /> · MCP <Badge label={preflight.mcpStatus} color={toneColor(preflight.mcpStatus === 'ready' ? 'good' : preflight.mcpStatus === 'checking' ? 'warn' : 'bad')} /> · API key <Badge label={preflight.apiKeyPresent ? 'present' : 'missing'} color={toneColor(preflight.apiKeyPresent ? 'good' : 'warn')} /></Text>;
   // The Console screen only ever shows the console — 3 chrome rows saved
   // here (title row + both borders) is 3 more lines of scrollback visible
   // without touching ConsolePanel itself. Same status line either way.
@@ -23,11 +23,11 @@ export const Header = memo(function Header({ activeVolume, preflight, columns, c
   </Box>;
 });
 
-export const Navigation = memo(function Navigation({ navIndex }: { navIndex: number }) { return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} width={22}>{NAV.map((item, index) => <Text key={item.id} inverse={navIndex === index} color={navIndex === index ? 'cyan' : 'white'}>{' '}{item.label}{' '}</Text>)}</Box>; });
+export const Navigation = memo(function Navigation({ navIndex }: { navIndex: number }) { return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} width={22}>{NAV.map((item, index) => <Text key={item.id} inverse={navIndex === index} color={toneColor(navIndex === index ? 'active' : 'plain')}>{' '}{item.label}{' '}</Text>)}</Box>; });
 
 export function CapabilityList({ items, index, query }: { items: readonly CapabilitySpec[]; index: number; query: string }) {
   const visible = items.filter((item) => fuzzyMatch(query, `${item.group} ${item.label} ${item.detail}`));
-  return <Box flexDirection="column"><Text bold>{visible.length === 1 ? '1 capability' : `${visible.length} capabilities`}{query ? <Text color="cyan"> · search: {query}</Text> : null}</Text>{visible.length ? visible.map((item, position) => <Box key={item.id} flexDirection="column"><Text inverse={position === index} color={position === index ? 'cyan' : item.available === false ? 'gray' : 'white'}>{' '}{item.label} <Text color={riskColor(item.risk)}>[{item.risk}]</Text>{' '}</Text>{position === index && <Text color="gray" wrap="truncate-end">  {item.group}: {item.detail}{item.unavailableReason ? ` — ${item.unavailableReason}` : ''}</Text>}</Box>) : <Text color="yellow">Nothing matches.</Text>}</Box>;
+  return <Box flexDirection="column"><Text bold>{visible.length === 1 ? '1 capability' : `${visible.length} capabilities`}{query ? <Text color={toneColor('active')}> · search: {query}</Text> : null}</Text>{visible.length ? visible.map((item, position) => <Box key={item.id} flexDirection="column"><Text inverse={position === index} color={position === index ? toneColor('active') : item.available === false ? toneColor('neutral') : toneColor('plain')}>{' '}{item.label} <Text color={riskColor(item.risk)}>[{item.risk}]</Text>{' '}</Text>{position === index && <Text color="gray" wrap="truncate-end">  {item.group}: {item.detail}{item.unavailableReason ? ` — ${item.unavailableReason}` : ''}</Text>}</Box>) : <Text color={toneColor('warn')}>Nothing matches.</Text>}</Box>;
 }
 
 export function Inspector({ volume }: { volume: VolumeSummary | null }) {
@@ -40,5 +40,5 @@ export function Inspector({ volume }: { volume: VolumeSummary | null }) {
   // disk on every console line and keystroke while this panel is visible.
   const detail = useMemo(() => (volume ? loadVolumeDetail(volume.id) : null), [volume?.id, volume?.updatedAt]);
   if (!volume || !detail) return <Box borderStyle="round" borderColor="gray" paddingX={1}><Text color="gray">Select a volume to inspect it.</Text></Box>;
-  return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}><Text bold wrap="truncate-end">{volume.title}</Text><Text color="gray">{volume.author} · {volume.series}</Text><ProgressBar value={volume.translatedCount} total={volume.chapterCount} /><PhaseStrip phases={volume.phases} /><Text color="gray">JP {detail.jpChapters} · EN {detail.enChapters} · QC {detail.qcReports}</Text>{volume.manifestError ? <Text color="yellow" wrap="truncate-end">! {volume.manifestError}</Text> : null}{detail.lastError ? <Text color="red" wrap="truncate-end">{detail.lastError}</Text> : null}</Box>;
+  return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}><Text bold wrap="truncate-end">{volume.title}</Text><Text color="gray" wrap="truncate-end">{volume.author} · {volume.publisher}</Text><Text color="gray" wrap="truncate-end">{volume.series}</Text><ProgressBar value={volume.translatedCount} total={volume.chapterCount} /><PhaseStrip phases={volume.phases} /><Text color="gray">JP {detail.jpChapters} · EN {detail.enChapters} · QC {detail.qcReports}</Text>{volume.manifestError ? <Text color="yellow" wrap="truncate-end">! {volume.manifestError}</Text> : null}{detail.lastError ? <Text color="red" wrap="truncate-end">{detail.lastError}</Text> : null}</Box>;
 }

@@ -27,14 +27,14 @@ paths:
 #   translate: run_translator
 
 # ── Prep (Cached Multi-turn Context Build) ──────────────────────────────────
-# One persisted DeepSeek conversation fills 15 generated blocks as JSON nodes;
-# the Librarian-owned opf_metadata block makes 16 prep data blocks in total.
+# One persisted DeepSeek conversation fills 16 generated blocks as JSON nodes;
+# the Librarian-owned opf_metadata block makes 17 prep data blocks in total.
 # The final JSON-to-XML assembly is deterministic and atomic.
 # No Gemini, ChromaDB, or main-pipeline subprocess is involved.
 prep:
   # The default is the direct MiniMax-M3 cache loop. The original DeepSeek
   # unified, multi-turn, and parallel paths remain selectable recovery routes.
-  provider: minimax                 # minimax | deepseek
+  provider: deepseek                 # minimax | deepseek | glm | openai
   minimax:
     model: MiniMax-M3
     endpoint: https://api.minimax.io/anthropic
@@ -52,13 +52,62 @@ prep:
     # back. Set true only when DeepSeek is an intentional recovery route.
     fallback_to_deepseek: false
 
+  # GLM-5.3 prep tier through Z.AI's OpenAI-compatible cache loop.
+  glm:
+    model: glm-5.3-flash             # glm-5.3 | glm-5.3-flash
+    endpoint: https://api.z.ai/api/paas/v4
+    api_key_env: ZAI_API_KEY
+    max_output_tokens: 131072
+    context_window: 1000000
+    reasoning_effort: max
+    http_timeout_seconds: 900
+    cache:
+      mode: passive
+      threshold_tokens: 512
+    fallback_to_deepseek: false
+
+  # OpenAI Responses prep route. It reuses the DeepSeek prep prompt's block
+  # schemas and JSON-node output contract, then submits every active prep block
+  # as one request in a durable OpenAI Batch job. Set batch.enabled to false
+  # for the same block loop through synchronous Responses calls.
+  openai:
+    model: gpt-5.6-luna
+    endpoint: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    organization_env: OPENAI_ORG_ID
+    project_env: OPENAI_PROJECT_ID
+    prompt: src/Deepseek/prompt/prep_prompt_deepseek_en.xml
+    http_timeout_seconds: 600
+    generation:
+      max_output_tokens: 128000
+      service_tier: default
+      text:
+        verbosity: high
+    reasoning:
+      mode: standard
+      effort: xhigh
+      context: current_turn
+      summary: null
+      include_encrypted_content: true
+    caching:
+      mode: explicit
+      ttl: 30m
+    batch:
+      enabled: true
+      completion_window: 24h
+      poll_seconds: 60
+      max_wait_seconds: 86400
+      max_attempts: 2
+      resume_completed_blocks: true
+      persistence_file: .context/openai_prep_batch_state.json
+
   # DeepSeek recovery-path defaults. Read only when prep.provider is deepseek.
-  model: deepseek-v4-flash
+  model: deepseek-v4-pro
   endpoint: https://api.deepseek.com/anthropic
   api_key_env: DEEPSEEK_API_KEY
   prompt: src/Deepseek/prompt/prep_prompt_deepseek_en.xml
-  thinking_budget: 64000
-  max_output_tokens: 384000
+  thinking_budget: 32000
+  max_output_tokens: 64000
   effort: xhigh                       # output_config.effort for every prep
                                       # Pro call (unified path's single call,
                                       # and the parallel path's phase1_pro_root)
@@ -164,6 +213,14 @@ prep:
     enabled: true
     conversation_kind: prep
     fallback_to_unified: false   # retain artifacts; retry explicitly to avoid double spend
+    resume_completed_blocks: true # a repeat run re-asks only the turns that never
+                                  # finished. A block is reused when BOTH its
+                                  # <block>.json artifact parses AND the block is
+                                  # still in the persisted conversation history —
+                                  # an artifact whose conversation record is gone
+                                  # (a model/endpoint change resets the prefix) is
+                                  # re-run anyway, so later turns can still see it.
+                                  # `mtl.py prep --force-rerun` overrides per run.
     flash_model: deepseek-v4-flash
     thinking_budget: 64000              # 0 disables extended thinking
     effort: max                        # output_config.effort for every turn
@@ -211,8 +268,8 @@ translation:
   # `deepseek:`, `qwen:`, `openai:`, and `anthropic:` menus below.
   # ════════════════════════════════════════════════════════════════════════
 
-  # Phase 2 provider route: deepseek | qwen | openai | anthropic.
-  provider: openai                 # deepseek | qwen | openai | anthropic
+  # Phase 2 provider route: deepseek | qwen | openai | anthropic | glm.
+  provider: openai                 # deepseek | qwen | openai | anthropic | glm
 
   # Master prompt selection. The base prompt consolidates all 13 RAG module
   # policies inline — no external RAG modules, ChromaDB, or vector stores
@@ -541,19 +598,104 @@ translation:
       partial_prefix: true
 
   # ════════════════════════════════════════════════════════════════════════
+  # GLM CHAT COMPLETIONS ROUTE — Z.AI OpenAI-compatible API.
+  # GLM-5.3 is $1.40/$4.40 per MTok input/output; Flash is $0.075/$0.25
+  # (cached input $0.015) through 2026-09-09, after which its price rises.
+  # ════════════════════════════════════════════════════════════════════════
+  glm:
+    model: glm-5.3-flash             # glm-5.3 | glm-5.3-flash
+    endpoint: https://api.z.ai/api/paas/v4
+    api_key_env: ZAI_API_KEY
+    http_timeout_seconds: 600
+    master_prompt: src/GLM/prompts/master_prompt_glm_en.xml
+    generation:
+      max_output_tokens: 131072
+      temperature: 1.0
+      top_p: 0.95
+    reasoning:
+      # Deep Thinking is the standing policy: reasoning_effort=max on EVERY EPS band
+      # (Z.AI's own default and recommended setting for deep inference).
+      #
+      # This key is intended as the FALLBACK. The authoritative per-band value lives in
+      # src/GLM/prompts/eps_directives_glm.xml and is read by src/GLM/optimization.py.
+      # Changing this line alone will NOT change runtime behaviour — edit that file.
+      #
+      # KNOWN DEFECT (verified 2026-08-27): this key is currently UNREACHABLE.
+      # optimization.py::directive_for_band returns ("", "high") on a missing file or
+      # unknown band, and "high" already satisfies effort_for_band's membership test,
+      # so `configured` is never consulted. Measured:
+      #   effort_for_band("NOSUCHBAND", configured="max") -> "high"
+      # Consequence: if the directives file is lost, the route silently drops to "high"
+      # regardless of this setting. Fix belongs in optimization.py (return an empty
+      # sentinel on failure so the configured value can take over). See
+      # docs/glm-route-interface.md §5.
+      effort: max                    # low | high | max (GLM-5.3 accepts no others)
+    thinking:
+      enabled: true                  # GLM-5.3 cannot disable thinking
+      clear_thinking: true           # false requires exact reasoning_content replay
+    caching:
+      enabled: true                  # Z.AI implicit prefix caching; no cache markers
+      cache_monitor:
+        enabled: true
+        warn_threshold_cache_hit_ratio: 0.70
+    streaming:
+      enabled: true
+    conversation:
+      enabled: true
+      recent_verbatim_chapters: 2
+      persistence_file: .context/glm_conversation.json
+      context_window: 1000000
+      soft_notice_ratio: 0.60
+      compact_ratio: 0.75
+      hard_trim_ratio: 0.90
+    continuation:
+      enabled: true
+      max_continuations: 3
+    retry:
+      max_retries: 5
+      base_delay_ms: 500
+      max_delay_ms: 32000
+      jitter_factor: 0.25
+      max_429_retries: 3
+    optimizations:
+      eps_guidance: true
+      voice_block: true
+
+  # ════════════════════════════════════════════════════════════════════════
   # OPENAI RESPONSES ROUTE MENU — read by src/OpenAI/config.py when
   # provider: openai. The client uses the native OpenAI Responses API.
   # ════════════════════════════════════════════════════════════════════════
   openai:
-    # GPT-5.6 Luna trades peak throughput for the lowest current GPT-5.6
-    # price tier. It has a 1.05M-token context window and a 128K output cap.
-    model: gpt-5.6-luna
+    # GPT-5.6 Terra remains active until Astra access is provisioned. Astra is
+    # deliberately opt-in: change this one value only after an access probe.
+    # Both models have a 1.05M-token context window and a 128K output cap.
+    model: gpt-5.6-sol
     endpoint: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     organization_env: OPENAI_ORG_ID
     project_env: OPENAI_PROJECT_ID
     http_timeout_seconds: 600
     master_prompt: src/OpenAI/prompts/master_prompt_openai_en.md
+
+    # Shared categorical chapter-risk metadata is consumed by every provider.
+    # Only GPT-6 Astra turns a changed signal profile into a Responses
+    # configuration_update item, and that route must use reasoning.mode=standard.
+    chapter_signals:
+      enabled: true
+
+    # Operational fallback. When model is later changed to gpt-6-astra, an
+    # exhausted availability/transport failure may use this existing GPT-5.6
+    # route at a clean chapter boundary. With Terra active today the two model
+    # ids are equal, so this circuit is inert.
+    fallback:
+      enabled: true
+      model: gpt-5.6-terra
+      master_prompt: src/OpenAI/prompts/master_prompt_openai_en.md
+      allow_mixed_model_volume: true
+      resume_pending: true
+
+    routing:
+      persistence_file: .context/openai_route.json
 
     generation:
       # Includes both visible output and reasoning tokens on GPT-5.6.
@@ -565,8 +707,8 @@ translation:
     reasoning:
       # Keep the standard model mode unless an operator explicitly selects
       # pro. Effort is independent and defaults to the maximum literary pass.
-      mode: pro                 # standard | pro
-      effort: xhigh                    # none | minimal | low | medium | high | xhigh | max
+      mode: standard                 # standard | pro
+      effort: high                    # none | minimal | low | medium | high | xhigh | max
       context: all_turns             # auto | current_turn | all_turns
       include_encrypted_content: true
 
@@ -583,7 +725,7 @@ translation:
       # (2) not every model tier supports summaries; gpt-5.6-luna's own
       # model page does not list summary support among its features, unlike
       # plain gpt-5.6. Set to null to stop requesting a summary entirely.
-      summary: auto                  # auto | concise | detailed | null
+      summary: detailed                  # auto | concise | detailed | null
 
     caching:
       # GPT-5.6 explicit cache breakpoints support only the 30-minute TTL.
@@ -598,6 +740,27 @@ translation:
         warn_threshold_prefix_recovery: 0.90
         min_repeat_calls_before_warning: 2
 
+    # ── Batch API ────────────────────────────────────────────────────────────
+    # GPT-6 Astra uses Batch by default because OpenAI publishes Batch at 50%
+    # of Standard rates. GPT-5.6 remains synchronous unless this explicit
+    # switch is enabled. Set auto_for_astra: false to force Astra synchronous
+    # while access or output quality is being evaluated.
+    batch:
+      enabled: true
+      auto_for_astra: true
+      # Every request in a wave is built against one frozen conversation
+      # prefix. Lower this for stronger chapter-to-chapter awareness; raise it
+      # for throughput at the cost of sibling requests being mutually blind.
+      wave_size: 4
+      # A fresh volume starts with one request wave of one so later waves see a
+      # committed translation. Set seed_chapters: 0 to accept a blind first
+      # wave deliberately.
+      seed_chapters: 1
+      seed_via_batch: true
+      poll_seconds: 60
+      completion_window: 24h
+      persistence_file: .context/openai_batch_state.json
+
     streaming:
       enabled: true
 
@@ -611,6 +774,11 @@ translation:
       recent_verbatim_chapters: 2
       context_window: 1050000
       max_input_tokens: 922000
+      max_verbatim_chapters: 8
+      verbatim_ceiling_ratio: 0.60
+      previous_chapter_tail_chars: 1200
+      summary_head_chars: 240
+      summary_tail_chars: 480
       soft_notice_ratio: 0.60
       compact_ratio: 0.75
       hard_trim_ratio: 0.90
@@ -637,14 +805,30 @@ translation:
   #
   # Scoped, deliberately, to the current Claude-5 family that shares one
   # capability profile end to end: claude-sonnet-5, claude-opus-5,
-  # claude-fable-5 — all three adaptive-thinking-only, 1M context, 128K max
+  # claude-fable-5-1 — all three adaptive-thinking-only, 1M context, 128K max
   # output, and a hard 400 on any non-default temperature/top_p/top_k
   # regardless of thinking state. Claude Haiku 4.5 (the one current-family
   # model still on manual budget_tokens thinking, 200K context, 64K output)
   # is out of scope for this route by design, not omission.
+  #
+  # claude-fable-5 was retired here on 2026-09-03 for claude-fable-5-1
+  # (released 2026-09-01): same input/output price, same tokenizer, and cache
+  # reads at $0.25/MTok instead of $1.00 — a quarter of its predecessor's, and
+  # NOT the family's usual 10%-of-input multiplier, so the telemetry table
+  # states it per-model rather than deriving it.
+  #
+  # Fable 5.1 alone adds "preserved thinking": a thinking block's signature
+  # binds the system prompt and every message ahead of it, so replaying one
+  # after that prefix changed is a 400 before any output. The conversation
+  # ledger handles this by stripping thinking from retained turns at each
+  # compaction boundary — gated on the model id, so claude-opus-5 and
+  # claude-sonnet-5 keep every block exactly as they did before.
   # ════════════════════════════════════════════════════════════════════════
   anthropic:
-    model: claude-sonnet-5        # claude-sonnet-5 | claude-opus-5 | claude-fable-5
+    # Wire id, not the display name: Anthropic model ids never contain a dot.
+    # "claude-fable-5.1" is a hard 404 at request time; the client normalises
+    # it, but write the real id here.
+    model: claude-fable-5-1        # claude-sonnet-5 | claude-opus-5 | claude-fable-5-1
     endpoint: https://api.anthropic.com
     api_key_env: ANTHROPIC_API_KEY
     anthropic_version: "2023-06-01"
@@ -653,7 +837,7 @@ translation:
 
     generation:
       # Uniform across all three supported models: 128K is the shared
-      # max-output ceiling for claude-sonnet-5/opus-5/fable-5.
+      # max-output ceiling for claude-sonnet-5/opus-5/fable-5-1.
       max_output_tokens: 128000
       # temperature / top_p / top_k are intentionally absent. Non-default
       # values on any of them are a hard 400 on every model this route
@@ -661,9 +845,9 @@ translation:
 
     # ── Adaptive Thinking ────────────────────────────────────────────────────
     thinking:
-      # Master toggle. claude-fable-5 rejects thinking:{type:"disabled"}
-      # outright — the client keeps thinking on for that model even if this
-      # is set to false.
+      # Master toggle. claude-fable-5-1 rejects thinking:{type:"disabled"}
+      # outright (and budget_tokens likewise) — thinking is always on and the
+      # client keeps it on for that model even if this is set to false.
       enabled: true
 
       # "summarized" returns readable thinking text (billed the same either
@@ -681,7 +865,7 @@ translation:
       enabled: true
       # 5m is the default TTL (1.25x write / 0.1x read pricing multiplier);
       # 1h costs 2x on write but survives longer thinking-heavy sessions.
-      ttl: 5m                          # 5m | 1h
+      ttl: 1h                          # 5m | 1h
       cache_monitor:
         enabled: true
         warn_threshold_cache_hit_ratio: 0.70
@@ -692,14 +876,96 @@ translation:
     # Never a silent fallback from the synchronous path — a deliberate
     # cost/latency trade the operator switches on explicitly.
     batch:
-      enabled: false
+      enabled: true
       # No anthropic-beta headers are ever sent on this route (sync or
       # batch) — deliberately: a beta flag tied to a dated feature can go
       # stale/unrecognized server-side and turn into a hard 400 on every
       # request that carries it. Batch requests use the plain 128K ceiling.
+      # ── Wavefront ─────────────────────────────────────────────────────
+      # Chapters per batch job. Every request in one wave shares a
+      # byte-identical prefix — the cached system blocks plus the
+      # conversation ledger's replayed turns, frozen for that wave — and the
+      # ledger only grows between waves.
+      #
+      # This matters because a batch submits every request before any of them
+      # runs: chapter N cannot carry chapter N-1's translation, since it does
+      # not exist yet. One job per volume therefore translates every chapter
+      # blind to every other. The wave is the dial between the two extremes:
+      #
+      #   1            = the synchronous path's continuity, at batch prices
+      #                  (one job per chapter; slowest, strongest continuity)
+      #   4 (default)  = each chapter sees everything up to its own wave
+      #   >= chapters  = no cross-chapter continuity at all (the old behaviour)
+      #
+      # Raise it for throughput, lower it for fidelity. The shared prefix is
+      # simultaneously the continuity carrier and the cache key, so the 50%
+      # batch discount and the cache-read discount apply to the same bytes.
+      wave_size: 4
+
+      # Chapters translated synchronously before the first wave, to establish
+      # the translation decisions later waves inherit. Only spends when the
+      # ledger is empty (a genuinely fresh volume) — a resumed volume already
+      # has history and skips this. Set 0 to batch from the first chapter and
+      # accept that wave 1 is internally blind.
+      seed_chapters: 1
+
+      # Route the seed through the batch endpoint as its own wave of one.
+      # The seed only has to LAND before the next wave is built, not run
+      # synchronously — a wave of one commits before wave 2's prefix is
+      # assembled, so the continuity invariant above is untouched while the
+      # chapter bills at the 50% batch rate. Measured on Vol.4: the synchronous
+      # seed was $2.06 of a $12.50 volume, 16.5% of the bill for 1,503 words,
+      # purely for taking the sync route. Costs one extra batch round-trip of
+      # latency; set false to get the old immediate-return behaviour.
+      seed_via_batch: true
+
+      # Send each wave's first request alone, let it land, then send the rest.
+      # Every request in a wave carries the same history breakpoint, so exactly
+      # one should WRITE the cached prefix and the rest should read it —
+      # submitted together they race for that write and the loser is billed
+      # too. Measured on Vol.4: CH12/CH13 each wrote 28,693 tokens and
+      # CH18/CH19 each wrote 20,505 — 49,198 duplicate write tokens, 11% of all
+      # writes, $0.49 of the volume. Both were the waves following a
+      # compaction, where the small post-trim prefix tightens the race window.
+      # The remainder is built against the same pre-wave ledger, so its prefix
+      # stays byte-identical and reads what the pilot wrote; wave members are
+      # mutually blind either way.
+      #
+      # auto (default) pilots ONLY the waves built after a compaction — a fold
+      # rewrites the replayed prefix, leaving a cold, small cache entry, and
+      # those were the only waves that actually raced. Waves whose prefix merely
+      # grew never lost the write. On Vol.4 that is 2 waves of 5 rather than 5,
+      # so it recovers the same $0.49 for one extra round-trip instead of five.
+      # always = pilot every wave; never = off.
+      cache_pilot: auto
+
       poll_seconds: 60
       completion_window: 24h
       persistence_file: .context/anthropic_batch_state.json
+
+    # ── Telemetry ───────────────────────────────────────────────────────────
+    # This is the most expensive route in the project. Per-call accounting is
+    # ON by default here, unlike the cheaper providers where it is incidental.
+    #
+    # Each call appends one row to WORK/<vol>/LOG/token_log_<stamp>.md with
+    # fresh / cache-read / cache-write token counts and the actual cost at
+    # today's published rates. Rows are attributed to provider "anthropic" -
+    # before this existed they inherited log_call's "deepseek" default and
+    # were indistinguishable from DeepSeek spend.
+    telemetry:
+      enabled: true
+
+      # The four cache-quality columns: breakpoint success rate, prefix
+      # recovery, total cache coverage, and net cache savings in USD. These
+      # are session-cumulative, so they populate on the synchronous path only;
+      # a batch result belongs to no session and leaves them blank rather than
+      # showing an invented number.
+      #
+      # Watch prefix recovery above all. A cache WRITE costs 1.25x fresh input
+      # (2x at ttl: 1h), so a prefix that keeps missing is more expensive than
+      # not caching at all - the one failure mode that looks like an
+      # optimization while costing more.
+      cache_quality: true
 
     # ── Streaming ───────────────────────────────────────────────────────────
     streaming:
@@ -708,7 +974,54 @@ translation:
     # ── Persistent Conversation ─────────────────────────────────────────────
     conversation:
       enabled: true
+      # Floor: how many verbatim chapters survive a trim.
       recent_verbatim_chapters: 2
+      # Ceiling for the append-only replay window. Every retained turn is
+      # replayed each chapter, so the messages prefix grows by appending and
+      # stays byte-stable -- which is the only way the history cache
+      # breakpoint ever registers a read. On passing this ceiling the window
+      # trims in ONE block back to recent_verbatim_chapters, so the prefix is
+      # invalidated once every (max - recent) chapters instead of every single
+      # chapter as a sliding window would.
+      #
+      # This is a COUNT, and on its own it is a poor proxy for the thing that
+      # actually matters (context pressure) -- see verbatim_ceiling_ratio.
+      max_verbatim_chapters: 8
+
+      # Context pressure below which max_verbatim_chapters does NOT trim.
+      #
+      # The count ceiling used to fire unconditionally. Measured on Vol.4 (21
+      # chapters, claude-fable-5-1) it fired twice at roughly 7% window
+      # occupancy and cut the window to two turns each time, folding eighteen
+      # chapters of finished English into one-line excerpts -- while the whole
+      # volume replayed verbatim estimates at 17% of the window below. The
+      # model noticed the loss and translated around it
+      # (WORK/<vol>/THINKING/CHAPTER_03_THINKING.md: "depends on wording I
+      # don't have access to").
+      #
+      # The ceiling now defers to measured pressure: it trims on count only
+      # once the window is at least this full. compact_ratio and
+      # hard_trim_ratio still guard real pressure above it. Set 0.0 to restore
+      # the old unconditional count cap when a hard per-request ceiling is
+      # wanted more than continuity.
+      verbatim_ceiling_ratio: 0.60
+
+      # What survives of a chapter when it IS folded into the summary: this
+      # many characters from its opening, and this many from its ending. The
+      # tail used to be zero -- only the first 240 characters were kept -- so
+      # every callback, cliffhanger, and open scene a chapter handed to the
+      # next one was discarded first. Continuity flows from the ending.
+      summary_head_chars: 240
+      summary_tail_chars: 480
+
+      # Characters of the PRECEDING chapter's ending spliced into a chapter's
+      # envelope when the ledger no longer replays that chapter in full --
+      # after a fold, on a resumed volume, or inside a batch wave. Read from
+      # EN/<prev>_EN.md, which still holds the full text a fold dropped, so
+      # this is continuity at the cost of its own tokens and nothing else.
+      # 0 disables the splice.
+      previous_chapter_tail_chars: 1200
+
       persistence_file: .context/anthropic_conversation.json
       context_window: 1000000
       soft_notice_ratio: 0.60

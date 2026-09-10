@@ -15,9 +15,12 @@ import { useDirectoryWatcher, useFileWatcher } from './useFileWatcher.js';
 import { useMouseScroll } from './useMouseScroll.js';
 import { useTerminalSize } from './useTerminalSize.js';
 import { ConsolePanel } from './ConsolePanel.js';
-import { ConfigurationPanel, DeepSeekPricingPanel, DeveloperPanel, RuntimeConfigPanel } from './ConfigPanels.js';
+import { ConfigurationPanel, TranslationPricingPanel, DeveloperPanel, RuntimeConfigPanel } from './ConfigPanels.js';
 import { FormPanel } from './FormPanel.js';
 import { CapabilityList, Header, Inspector, Navigation } from './panels.js';
+import { ProgressBar, toneColor } from './components.js';
+import { padCell } from './table.js';
+import { Splash } from './Splash.js';
 import { NAV, initialWorkspace, reducer, type FormState, type Workspace } from './workspaceMachine.js';
 
 function clamp(value: number, length: number): number { return Math.max(0, Math.min(Math.max(0, length - 1), value)); }
@@ -50,7 +53,13 @@ export function App() {
   // developer flag that silently outlived the debugging session it was
   // flipped on for is worse than one that resets and makes you notice.
   const [devDryRunDefault, setDevDryRunDefault] = useState(false);
+  const [splashDone, setSplashDone] = useState(false);
   const layout = layoutForColumns(columns); const activeVolume = volumes.find((volume) => volume.id === workspace.activeVolume) ?? null;
+  // Volumes screen shows Navigation (22) in every non-single-pane layout and
+  // Inspector (35) alongside it for volumes specifically in both two-pane and
+  // three-pane (see the render tree below) — so the side chrome is the same
+  // fixed width in both cases, only single-pane drops it entirely.
+  const volumeTitleWidth = Math.max(12, columns - (layout === 'single-pane' ? 2 : 61) - 16);
   // Console is the only screen ConsolePanel ever renders on — no reason to
   // keep paying for the bordered Header, the Navigation sidebar, and (in
   // three-pane) the Inspector while looking at it. Reclaiming that chrome
@@ -62,7 +71,7 @@ export function App() {
   // the Configuration screen (which writes the file directly, not through
   // this component's state) or by hand in an external editor.
   const [runtimeConfig, setRuntimeConfig] = useState<ConfigLine[]>(() => loadRuntimeConfigLines());
-  useFileWatcher(CONFIG_PATH, () => setRuntimeConfig(loadRuntimeConfigLines()));
+  useFileWatcher(CONFIG_PATH, () => { setConfigFields(loadConfigFields()); setRuntimeConfig(loadRuntimeConfigLines()); });
   // `volumes` is loaded via loadVolumes(), which sorts by updatedAt descending
   // at the source — independent of whatever sort mode the Volumes screen is
   // currently showing. "Latest 10 interacted works" means recency, always,
@@ -138,6 +147,7 @@ export function App() {
   };
 
   useInput((input, key) => {
+    if (!splashDone) { setSplashDone(true); return; }
     const special = key as Key & { pageUp?: boolean; pageDown?: boolean; home?: boolean; end?: boolean };
     if (key.ctrl && key.shift && key.escape) { exit(); return; }
     if (key.ctrl && input === 'c') { if (workspace.run?.status === 'running') stopRun(); return; }
@@ -241,8 +251,9 @@ export function App() {
     }
   });
 
-  const dashboard = <Box flexDirection="column"><RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} /><DeepSeekPricingPanel /><DeveloperPanel dryRunDefault={devDryRunDefault} /></Box>;
-  const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} epubs={epubs} recentVolumes={recentVolumes} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'configuration' ? <ConfigurationPanel fields={filteredConfigFields} cursor={workspace.itemIndex} rows={rows} edit={workspace.configEdit} status={workspace.configStatus} query={workspace.search} /> : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'}>{' '}{volume.title} ({volume.translatedCount}/{volume.chapterCount}){' '}</Text>) || <Text color="yellow">No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={preflight.importsStatus === 'ready' ? 'green' : 'yellow'}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
+  if (!splashDone) return <Splash columns={columns} rows={rows} onDone={() => setSplashDone(true)} />;
+  const dashboard = <Box flexDirection="column"><RuntimeConfigPanel lines={runtimeConfig} offset={workspace.configOffset} rows={rows} /><TranslationPricingPanel fields={configFields} /><DeveloperPanel dryRunDefault={devDryRunDefault} /></Box>;
+  const main = workspace.form ? <FormPanel form={workspace.form} activeVolume={workspace.activeVolume} preflight={preflight} epubs={epubs} recentVolumes={recentVolumes} /> : workspace.nav === 'dashboard' ? dashboard : workspace.nav === 'configuration' ? <ConfigurationPanel fields={filteredConfigFields} cursor={workspace.itemIndex} rows={rows} edit={workspace.configEdit} status={workspace.configStatus} query={workspace.search} /> : workspace.nav === 'workflows' || workspace.nav === 'advanced' ? <CapabilityList items={contentItems} index={workspace.itemIndex} query={workspace.search} /> : workspace.nav === 'volumes' ? <Box flexDirection="column"><Text bold>Volumes · sort {workspace.sort}</Text>{volumeItems.length ? volumeItems.map((volume, index) => <Text key={volume.id} inverse={workspace.itemIndex === index} color={workspace.activeVolume === volume.id ? 'green' : 'white'} wrap="truncate-end">{' '}{padCell(volume.title, volumeTitleWidth)}  <ProgressBar value={volume.translatedCount} total={volume.chapterCount} width={10} />{' '}</Text>) : <Text color={toneColor('warn')}>No manifests in work/ yet.</Text>}</Box> : workspace.nav === 'console' ? <ConsolePanel run={workspace.run} rows={rows} focused={workspace.terminalFocused} cancelConfirm={workspace.cancelConfirm} /> : <Box flexDirection="column"><Text bold>Diagnostics</Text><Text>Python: {preflight.python} ({preflight.pythonStatus})</Text><Text>Imports: {preflight.importsStatus} · MCP: {preflight.mcpStatus} · API key: {preflight.apiKeyPresent ? 'present' : 'missing'}</Text><Text color={toneColor(preflight.importsStatus === 'ready' ? 'good' : 'warn')}>{preflight.detail}</Text>{preflight.importsStatus !== 'ready' && <Text color="cyan">Repair: {preflight.repairCommand}</Text>}</Box>;
   const inspector = <Inspector volume={activeVolume} />;
   const footer = footerText(workspace);
   return <Box flexDirection="column" height={rows} width={columns} paddingX={1} overflow="hidden"><Header activeVolume={workspace.activeVolume} preflight={preflight} columns={columns} compact={maximized} /><Box flexGrow={1} marginTop={1} flexDirection={layout === 'single-pane' ? 'column' : 'row'}>{layout !== 'single-pane' && !maximized && <Navigation navIndex={workspace.navIndex} />}<Box flexDirection="column" flexGrow={1} marginLeft={layout === 'single-pane' || maximized ? 0 : 1}>{layout === 'single-pane' && !maximized && <Text color="gray">{NAV[workspace.navIndex]?.label ?? workspace.nav} › {workspace.form?.spec.label ?? 'workspace'}</Text>}{main}</Box>{!maximized && layout === 'three-pane' && <Box width={35} marginLeft={1}>{inspector}</Box>}{!maximized && layout === 'two-pane' && workspace.nav === 'volumes' && <Box width={35} marginLeft={1}>{inspector}</Box>}</Box><Text color="gray">{footer}</Text></Box>;

@@ -23,7 +23,7 @@ from .ncx_generator import NCXGenerator, NavPoint
 from .nav_generator import NavGenerator, TOCEntry, Landmark
 from .structure_builder import StructureBuilder
 from .xhtml_builder import XHTMLBuilder
-from .markdown_to_xhtml import MarkdownToXHTML
+from .markdown_to_xhtml import MarkdownToXHTML, set_verse_epub_type
 from .epub_packager import EPUBPackager
 from .image_analyzer import get_image_dimensions, is_horizontal, analyze_kuchie_images
 from .merge_translated_shards_to_spine import merge_translated_shards_to_spine
@@ -55,6 +55,21 @@ _CHAPTER_H1_RE = re.compile(r'^#(?!#)\s+(.+?)\s*$')
 # would trip the hard-fail in _extract_chapter_h1_title below.
 _TITLE_CORRECTION_ANNOTATION_RE = re.compile(r'^##\s*TITLE CORRECTION\s*:?', re.IGNORECASE)
 
+# A translation pass sometimes glues the chapter file's sequential "Chapter
+# NN:" label onto a section the JP source actually marks as a different
+# structural type (e.g. this volume's "Intermission 5 ─...─" headers,
+# rendered as "# Chapter 12: Intermission 5 — ..."). The file's ordinal
+# position in the manifest is not its structural type, and shipping both in
+# one nav/OPF title reads as a mislabeled chapter rather than what the
+# section actually is. Only strips the prefix when a recognized alternate
+# type immediately follows, so an ordinary "Chapter 12: Real Title" is
+# never touched.
+_MISLABELED_CHAPTER_PREFIX_RE = re.compile(
+    r'^Chapter\s+\d+\s*[:\-—–]\s*'
+    r'(?=(?:Intermission|Interlude|Epilogue|Prologue|Afterword)\b)',
+    re.IGNORECASE,
+)
+
 # <volume_identity> fields context.xml is expected to carry for every
 # volume once prep has run — see src/Deepseek/prompt/prep_prompt_deepseek_en.xml's
 # volume_identity block spec. No JP fallback on any of these: an empty
@@ -78,6 +93,24 @@ _VOLUME_IDENTITY_FIELD_ALIASES = {
 _BARE_XML_AMPERSAND_RE = re.compile(
     r"&(?!(?:amp|lt|gt|apos|quot);|#\d+;|#x[0-9A-Fa-f]+;)"
 )
+
+
+def _resolve_verse_epub_type(root: ET.Element) -> str:
+    """
+    Read the verse semantic a volume declares for its poem containers.
+
+    Declared as <translation_policy verse_epub_type="z3998:song">, or on that
+    policy's first <form> as epub_type. Returns "" when the volume declares
+    nothing, which leaves the builder on its default.
+    """
+    policy = root.find("translation_policy")
+    if policy is None:
+        return ""
+    declared = (policy.get("verse_epub_type") or "").strip()
+    if not declared:
+        form = policy.find("form")
+        declared = (form.get("epub_type") or "").strip() if form is not None else ""
+    return declared
 
 
 def _escape_legacy_bare_ampersands(context_xml: str) -> str:
@@ -130,8 +163,16 @@ p.blockquote {
   margin: 0.35em 1.25em;
 }
 
-p.lyric {
+div.poem {
   text-indent: 0;
+  margin: 1em 0 1em 1.5em;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+p.lyric {
+  text-indent: -1em;
+  padding-left: 1em;
   margin: 0.05em 0;
   text-align: left;
 }
@@ -139,6 +180,25 @@ p.lyric {
 p.lyric-break {
   text-indent: 0;
   margin: 0.35em 0;
+}
+
+/* Structured blocks: in-world documents, message-board posts, cast lists,
+   aligned grids. These are never prose, so they never take the prose
+   first-line indent. */
+.note {
+  text-indent: 0;
+  margin: 0.5em 0;
+}
+
+.doc-list {
+  text-indent: 0;
+  margin: 0.6em 0 0.6em 1.5em;
+  padding: 0;
+}
+
+li {
+  text-indent: 0;
+  margin: 0.15em 0;
 }
 
 /* Scene Break - Force center alignment with maximum specificity */
@@ -951,6 +1011,10 @@ class BuilderAgent:
                 "and revalidated the complete document"
             )
 
+        verse_type = set_verse_epub_type(_resolve_verse_epub_type(root))
+        if verse_type != "z3998:poem":
+            print(f"     Verse containers marked as {verse_type}")
+
         volume_identity = root.find("volume_identity")
         if volume_identity is None:
             raise ValueError(f"context.xml at {context_path} has no <volume_identity> block")
@@ -1017,6 +1081,10 @@ class BuilderAgent:
             "translated markdown — required now that chapter titles come from EN "
             "output instead of manifest.json"
         )
+
+    def _normalize_chapter_title(self, title: str) -> str:
+        """Strip a spurious 'Chapter NN: ' prefix glued onto a differently-typed section."""
+        return _MISLABELED_CHAPTER_PREFIX_RE.sub('', title, count=1)
 
     def _load_manifest(self, work_dir: Path) -> dict:
         """Load manifest.json from work directory."""
@@ -1313,6 +1381,7 @@ class BuilderAgent:
             title = self._extract_chapter_h1_title(
                 md_content, source_label=f"{chapter_id} ({source_file or 'merged batch'})"
             )
+            title = self._normalize_chapter_title(title)
 
             # Use pre-detected header from lookup (auto-detected in build_epub)
             # Fall back to extraction only if no pre-detected headers provided
@@ -1408,21 +1477,25 @@ class BuilderAgent:
                 media_type="application/xhtml+xml"
             ))
 
-            # Track for navigation (skip pre-TOC content like cover pages)
-            if not primary.get('is_pre_toc_content', False):
-                chapter_entry = {
-                    'id': chapter_id,
-                    'title': title,
-                    'xhtml_filename': xhtml_filename,
-                    'href': f"Text/{xhtml_filename}",
-                }
-                # Add header illustration ID if present (for spine ordering)
-                if header_illustration_active and header_illustration_placeholder:
-                    from src.Deepseek.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
-                    match = re.search(ILLUSTRATION_PLACEHOLDER_PATTERN, header_illustration_placeholder)
-                    if match:
-                        chapter_entry['header_id'] = f"chapter-{i+1:03d}-header"
-                chapter_info.append(chapter_entry)
+            # Track every chapter for navigation. Pre-TOC content (front
+            # plates, premise pages, etc.) must still render in the spine, but
+            # is excluded from the table of contents / nav listing. Tag it so
+            # the spine and navigation generators can tell the two apart.
+            chapter_entry = {
+                'id': chapter_id,
+                'title': title,
+                'xhtml_filename': xhtml_filename,
+                'href': f"Text/{xhtml_filename}",
+            }
+            if primary.get('is_pre_toc_content', False):
+                chapter_entry['pre_toc'] = True
+            # Add header illustration ID if present (for spine ordering)
+            if header_illustration_active and header_illustration_placeholder:
+                from src.Deepseek.common.config import ILLUSTRATION_PLACEHOLDER_PATTERN
+                match = re.search(ILLUSTRATION_PLACEHOLDER_PATTERN, header_illustration_placeholder)
+                if match:
+                    chapter_entry['header_id'] = f"chapter-{i+1:03d}-header"
+            chapter_info.append(chapter_entry)
 
             if len(batch) > 1:
                 merged_count = len([f for f in merged_source_files if f])
@@ -1763,8 +1836,16 @@ class BuilderAgent:
         for line in lines:
             line = line.strip()
 
-            # Skip markdown headers (# Title)
-            if line.startswith('#'):
+            # A '# Title' line is the chapter's own H1 — already extracted
+            # separately by _extract_chapter_h1_title, and if several
+            # chapters were merged into one batch (see the '\n\n'.join
+            # above), a later chunk's own H1 would otherwise duplicate as
+            # body text. A '## TITLE CORRECTION: ...' line is prep/QC
+            # scratch, same rule as in _extract_chapter_h1_title. Neither
+            # should ever print. Any other '##'+ line is a real sub-heading
+            # (e.g. an embedded scene/episode title) and must reach the
+            # XHTML converter instead of silently vanishing here.
+            if _CHAPTER_H1_RE.match(line) or _TITLE_CORRECTION_ANNOTATION_RE.match(line):
                 continue
 
             # Empty line = blank marker
@@ -1829,6 +1910,11 @@ class BuilderAgent:
             match = re.match(r'Interlude (\d+)', filename, re.IGNORECASE)
             if match:
                 return f"INTERLUDE_{int(match.group(1)):02d}"
+
+        if filename.lower().startswith('intermission'):
+            match = re.match(r'Intermission (\d+)', filename, re.IGNORECASE)
+            if match:
+                return f"INTERMISSION_{int(match.group(1)):02d}"
         
         if filename.lower().startswith('epilogue'):
             return "EPILOGUE"
@@ -2402,6 +2488,8 @@ class BuilderAgent:
             
             current_act_num = 0
             for ch in chapter_info:
+                if ch.get('pre_toc'):
+                    continue
                 act = ch_id_to_act.get(ch['id'])
                 if act and act['act_number'] != current_act_num:
                     current_act_num = act['act_number']
@@ -2420,6 +2508,8 @@ class BuilderAgent:
                 })
         else:
             for ch in chapter_info:
+                if ch.get('pre_toc'):
+                    continue
                 toc_entries.append({
                     'href': ch['xhtml_filename'],
                     'label': self._coerce_text(ch.get('title'), 'Chapter')
@@ -2624,6 +2714,8 @@ class BuilderAgent:
                 # Build child entries from chapter_info that match this act
                 child_entries = []
                 for ch in chapter_info:
+                    if ch.get('pre_toc'):
+                        continue
                     if ch['id'] in act_chapter_ids:
                         child_entries.append(TOCEntry(
                             label=self._coerce_text(ch.get('title'), 'Chapter'),
@@ -2643,15 +2735,19 @@ class BuilderAgent:
                 )
                 toc_entries.append(act_entry)
         else:
-            # Flat TOC (original behavior)
+            # Flat TOC (original behavior); pre-TOC content is not listed
             for ch in chapter_info:
+                if ch.get('pre_toc'):
+                    continue
                 toc_entries.append(TOCEntry(
                     label=self._coerce_text(ch.get('title'), 'Chapter'),
                     href=ch['xhtml_filename']
                 ))
 
         # Landmarks
-        first_chapter = chapter_info[0]['xhtml_filename'] if chapter_info else "chapter001.xhtml"
+        first_bodymatter = next((ch for ch in chapter_info if not ch.get('pre_toc')), None)
+        first_chapter = (first_bodymatter or (chapter_info[0] if chapter_info else None))
+        first_chapter = first_chapter['xhtml_filename'] if first_chapter else "chapter001.xhtml"
         landmarks = [
             Landmark(epub_type="cover", href="cover.xhtml", title=cover_title),
             Landmark(epub_type="toc", href="nav.xhtml", title=toc_title),
@@ -2690,6 +2786,8 @@ class BuilderAgent:
         play_order += 1
 
         for ch in chapter_info:
+            if ch.get('pre_toc'):
+                continue
             nav_points.append(NavPoint(
                 id=f"nav_{ch['id']}",
                 label=self._coerce_text(ch.get('title'), 'Chapter'),
@@ -2804,12 +2902,22 @@ class BuilderAgent:
             for idx in act_kuchie_map.get(1, []):
                 spine_items.append(SpineItem(idref=f"kuchie-{idx+1:03d}"))
             
+            # Pre-TOC content (front plates, premise pages) ahead of the TOC
+            for ch in chapter_info:
+                if not ch.get('pre_toc'):
+                    continue
+                if ch.get('header_id'):
+                    spine_items.append(SpineItem(idref=ch['header_id']))
+                spine_items.append(SpineItem(idref=ch['id']))
+
             # TOC page
             spine_items.append(SpineItem(idref="toc-page"))
             
             # Interleave chapters with act boundaries
             current_act = 1
             for ch in chapter_info:
+                if ch.get('pre_toc'):
+                    continue
                 ch_act = chapter_act_map.get(ch['id'], current_act)
 
                 # If we've crossed into a new act, insert separator + kuchie
@@ -2831,11 +2939,22 @@ class BuilderAgent:
             for i in range(len(kuchie_list)):
                 spine_items.append(SpineItem(idref=f"kuchie-{i+1:03d}"))
 
+            # Pre-TOC content (front plates, premise pages) renders ahead of the
+            # table of contents even though it is not listed in the contents.
+            for ch in chapter_info:
+                if not ch.get('pre_toc'):
+                    continue
+                if ch.get('header_id'):
+                    spine_items.append(SpineItem(idref=ch['header_id']))
+                spine_items.append(SpineItem(idref=ch['id']))
+
             # TOC page
             spine_items.append(SpineItem(idref="toc-page"))
 
-            # Chapters
+            # Chapters (pre-TOC content was placed above)
             for ch in chapter_info:
+                if ch.get('pre_toc'):
+                    continue
                 # Add header illustration page before chapter if present
                 if ch.get('header_id'):
                     spine_items.append(SpineItem(idref=ch['header_id']))

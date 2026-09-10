@@ -20,14 +20,16 @@ export type VolumeSummary = {
   id: VolumeId;
   title: string;
   author: string;
+  publisher: string;
   series: string;
   hasEnTitle: boolean;
   updatedAt: number;
   chapterCount: number;
   translatedCount: number;
   phases: PhaseStatus[];
-  // Present only when manifest.json failed boundary validation — the entry
-  // is degraded (zeros everywhere) and this carries the parse failure.
+  // Present when manifest.json is missing entirely OR failed boundary
+  // validation — either way the entry is degraded (zeros everywhere) and
+  // this carries the reason (missing-file notice, or the parse failure).
   manifestError?: string;
 };
 

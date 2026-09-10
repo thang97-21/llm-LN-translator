@@ -95,7 +95,7 @@
     1. &lt;existing_context_xml&gt; — the Librarian's barebone context.xml. Its root is
        &lt;mtls_project_context schema_version="1.0" volume_id="..." target_language="en" generated_by="librarian"&gt;.
        It already contains a populated &lt;opf_metadata format="json"&gt; block (raw OPF passthrough — do not touch it)
-       and 16 sibling blocks, each currently a placeholder:
+        and 17 sibling blocks, each currently a placeholder:
        &lt;BLOCK_NAME status="pending" owner="..."&gt;&lt;pending&gt;Awaiting owning agent.&lt;/pending&gt;&lt;/BLOCK_NAME&gt;
        (Note: &lt;chapter_titles_en&gt; may not exist in the barebone — create it.)
     2. &lt;bible_context&gt; (OPTIONAL — present only for sequel volumes) — a JSON dump of the series bible's
@@ -219,12 +219,30 @@
       Wraps one &lt;character id="c1" canonical_name="Yamada Tarō" is_pov="true|false"&gt; per named character,
       each nesting:
         &lt;identity&gt;&lt;jp_name&gt;山田太郎&lt;/jp_name&gt;&lt;reading&gt;やまだたろう&lt;/reading&gt;&lt;age&gt;...&lt;/age&gt;
-          &lt;role&gt;protagonist|deuteragonist|supporting|antagonist&lt;/role&gt;&lt;/identity&gt;
+          &lt;role&gt;protagonist|deuteragonist|supporting|antagonist&lt;/role&gt;
+          &lt;gender pronouns="he/him|she/her|they/them" evidence="explicit|inferred|unspecified"&gt;the JP
+            span that settles it, quoted&lt;/gender&gt;&lt;/identity&gt;
+
         &lt;personality&gt;2-4 sentence archetype and temperament summary&lt;/personality&gt;
         &lt;voice&gt;register (formal/casual/mixed), contraction tendency, 1-3 &lt;signature_phrases&gt;&lt;phrase&gt;
           entries if the character has a verbal tic or catchphrase, &lt;forbidden_vocabulary&gt;&lt;term&gt; entries
           for words that would break their voice (e.g. a stiff character never says "gonna")&lt;/voice&gt;
         &lt;relationship_to_others&gt;free text, one line per notable relationship&lt;/relationship_to_others&gt;
+
+      &lt;gender&gt; IS MANDATORY on every roster character, including off-page and mentioned-only ones.
+      English forces a pronoun on the first mention of a character Japanese can leave ungendered for
+      whole chapters, so the translator needs this before it needs anything else about them.
+      @pronouns is the EN pronoun set the translation must use. @evidence records how you know:
+        explicit    — the source states it (男子, 女の子, この女性, 彼/彼女 used of them, a gendered
+                      self-reference). Quote the span in the element text.
+        inferred    — deduced from register, honorific, or role only. Say what you inferred from;
+                      downstream treats this as provisional.
+        unspecified — the source genuinely never settles it. Say so plainly. Downstream will avoid
+                      the pronoun rather than guess; do NOT pick one to be helpful.
+      Never infer gender from occupation, hobby, emotional expression, or politeness level alone —
+      those are register signals, not gender signals, and a wrong guess becomes a hard continuity
+      error the moment the character appears on the page.
+
       Use `id="c1"`, `"c2"`, ... sequentially. If a character already exists in bible_context, reuse the
       bible's canonical_name exactly and note that in a `bible_locked="true"` attribute on &lt;identity&gt;.
     </block>
@@ -311,6 +329,23 @@
       resolution|transition" eps_band="HOT|WARM|NEUTRAL|COOL|COLD"&gt; per major narrative beat, with
       &lt;emotional_arc&gt;, &lt;dialogue_register&gt;, &lt;target_rhythm&gt; (fast|measured|slow) child elements.
       2-5 scenes per chapter is typical — don't over-segment short chapters.
+    </block>
+
+    <block name="chapter_signals">
+      Translation-risk handoff for every chapter. Do not use numeric EPS values, model names, provider
+      settings, or prose instructions in this block. Wrap one &lt;chapter id="CHAPTER_NN"&gt; per source
+      chapter. Add zero or more self-closing &lt;signal name="ambiguity|ateji|multi_speaker|voice_contrast|
+      wordplay|pov_shift|continuity|structural" severity="low|medium|high|critical" detail="..."/&gt;
+      elements, using only risks supported by the source and prepared context. Use `ateji` for Ateji,
+      phonetic wordplay, ruby-dependent interpretation, or deliberate written/spoken divergence. Use
+      `multi_speaker` when the chapter requires speaker attribution, and `voice_contrast` when active
+      speakers have materially different voice_fingerprint profiles. Include one &lt;speaker name="..."
+      voice_profile="..."/&gt; per active speaker when the profile is known. The `name` attribute MUST
+      exactly reuse a `canonical_name` from &lt;injected_character_roster&gt;; put persona, age, timeline,
+      or role distinctions in `voice_profile` instead, and omit unrostered generic speakers. An empty chapter element is
+      valid and means no additional semantic risk was identified. This block is consumed by every
+      translation provider; a provider may use it as focus metadata, but must still verify the current
+      Japanese source. Never turn a risk flag into an invented event or resolved ambiguity.
     </block>
 
     <block name="illustration_context">

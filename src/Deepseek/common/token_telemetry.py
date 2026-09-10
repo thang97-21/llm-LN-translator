@@ -87,16 +87,16 @@ DEEPSEEK_PRICING_PER_MTOK: Dict[str, Dict[str, Dict[str, float]]] = {
 }
 
 PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
-    # QwenCloud text-only pricing (USD / 1M tokens), verified 2026-08-06 against
-    # https://www.qwencloud.com/models/{qwen3.8-max,qwen3.7-plus,qwen3.7-flash}.
-    # cache_hit = implicit (automatic) cache read; cache_write = explicit cache
-    # creation (Context Cache API). Explicit cache read has its own lower rate
-    # ($0.17 / $0.04 / $0.003) but we don't track that distinction yet.
-    # qwen3.7-plus currently also has a 20%-off promo ($0.32/$1.28/$0.064/$0.4);
-    # list prices below, not promo.
+    # QwenCloud real-time API pricing, verified 2026-08-27. cache_hit holds
+    # implicit-cache rates; _rates_for_model swaps in the explicit-cache rate
+    # when the caller identifies the Qwen cache mode.
     "qwen3.8-max":  {"cache_hit": 0.25, "cache_miss": 2.0, "cache_write": 2.5,  "output": 6.0},
-    "qwen3.7-plus": {"cache_hit": 0.08, "cache_miss": 0.4, "cache_write": 0.5,  "output": 1.6},
+    "qwen3.7-max":  {"cache_hit": 0.25, "cache_miss": 1.25, "cache_write": 1.5625, "output": 3.75},
+    "qwen3.7-plus": {"cache_hit": 0.064, "cache_miss": 0.32, "cache_write": 0.4, "output": 1.28},
     "qwen3.7-flash":{"cache_hit": 0.006,"cache_miss": 0.03,"cache_write": 0.038,"output": 0.13},
+    # OpenAI GPT-6 Astra pricing (USD / 1M tokens), verified against the
+    # official model page. GPT-5.6 family rows follow below.
+    "gpt-6-astra":   {"cache_hit": 1.00, "cache_miss": 10.00, "cache_write": 12.50, "output": 50.00},
     # OpenAI GPT-5.6 family text pricing (USD / 1M tokens), verified 2026-08-17
     # against https://developers.openai.com/api/docs/pricing. Sol/Terra/Luna
     # are the three snapshot tiers; the long-context surcharge above 272K
@@ -105,17 +105,59 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
     "gpt-5.6-sol":  {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25, "output": 30.00},
     "gpt-5.6-terra":{"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50, "output": 12.00},
     "gpt-5.6-luna": {"cache_hit": 0.02, "cache_miss": 0.20, "cache_write": 0.25, "output": 1.20},
-    # Anthropic Claude-5 family pricing (USD / 1M tokens), verified 2026-08-20
-    # against https://platform.claude.com/docs/en/about-claude/models/overview.
-    # cache_hit = 0.1x the base input rate, matching the documented 5m-TTL
-    # cache-read multiplier; cache_write here approximates the 5m-TTL write
-    # multiplier (1.25x input) — the 1h-TTL write rate (2x) isn't tracked as
-    # a separate column, same "not billing-exact" disclaimer this module
-    # already carries for DeepSeek/Qwen's own approximated rates.
-    "claude-sonnet-5": {"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50, "output": 10.00},
-    "claude-opus-5":   {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25, "output": 25.00},
-    "claude-fable-5":  {"cache_hit": 1.00, "cache_miss": 10.00, "cache_write": 12.50, "output": 50.00},
+    # Anthropic Claude-5 family pricing (USD / 1M tokens). sonnet-5/opus-5
+    # verified 2026-08-20; claude-fable-5-1 verified 2026-09-03 against
+    # https://platform.claude.com/docs/en/models/fable-5-1/overview.
+    #
+    # cache_hit is 0.1x the base input rate on sonnet-5/opus-5, but Fable 5.1
+    # prices cache reads at 0.025x — $0.25/MTok, a per-model rate the vendor
+    # states outright, NOT the family multiplier. It must be read from this
+    # table and never derived from cache_miss, or every cached token on the
+    # Fable route is overstated fourfold. cache_write approximates the 5m-TTL
+    # write multiplier (1.25x input); the 1h-TTL write rate (2x — $20/MTok on
+    # fable-5-1) isn't tracked as a separate column, the same "not
+    # billing-exact" disclaimer this module already carries for DeepSeek and
+    # Qwen's own approximated rates.
+    # cache_write is the 5m-TTL rate (1.25x input); cache_write_1h is the
+    # 1h-TTL rate (2x input). $20/MTok on fable-5-1 is stated outright on the
+    # model page; the other two follow the documented 2x rule. Selected by
+    # translation.anthropic.caching.ttl, so a 1h run is not costed at the 5m
+    # rate and understated by 40%.
+    "claude-sonnet-5":  {"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50,  "cache_write_1h": 4.00,  "output": 10.00},
+    "claude-opus-5":    {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25,  "cache_write_1h": 10.00, "output": 25.00},
+    "claude-fable-5-1": {"cache_hit": 0.25, "cache_miss": 10.00, "cache_write": 12.50, "cache_write_1h": 20.00, "output": 50.00},
+    # Z.AI GLM-5.3 pricing (USD / 1M tokens), verified 2026-08-27. Cached
+    # input storage is limited-time free, so it is not a token-billed write.
+    "glm-5.3":       {"cache_hit": 0.26,  "cache_miss": 1.40, "cache_write": 0.0, "output": 4.40},
+    "glm-5.3-flash": {"cache_hit": 0.03,  "cache_miss": 0.15, "cache_write": 0.0, "output": 0.50},
 }
+
+# Message Batches API discount. "50% cost reduction on all token usage"
+# (Anthropic's batch-processing docs; the Fable 5.1 model page states it as
+# "50% discount on input and output"). Applied to all four rate columns.
+#
+# The residual uncertainty is the cache columns: if Anthropic bills cache
+# reads and writes undiscounted, this understates a batch run by that portion
+# alone. That is a deliberate choice against this module's usual
+# guess-high rule, because a ledger for a route whose entire justification is
+# the discount must be able to show it. Verify a real batch run against the
+# console before treating these rows as billing-exact - this module has never
+# claimed to be.
+_BATCH_DISCOUNT = 0.5
+
+# The exact model set src/Anthropic is built and verified against. Kept here
+# so the conservative fallback below is derived from the table rather than
+# from a hand-picked row that can silently stop being the priciest one.
+_ANTHROPIC_MODELS = ("claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
+
+_QWEN_EXPLICIT_CACHE_READ_PER_MTOK = {
+    "qwen3.8-max": 0.17,
+    "qwen3.7-max": 0.125,
+    "qwen3.7-plus": 0.032,
+    "qwen3.7-flash": 0.003,
+}
+_GLM_FLASH_PROMOTION_END = datetime(2026, 9, 9, 16, tzinfo=timezone.utc)
+_GLM_FLASH_PROMOTION_RATES = {"cache_hit": 0.015, "cache_miss": 0.075, "cache_write": 0.0, "output": 0.25}
 
 
 def deepseek_pricing_status(now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -131,11 +173,12 @@ def deepseek_pricing_status(now: Optional[datetime] = None) -> Dict[str, Any]:
     if local_now.tzinfo is None:
         local_now = local_now.astimezone()
     utc_now = local_now.astimezone(timezone.utc)
-    is_peak = any(start <= utc_now.hour < end for start, end in DEEPSEEK_PEAK_UTC_WINDOWS)
+    has_peak_windows = bool(DEEPSEEK_PEAK_UTC_WINDOWS)
+    is_peak = has_peak_windows and any(start <= utc_now.hour < end for start, end in DEEPSEEK_PEAK_UTC_WINDOWS)
     period = "peak" if is_peak else "off_peak"
     return {
         "period": period,
-        "label": "Peak" if is_peak else "Off-peak",
+        "label": "Peak" if is_peak else ("Off-peak" if has_peak_windows else "Standard"),
         "local_time": local_now.isoformat(timespec="minutes"),
         "local_timezone": local_now.tzname() or "local time",
         "utc_time": utc_now.isoformat(timespec="minutes"),
@@ -153,8 +196,19 @@ def _rates_for_model(
     *,
     input_tokens: int = 0,
     pricing_at: Optional[datetime] = None,
+    cache_pricing_mode: str = "implicit",
 ) -> Dict[str, float]:
     name = str(model_name or "").strip().lower()
+    if name.startswith("gpt-6-astra"):
+        rates = PRICING_PER_MTOK["gpt-6-astra"]
+        if int(input_tokens) > 272_000:
+            return {
+                "cache_hit": rates["cache_hit"] * 2,
+                "cache_miss": rates["cache_miss"] * 2,
+                "cache_write": rates["cache_write"] * 2,
+                "output": rates["output"] * 1.5,
+            }
+        return rates
     if name.startswith("gpt-5.6"):
         if name == "gpt-5.6" or name.startswith("gpt-5.6-sol"):
             model = "gpt-5.6-sol"
@@ -176,24 +230,51 @@ def _rates_for_model(
                 "output": rates["output"] * 1.5,
             }
         return rates
-    if name in PRICING_PER_MTOK:
-        return PRICING_PER_MTOK[name]
-    if name.startswith("claude-"):
-        # This route (src/Anthropic) is scoped to sonnet-5/opus-5/fable-5
-        # only — any other claude-* name reaching here (a config typo, or a
-        # model outside the supported set) bills at the priciest of the
-        # three rather than silently undercounting cost.
-        return PRICING_PER_MTOK["claude-fable-5"]
+    if name == "glm-5.3-flash":
+        at = pricing_at or datetime.now(timezone.utc)
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        return _GLM_FLASH_PROMOTION_RATES if at.astimezone(timezone.utc) < _GLM_FLASH_PROMOTION_END else PRICING_PER_MTOK[name]
     if name.startswith("qwen"):
         if "flash" in name:
-            return PRICING_PER_MTOK["qwen3.7-flash"]
-        if "plus" in name:
-            return PRICING_PER_MTOK["qwen3.7-plus"]
+            model = "qwen3.7-flash"
+        elif "plus" in name:
+            model = "qwen3.7-plus"
+        elif "3.7-max" in name:
+            model = "qwen3.7-max"
+        else:
+            model = "qwen3.8-max"
         # Frontier-class fallback: any other qwen model (qwen3.7-max and
         # whatever succeeds it) bills at max-tier rates. Deliberately the
         # priciest Qwen tier — a cost ledger that guesses low is worse than
         # useless, because nobody audits a number that looks cheap.
-        return PRICING_PER_MTOK["qwen3.8-max"]
+        rates = dict(PRICING_PER_MTOK[model])
+        if str(cache_pricing_mode).lower() == "explicit":
+            rates["cache_hit"] = _QWEN_EXPLICIT_CACHE_READ_PER_MTOK[model]
+        return rates
+    if name in PRICING_PER_MTOK:
+        return PRICING_PER_MTOK[name]
+    if name.startswith("claude-"):
+        # Accept the dotted display spelling ("claude-fable-5.1") as an alias
+        # for the wire id ("claude-fable-5-1"). config.yaml carried the dotted
+        # form for a while, and a cost ledger should not drop to a guess over
+        # a punctuation difference when it knows the real rates.
+        aliased = name.replace(".", "-")
+        if aliased in PRICING_PER_MTOK:
+            return PRICING_PER_MTOK[aliased]
+        # Any other claude-* name (a genuine typo, or a model outside the
+        # supported set) must not silently undercount. No single row is the
+        # conservative choice any more: fable-5-1 is priciest on input and
+        # output but has the CHEAPEST cache read of the three ($0.25 against
+        # Opus 5's $0.50), so take the per-column maximum instead.
+        return {
+            column: max(PRICING_PER_MTOK[model][column] for model in _ANTHROPIC_MODELS)
+            for column in ("cache_hit", "cache_miss", "cache_write", "output")
+        }
+    if name.startswith("glm-5.3-flash"):
+        return PRICING_PER_MTOK["glm-5.3-flash"]
+    if name.startswith("glm-5.3"):
+        return PRICING_PER_MTOK["glm-5.3"]
     model = "deepseek-v4-flash" if "flash" in name else "deepseek-v4-pro"
     return DEEPSEEK_PRICING_PER_MTOK[model][deepseek_pricing_status(pricing_at)["period"]]
 
@@ -206,7 +287,11 @@ def cost_breakdown_usd(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     cache_creation_included_in_input: bool = False,
+    cache_read_included_in_input: bool = True,
+    cache_ttl: str = "5m",
     pricing_at: Optional[datetime] = None,
+    cache_pricing_mode: str = "implicit",
+    batch: bool = False,
     **_ignored: Any,
 ) -> Dict[str, Any]:
     """Full cost breakdown dict — same shape src/translator/deepseek_client.py's
@@ -217,23 +302,45 @@ def cost_breakdown_usd(
     where ``usage.input_tokens`` already contains cache-write tokens. Other
     providers retain the established accounting semantics by default.
 
-    ``pricing_at`` only matters for DeepSeek's clock-sensitive peak/off-peak
-    tariff (see deepseek_pricing_status()); every other provider ignores it.
+    ``cache_read_included_in_input`` is the mirror image, and it matters more.
+    The Anthropic Messages API reports ``input_tokens``,
+    ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` as three
+    DISJOINT counts: input_tokens already excludes anything served from cache.
+    Subtracting the reads again drives the fresh figure to zero on exactly the
+    workload caching is for - a 44K cached prefix against a 5K chapter
+    envelope yields max(0, 5000 - 44000) = 0, and every genuinely fresh token
+    bills at nothing. Pass False for that family. Left True by default so no
+    existing provider's accounting shifts underneath it.
+
+    ``cache_ttl`` selects the cache-write rate: "5m" (1.25x input) or "1h"
+    (2x). Ignored by models with no 1h column.
+
+    ``pricing_at`` selects DeepSeek's clock-sensitive tariff and the
+    date-bounded GLM-5.3-Flash promotion. Other providers ignore it.
+
+    ``batch`` marks a call served by a provider's Batch API (Anthropic Message
+    Batches or OpenAI Batch), which bills at half rate. It scales the rates rather than the total, so the
+    returned ``*_rate_per_mtok`` fields agree with the returned cost instead
+    of quietly disagreeing with it.
     """
     model_name_normalized = str(model_name or "").strip().lower()
-    is_deepseek = not model_name_normalized.startswith(("qwen", "gpt-5.6", "claude-"))
+    is_deepseek = model_name_normalized.startswith("deepseek")
     rate_status = deepseek_pricing_status(pricing_at) if is_deepseek else None
-    rates = _rates_for_model(model_name, input_tokens=input_tokens, pricing_at=pricing_at)
+    rates = _rates_for_model(model_name, input_tokens=input_tokens, pricing_at=pricing_at, cache_pricing_mode=cache_pricing_mode)
+    if batch:
+        rates = {column: float(rate) * _BATCH_DISCOUNT for column, rate in rates.items()}
     uncached_input = max(
         0,
         int(input_tokens)
-        - int(cache_read_tokens)
+        - (int(cache_read_tokens) if cache_read_included_in_input else 0)
         - (int(cache_creation_tokens) if cache_creation_included_in_input else 0),
     )
 
     input_cost = uncached_input * rates["cache_miss"] / 1_000_000
     cache_read_cost = int(cache_read_tokens) * rates["cache_hit"] / 1_000_000
     cache_write_rate = float(rates.get("cache_write", 0.0) or 0.0)
+    if str(cache_ttl).strip().lower() == "1h" and rates.get("cache_write_1h"):
+        cache_write_rate = float(rates["cache_write_1h"])
     cache_creation_cost = int(cache_creation_tokens) * cache_write_rate / 1_000_000
     output_cost = int(output_tokens) * rates["output"] / 1_000_000
     total = input_cost + cache_read_cost + cache_creation_cost + output_cost
@@ -255,7 +362,14 @@ def cost_breakdown_usd(
     }
 
 
-def compute_cost_usd(model: str, *, cache_hit_tokens: int, fresh_tokens: int, output_tokens: int) -> float:
+def compute_cost_usd(
+    model: str,
+    *,
+    cache_hit_tokens: int,
+    fresh_tokens: int,
+    output_tokens: int,
+    batch: bool = False,
+) -> float:
     """Total-only convenience wrapper around cost_breakdown_usd() for callers
     (prep) that don't need the per-component split."""
     return cost_breakdown_usd(
@@ -263,6 +377,7 @@ def compute_cost_usd(model: str, *, cache_hit_tokens: int, fresh_tokens: int, ou
         input_tokens=int(fresh_tokens) + int(cache_hit_tokens),
         cache_read_tokens=cache_hit_tokens,
         output_tokens=output_tokens,
+        batch=batch,
     )["total_cost_usd"]
 
 
@@ -463,6 +578,7 @@ def log_call(
     output_tokens: int,
     cost_usd: Optional[float] = None,
     provider: str = "deepseek",
+    batch: bool = False,
     cache_write_tokens: int = 0,
     breakpoint_success_rate: Optional[float] = None,
     prefix_recovery: Optional[float] = None,
@@ -485,7 +601,8 @@ def log_call(
     """
     if cost_usd is None:
         cost_usd = compute_cost_usd(
-            model, cache_hit_tokens=cache_hit_tokens, fresh_tokens=fresh_tokens, output_tokens=output_tokens,
+            model, cache_hit_tokens=cache_hit_tokens, fresh_tokens=fresh_tokens,
+            output_tokens=output_tokens, batch=batch,
         )
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ratio = lambda value: "-" if value is None else f"{float(value) * 100:.2f}%"

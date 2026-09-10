@@ -13,12 +13,35 @@ const manifestChapterSchema = z.looseObject({
   state: z.string().optional(),
 });
 
+// The two metadata blocks use opposite conventions: `metadata` suffixes every
+// key by language (title_jp / title_en), `metadata_en` uses bare names because
+// the whole block is already English. Both were previously declared with the
+// OTHER block's names — the console asked for `metadata_en.title_en`, which no
+// manifest the pipeline has ever written contains — and `looseObject` let the
+// mismatch pass in silence, so a volume rendered its directory name and the
+// literal string "unknown" while the real values sat in the same file.
+// Declaring the true keys does not enforce them (they stay optional); it stops
+// this file from documenting a contract the Python side never signed.
 const manifestMetadataSchema = z.looseObject({
+  title_jp: z.string().optional(),
+  title_en: z.string().optional(),
+  series_jp: z.string().optional(),
+  series_en: z.string().optional(),
+  author_jp: z.string().optional(),
+  author_en: z.string().optional(),
+  publisher: z.string().optional(),
+  publisher_jp: z.string().optional(),
+  // Bare names kept as accepted aliases so a hand-written or pre-suffix
+  // manifest still resolves instead of reading as absent.
   title: z.string().optional(),
   author: z.string().optional(),
 });
 
 const manifestMetadataEnSchema = z.looseObject({
+  title: z.string().optional(),
+  series: z.string().optional(),
+  author: z.string().optional(),
+  publisher: z.string().optional(),
   title_en: z.string().optional(),
   author_en: z.string().optional(),
 });

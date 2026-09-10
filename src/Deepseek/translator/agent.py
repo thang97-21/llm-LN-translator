@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.Deepseek.common.atomic_io import atomic_write_json, atomic_write_text
+from src.Deepseek.common.chapter_signals import build_chapter_signal_guidance, parse_chapter_signals
 from src.Deepseek.common.config import WORK_DIR, get_target_language
 from src.Deepseek.common.llm_types import LLMTermination
 from src.Deepseek.translator.config import (
@@ -139,6 +140,7 @@ class DeepSeekTranslator:
         # missing.
         self._voice_profiles: Dict[str, Dict[str, Any]] = parse_voice_fingerprints(context_xml)
         self._eps_signals: Dict[str, List[Dict[str, Any]]] = parse_eps_signals(context_xml)
+        self._chapter_signals = parse_chapter_signals(context_xml)
         self._volume_type: str = parse_volume_type(context_xml)
 
         voice_block = self._build_volume_voice_anchor()
@@ -213,6 +215,7 @@ class DeepSeekTranslator:
                 for c in signal_characters
                 if c.get("name")
             ]
+        signal_guidance = build_chapter_signal_guidance(self._chapter_signals.get(chapter_id))
 
         jp_source = Path(chapter_path).read_text(encoding="utf-8")
 
@@ -223,6 +226,8 @@ class DeepSeekTranslator:
             voice_block_enabled=self.optimizations.get("dovb", {}).get("enabled", True),
             volume_type=self._volume_type,
         )
+        if signal_guidance:
+            guidance_blocks.append({"type": "chapter_signals", "text": signal_guidance})
 
         # Assemble guidance text for comparison (must match the block text
         # that build_user_message assembles from these same blocks).

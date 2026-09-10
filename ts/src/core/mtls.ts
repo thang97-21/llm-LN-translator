@@ -5,9 +5,10 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { manifestSchema, parseBoundary, translationLogSchema } from './boundary.js';
 import { asChapterRef, asVolumeId } from './types.js';
+import { resolveVolumeIdentity } from './volumeIdentity.js';
 import type { CapabilitySpec, ChapterLog, ChapterRef, ConfigLine, PhaseStatus, PhaseStatusValue, RunHandle, SortMode, VolumeDetail, VolumeId, VolumeSummary } from './types.js';
 
-// core/ lives at mtls-menu-ts/src/core. The menu package is two levels up;
+// core/ lives at ts/src/core. The menu package is two levels up;
 // the Python pipeline it operates is its parent, not the menu directory.
 export const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const pipelineRoot = path.resolve(packageRoot, '..');
@@ -36,7 +37,20 @@ export function loadVolumesFrom(root: string): VolumeSummary[] {
   if (!existsSync(root)) return [];
   return readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((entry) => {
     const manifestPath = path.join(root, entry.name, 'manifest.json');
-    if (!existsSync(manifestPath)) return [];
+    if (!existsSync(manifestPath)) {
+      // A project folder can exist before Phase 1 (librarian) ever writes its
+      // manifest.json, or after that file is lost/renamed — same "surface it,
+      // don't vanish it" principle as the corrupt-manifest branch below.
+      // context.xml / the extracted OPF resolve an identity independently of
+      // manifest.json, so this still names the book instead of the directory,
+      // and every phase reads as 'pending' (accurate: no manifest means no
+      // phase has recorded state yet, unlike a corrupt manifest where we
+      // genuinely cannot tell).
+      let mtime = 0; try { mtime = statSync(path.join(root, entry.name)).mtimeMs; } catch { /* unreadable */ }
+      const degraded = resolveVolumeIdentity(path.join(root, entry.name), undefined, undefined);
+      const degradedTitle = degraded.title || entry.name;
+      return [{ id: asVolumeId(entry.name), title: degradedTitle, author: degraded.author || 'unknown', publisher: degraded.publisher || 'unknown', series: degraded.series || deriveSeries(degradedTitle), hasEnTitle: degraded.hasEnglishTitle, updatedAt: mtime, chapterCount: 0, translatedCount: 0, phases: phaseMap.map(([key, label]) => ({ key, label, status: 'pending' as const })), manifestError: `${manifestPath}: no manifest.json found` }];
+    }
     const parsed = parseBoundary(manifestSchema, readFileSync(manifestPath, 'utf8'), manifestPath);
     if (!parsed.ok) {
       // A corrupt manifest used to vanish silently (catch → []). That made a
@@ -44,18 +58,28 @@ export function loadVolumesFrom(root: string): VolumeSummary[] {
       // The volume directory exists, so surface it as a degraded entry —
       // the Inspector shows the parse error where a title would be.
       let mtime = 0; try { mtime = statSync(manifestPath).mtimeMs; } catch { /* unreadable */ }
-      return [{ id: asVolumeId(entry.name), title: entry.name, author: 'unknown', series: entry.name, hasEnTitle: false, updatedAt: mtime, chapterCount: 0, translatedCount: 0, phases: phaseMap.map(([key, label]) => ({ key, label, status: 'unknown' as const })), manifestError: parsed.error }];
+      // A corrupt manifest costs us its counts, not the volume's identity:
+      // context.xml and the extracted OPF are written independently of it, so
+      // a degraded entry still names the book instead of its directory.
+      const degraded = resolveVolumeIdentity(path.join(root, entry.name), undefined, undefined);
+      const degradedTitle = degraded.title || entry.name;
+      return [{ id: asVolumeId(entry.name), title: degradedTitle, author: degraded.author || 'unknown', publisher: degraded.publisher || 'unknown', series: degraded.series || deriveSeries(degradedTitle), hasEnTitle: degraded.hasEnglishTitle, updatedAt: mtime, chapterCount: 0, translatedCount: 0, phases: phaseMap.map(([key, label]) => ({ key, label, status: 'unknown' as const })), manifestError: parsed.error }];
     }
     const manifest = parsed.data;
     const metadata = manifest.metadata ?? {}; const metadataEn = manifest.metadata_en ?? {}; const pipeline = manifest.pipeline_state ?? {};
     const chapters = manifest.chapters ?? [];
     const translatedCount = chapters.filter((chapter) => chapter.translation_status === 'completed' || chapter.state === 'DONE').length;
-    const title = asString(metadataEn.title_en, asString(metadata.title, entry.name));
+    // Identity is resolved per field across context.xml → manifest → the
+    // extracted OPF rather than read out of the manifest alone; see
+    // volumeIdentity.ts for why no single artifact can answer for a volume in
+    // every pipeline state. Everything else on this record stays manifest-only.
+    const identity = resolveVolumeIdentity(path.join(root, entry.name), metadata, metadataEn);
+    const title = identity.title || entry.name;
     const phases: PhaseStatus[] = phaseMap.map(([key, label]) => {
       const phase = (pipeline as Record<string, { status?: string } | undefined>)[key];
       return { key, label, status: normalizePhaseStatus(asString(phase?.status, 'pending')) };
     });
-    return [{ id: asVolumeId(entry.name), title, author: asString(metadataEn.author_en, asString(metadata.author, 'unknown')), series: deriveSeries(title), hasEnTitle: Boolean(asString(metadataEn.title_en)), updatedAt: statSync(manifestPath).mtimeMs, chapterCount: chapters.length, translatedCount, phases }];
+    return [{ id: asVolumeId(entry.name), title, author: identity.author || 'unknown', publisher: identity.publisher || 'unknown', series: identity.series || deriveSeries(title), hasEnTitle: identity.hasEnglishTitle, updatedAt: statSync(manifestPath).mtimeMs, chapterCount: chapters.length, translatedCount, phases }];
   }).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
@@ -176,10 +200,16 @@ function humanizeConfigValue(key: string, value: string): { text: string; boolSt
   if (value === 'off') return { text: 'Off', boolState: 'off' };
   if (value === 'deepseek-v4-pro') return { text: 'DeepSeek-V4-Pro-0813', boolState: null };
   if (value === 'deepseek-v4-flash') return { text: 'DeepSeek-V4-Flash-0731', boolState: null };
+  if (value === 'gpt-6-astra') return { text: 'GPT-6 Astra', boolState: null };
+  if (value === 'gpt-5.6-sol') return { text: 'GPT-5.6 Sol', boolState: null };
+  if (value === 'gpt-5.6-terra') return { text: 'GPT-5.6 Terra', boolState: null };
   if (value === 'gpt-5.6-luna') return { text: 'GPT-5.6 Luna', boolState: null };
   if (value === 'claude-sonnet-5') return { text: 'Claude Sonnet 5', boolState: null };
   if (value === 'claude-opus-5') return { text: 'Claude Opus 5', boolState: null };
-  if (value === 'claude-fable-5') return { text: 'Claude Fable 5', boolState: null };
+  if (value === 'claude-fable-5-1') return { text: 'Claude Fable 5.1', boolState: null };
+  // Retired 2026-09-03, kept so an unmigrated config still renders a readable
+  // label instead of a bare id; the client normalises it to claude-fable-5-1.
+  if (value === 'claude-fable-5' || value === 'claude-fable-5.1') return { text: 'Claude Fable 5.1', boolState: null };
   return { text: value, boolState: null };
 }
 function listFiles(dir: string, suffix: string): string[] { if (!existsSync(dir)) return []; try { return readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(suffix)).map((entry) => path.join(dir, entry.name)).sort((a, b) => a.localeCompare(b)); } catch { return []; } }
@@ -211,15 +241,19 @@ export function loadVolumeDetailFrom(root: string, id: VolumeId): VolumeDetail {
 }
 
 export function fuzzyMatch(query: string, target: string): boolean { const q = query.trim().toLowerCase(); if (!q) return true; let index = 0; for (const char of target.toLowerCase()) if (char === q[index]) index += 1; return index === q.length; }
-export function filterVolumes(volumes: readonly VolumeSummary[], query: string): VolumeSummary[] { return volumes.filter((volume) => fuzzyMatch(query, `${volume.id} ${volume.title} ${volume.author} ${volume.series}`)); }
+export function filterVolumes(volumes: readonly VolumeSummary[], query: string): VolumeSummary[] { return volumes.filter((volume) => fuzzyMatch(query, `${volume.id} ${volume.title} ${volume.author} ${volume.publisher} ${volume.series}`)); }
 export function sortVolumes(volumes: readonly VolumeSummary[], mode: SortMode): VolumeSummary[] { const copy = [...volumes]; if (mode === 'series') return copy.sort((a, b) => a.series.localeCompare(b.series) || b.updatedAt - a.updatedAt); if (mode === 'progress') return copy.sort((a, b) => (a.chapterCount ? a.translatedCount / a.chapterCount : 0) - (b.chapterCount ? b.translatedCount / b.chapterCount : 0)); return copy.sort((a, b) => b.updatedAt - a.updatedAt); }
 
-// venv layout differs by platform (Scripts/python.exe on Windows,
-// bin/python everywhere else), and the bare fallback does too: PEP 394 only
-// guarantees `python3` on macOS/Linux — plenty of current distros ship no
-// `python` symlink at all — while the python.org Windows installer only
-// ever produces `python.exe`, never `python3.exe`.
-export function pythonCommand(): string { const override = process.env.LLM_TRANSLATOR_PYTHON; if (override && existsSync(override)) return override; const venv = path.join(pipelineRoot, 'venv', process.platform === 'win32' ? 'Scripts' : 'bin', process.platform === 'win32' ? 'python.exe' : 'python'); return existsSync(venv) ? venv : process.platform === 'win32' ? 'python' : 'python3'; }
+// The project .venv is DEVELOPMENT AND TESTING ONLY and is deliberately never
+// used by the runtime — the pipeline runs on the machine's system Python, where
+// its dependencies are installed. Pin a specific interpreter with
+// LLM_TRANSLATOR_PYTHON; do NOT re-add a project-venv probe here, or the TUI and
+// the CLI launchers will silently disagree about which interpreter runs a phase.
+// The bare fallback differs by platform: PEP 394 only guarantees `python3` on
+// macOS/Linux — plenty of current distros ship no `python` symlink at all —
+// while the python.org Windows installer only ever produces `python.exe`,
+// never `python3.exe`.
+export function pythonCommand(): string { const override = process.env.LLM_TRANSLATOR_PYTHON; if (override && existsSync(override)) return override; return process.platform === 'win32' ? 'python' : 'python3'; }
 
 export function runCliCapability(spec: CapabilitySpec, argv: readonly string[], onText: (text: string, source: 'cli', severity?: 'info' | 'warning' | 'error' | 'success') => void, onDone: (code: number | null, cancelled: boolean) => void): RunHandle {
   if (spec.route.transport !== 'cli') throw new Error(`${spec.id} is not a CLI capability.`);

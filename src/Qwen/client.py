@@ -98,6 +98,8 @@ class QwenClient:
             base_url or str(cfg.get("endpoint", "https://dashscope-intl.aliyuncs.com/apps/anthropic"))
         ).rstrip("/")
         self._cfg = cfg
+        caching_cfg = cfg.get("caching", {}) or {}
+        self._cache_pricing_mode = "explicit" if bool(caching_cfg.get("enabled", True) and caching_cfg.get("explicit", True)) else "implicit"
         self._client = None if dry_run else anthropic.Anthropic(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -379,6 +381,7 @@ class QwenClient:
             output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens,
             cache_creation_tokens=usage.cache_write_tokens,
+            cache_pricing_mode=self._cache_pricing_mode,
         )
         self._record_cache_telemetry(usage)
         return LLMResponse(

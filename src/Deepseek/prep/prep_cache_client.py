@@ -92,6 +92,7 @@ BLOCKS: list[dict[str, str]] = [
     {"name": "eps_arc_tracker", "role": "blk-12-eps-arc-tracker"},
     {"name": "scene_plans", "role": "blk-13-scene-plans"},
     {"name": "eps_signals", "role": "blk-14-eps-signals"},
+    {"name": "chapter_signals", "role": "blk-18-chapter-signals"},
     {"name": "illustration_context", "role": "blk-15-illustration-context"},
     {"name": "translation_brief", "role": "blk-16-translation-brief"},
     {"name": "metadata_localization", "role": "blk-17-metadata-localization"},
@@ -109,6 +110,8 @@ MODEL_PROFILES: dict[str, dict[str, int]] = {
     "MiniMax-M3-highspeed": {"context_window": 1_000_000, "max_output": 512_000},
     "deepseek-v4-pro": {"context_window": 1_000_000, "max_output": 256_000},
     "deepseek-v4-flash": {"context_window": 1_000_000, "max_output": 256_000},
+    "glm-5.3": {"context_window": 1_000_000, "max_output": 131_072},
+    "glm-5.3-flash": {"context_window": 1_000_000, "max_output": 131_072},
 }
 
 
@@ -177,7 +180,7 @@ def endpoint(base_url: str, api_style: str) -> str:
     return f"{base}/chat/completions" if api_style == "openai" else f"{base}/v1/messages"
 
 
-def build_body(prefix: str, source_package: str, suffix: str, model: str, max_tokens: int, api_style: str, cache_mode: str, reasoning_split: bool) -> dict:
+def build_body(prefix: str, source_package: str, suffix: str, model: str, max_tokens: int, api_style: str, cache_mode: str, reasoning_split: bool, reasoning_effort: str = "max") -> dict:
     """The full system context = global prefix + volume source package; BOTH
     are byte-identical across all block calls and therefore ride the passive
     prefix cache. Only the user suffix varies per block."""
@@ -191,7 +194,11 @@ def build_body(prefix: str, source_package: str, suffix: str, model: str, max_to
                 {"role": "user", "content": suffix},
             ],
         }
-        if reasoning_split:
+        if model.lower().startswith("glm-"):
+            body["thinking"] = {"type": "enabled"}
+            body["reasoning_effort"] = reasoning_effort if reasoning_effort in {"low", "high", "max"} else "max"
+            body["response_format"] = {"type": "json_object"}  # Z.AI structured output: https://docs.z.ai/guides/capabilities/struct-output
+        elif reasoning_split:
             body["reasoning_split"] = True  # MiniMax M3: separate thinking from final content
         return body
     # anthropic shape
@@ -303,7 +310,7 @@ def call_provider(block: dict[str, str], prefix: str, source_package: str, suffi
     cache_mode = "passive" if api_style == "openai" else cfg.cache_mode
 
     url = endpoint(base_url, api_style)
-    body = build_body(prefix, source_package, suffix, model, max_tokens, api_style, cache_mode, cfg.reasoning_split)
+    body = build_body(prefix, source_package, suffix, model, max_tokens, api_style, cache_mode, cfg.reasoning_split, getattr(cfg, "reasoning_effort", "max"))
     api_key = os.environ.get(api_key_env, "")
     if not api_key:
         return None, {k: 0 for k in TELEMETRY_KEYS}, f"{api_key_env} is not set", ""
@@ -328,6 +335,7 @@ def call_provider(block: dict[str, str], prefix: str, source_package: str, suffi
 
 
 def run_blocks(args: argparse.Namespace, prefix: str, source_package: str, work_dir: Path, *, fallback: bool) -> tuple[dict[str, dict], dict[str, int], list[str], dict[str, int]]:
+    (work_dir / ".context" / "prep_blocks").mkdir(parents=True, exist_ok=True)
     fragments: dict[str, dict] = {}
     totals = {k: 0 for k in TELEMETRY_KEYS}
     failed: list[str] = []
@@ -336,6 +344,8 @@ def run_blocks(args: argparse.Namespace, prefix: str, source_package: str, work_
     for block in BLOCKS:
         if args.blocks and block["name"] not in args.blocks:
             continue
+        if block["name"] == "opf_metadata" and getattr(args, "provider", None) == "glm":
+            continue  # already populated from EPUB extraction; GLM prep does not re-derive it
         web_results = ""
         if block["name"] == "metadata_localization" and args.web_results_file:
             try:
@@ -377,18 +387,18 @@ def run_blocks(args: argparse.Namespace, prefix: str, source_package: str, work_
 
 
 def dry_run(work_dir: Path, series_id: str, args: argparse.Namespace) -> dict:
-    prefix = PREFIX_FILE.read_text(encoding="utf-8")
+    prefix = Path(getattr(args, "prefix_file", "") or PREFIX_FILE).read_text(encoding="utf-8")
     source_package, source_stats = build_source_package(work_dir)
     suffix0 = build_suffix(BLOCKS[0], "<vol_id>", series_id, work_dir)
-    primary_body = build_body(prefix, source_package, suffix0, args.model, args.max_tokens, args.api_style, args.cache_mode, args.reasoning_split)
-    fallback_body = build_body(prefix, source_package, suffix0, args.fallback_model, args.fallback_max_tokens, args.fallback_api_style, "passive", args.reasoning_split)
+    primary_body = build_body(prefix, source_package, suffix0, args.model, args.max_tokens, args.api_style, args.cache_mode, args.reasoning_split, getattr(args, "reasoning_effort", "max"))
+    fallback_body = build_body(prefix, source_package, suffix0, args.fallback_model, args.fallback_max_tokens, args.fallback_api_style, "passive", args.reasoning_split, "max")
     prefix_tokens_estimate = estimate_tokens(prefix)
     source_tokens_estimate = estimate_tokens(source_package)
     cached_region_tokens = prefix_tokens_estimate + source_tokens_estimate
     suffix_tokens_estimate = estimate_tokens(suffix0)
     return {
         "primary": {
-            "provider": "zhi-api (MiniMax-M3)",
+            "provider": "glm (Z.AI)" if str(args.model).lower().startswith("glm-") else "zhi-api (MiniMax-M3)",
             "base_url": args.base_url,
             "api_key_env": args.api_key_env,
             "api_style": args.api_style,
@@ -398,6 +408,7 @@ def dry_run(work_dir: Path, series_id: str, args: argparse.Namespace) -> dict:
             "max_output": MODEL_PROFILES.get(args.model, {}).get("max_output"),
             "endpoint": endpoint(args.base_url, args.api_style),
             "cache": "automatic passive (no cache_control on openai wire)",
+            "reasoning_effort": "max" if str(args.model).lower().startswith("glm-") else None,
         },
         "fallback": {
             "provider": "deepseek-official",
@@ -427,8 +438,10 @@ def dry_run(work_dir: Path, series_id: str, args: argparse.Namespace) -> dict:
 
 def main() -> None:
     _load_env()
-    parser = argparse.ArgumentParser(description="MTLS prep block-fill cache loop — zhi-api (MiniMax-M3) primary, DeepSeek official fallback.")
+    parser = argparse.ArgumentParser(description="MTLS prep block-fill cache loop — GLM/MiniMax primary, DeepSeek official fallback.")
     parser.add_argument("--dry-run", action="store_true", help="compose + verify without any network call")
+    parser.add_argument("--provider", choices=["minimax", "deepseek", "glm"], default="minimax")
+    parser.add_argument("--prefix-file", default="", help="override the cache-loop system prefix; GLM defaults to .dsh/prep/prefix_glm.md")
     parser.add_argument("--vol-id", default="")
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--series-id", default="")
@@ -445,6 +458,7 @@ def main() -> None:
     parser.add_argument("--api-key-env", default="ZHI_API_API_KEY")
     parser.add_argument("--api-style", choices=["openai", "anthropic"], default="openai")
     parser.add_argument("--model", default="MiniMax-M3")
+    parser.add_argument("--reasoning-effort", choices=["low", "high", "max"], default="max")
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="output cap; defaults to the model profile (MiniMax-M3: 512,000)")
     parser.add_argument("--reasoning-split", action="store_true", default=True,
@@ -469,6 +483,17 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args()
 
+    if args.provider == "glm":
+        if args.base_url == "https://zhi-api.com/v1":
+            args.base_url = "https://api.z.ai/api/paas/v4"
+        if args.api_key_env == "ZHI_API_API_KEY":
+            args.api_key_env = "ZAI_API_KEY"
+        if args.model == "MiniMax-M3":
+            args.model = "glm-5.3"
+        args.reasoning_split = False
+        if not args.prefix_file:
+            args.prefix_file = str(REPO / ".dsh" / "prep" / "prefix_glm.md")
+
     if args.blocks:
         args.blocks = {b.strip() for b in args.blocks.split(",") if b.strip()}
 
@@ -486,7 +511,7 @@ def main() -> None:
     if not args.vol_id:
         parser.error("--vol-id is required unless --dry-run")
 
-    prefix = PREFIX_FILE.read_text(encoding="utf-8")
+    prefix = Path(args.prefix_file or PREFIX_FILE).read_text(encoding="utf-8")
     work_dir = Path(args.work_dir)
     (work_dir / ".context" / "prep_blocks").mkdir(parents=True, exist_ok=True)
     (work_dir / ".receipts").mkdir(parents=True, exist_ok=True)

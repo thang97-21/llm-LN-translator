@@ -76,11 +76,11 @@ def _render_message(msg: Dict[str, Any]) -> str:
     return f"### {role}\n\n{_content_to_text(msg.get('content', ''))}\n"
 
 
-def _cache_preview(payload: Dict[str, Any]) -> tuple[str, str, int]:
+def _cache_preview(payload: Dict[str, Any], provider: str = "") -> tuple[str, str, int]:
     options = payload.get("prompt_cache_options") or (
         (payload.get("extra_body") or {}).get("prompt_cache_options")
     ) or {}
-    mode = str(options.get("mode") or "disabled")
+    mode = str(options.get("mode") or ("enabled (implicit)" if str(provider).lower() == "glm" else "disabled"))
     cache_key = str(payload.get("prompt_cache_key") or "")
     key_digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:12] if cache_key else "-"
     breakpoint_count = 0
@@ -104,7 +104,7 @@ def write_dry_run_prompt(
     """
     from src.Deepseek.common.token_telemetry import count_tokens
 
-    client_names = {"qwen": "QwenClient", "openai": "OpenAIClient"}
+    client_names = {"qwen": "QwenClient", "openai": "OpenAIClient", "glm": "GLMClient"}
     client_name = client_names.get(str(provider).lower(), "DeepSeekClient")
     model = str(payload.get("model", ""))
     input_items: List[Dict[str, Any]] = payload.get("input") or []
@@ -121,7 +121,7 @@ def write_dry_run_prompt(
     reasoning = payload.get("reasoning")
     output_config = payload.get("output_config")
     max_tokens = payload.get("max_tokens", payload.get("max_output_tokens"))
-    cache_mode, cache_key_digest, breakpoint_count = _cache_preview(payload)
+    cache_mode, cache_key_digest, breakpoint_count = _cache_preview(payload, provider)
 
     combined_text = system_text + "\n".join(_content_to_text(m.get("content", "")) for m in messages if isinstance(m, dict))
     estimated_input_tokens = count_tokens(combined_text, model)
@@ -129,9 +129,16 @@ def write_dry_run_prompt(
     if isinstance(reasoning, dict):
         thinking_line = f"mode={reasoning.get('mode', 'standard')}, effort={reasoning.get('effort', 'unspecified')}"
     else:
-        thinking_line = (
-            f"enabled, budget={thinking.get('budget_tokens')}" if isinstance(thinking, dict) else "disabled"
-        )
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            thinking_line = (
+                "enabled, "
+                f"reasoning_effort={payload.get('reasoning_effort', 'unspecified')}, "
+                f"clear_thinking={thinking.get('clear_thinking', True)}"
+            )
+        else:
+            thinking_line = (
+                f"enabled, budget={thinking.get('budget_tokens')}" if isinstance(thinking, dict) else "disabled"
+            )
         if isinstance(output_config, dict) and output_config.get("effort"):
             thinking_line += f", effort={output_config['effort']}"
 

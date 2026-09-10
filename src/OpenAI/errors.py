@@ -68,6 +68,42 @@ def is_retryable(exc: BaseException) -> bool:
     return status in {None, 408, 409, 425, 429, 500, 502, 503, 504}
 
 
+_MODEL_ACCESS_CODES = {
+    "model_not_found",
+    "model_not_available",
+    "model_not_permitted",
+    "model_access_denied",
+    "model_not_enabled",
+    "unsupported_model",
+    "unsupported_region",
+    "requires_trusted_access",
+}
+
+
+def is_fallback_eligible(exc: BaseException) -> bool:
+    """Return whether an exhausted primary request may switch models.
+
+    A fallback is an availability circuit breaker, not a way to hide broken
+    prompts, credentials, context sizing, or safety decisions. Explicit model
+    access errors are therefore allowed even when the SDK reports them as a
+    generic 4xx; all other cases must already be retryable.
+    """
+    normalized = classify_exception(exc)
+    code = str(getattr(normalized, "code", "") or "").strip().lower()
+    text = str(normalized).lower()
+    if code in _MODEL_ACCESS_CODES:
+        return True
+    if "model" in text and any(
+        marker in text for marker in ("not found", "not_found", "not available", "not_available", "not enabled", "not_enabled", "not permitted", "not_permitted", "access denied", "trusted access")
+    ):
+        return True
+    if "context_length" in text or "context length" in text:
+        return False
+    if isinstance(normalized, (OpenAIAuthError, OpenAIInvalidRequestError, OpenAIRefusalError)):
+        return False
+    return is_retryable(normalized)
+
+
 def call_with_retry(
     fn: Callable[[], T],
     policy: RetryPolicy,

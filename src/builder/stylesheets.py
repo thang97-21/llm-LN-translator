@@ -71,8 +71,18 @@ p {
   margin: 0.35em 1em;
 }
 
-.lyric {
+/* Verse. Flat class selectors only (a descendant combinator never matches
+   here) and shorthand padding, since the audit tokenises property names
+   literally. No break-inside: the engine does not implement it, so declaring
+   it would only put a lie in the sheet. */
+.poem {
   text-indent: 0;
+  margin: 1em 0 1em 1.5em;
+}
+
+.lyric {
+  text-indent: -1em;
+  padding: 0 0 0 1em;
   text-align: left;
   margin: 0.05em 0;
 }
@@ -80,6 +90,24 @@ p {
 .lyric-break {
   text-indent: 0;
   margin: 0.35em 0;
+}
+
+/* Structured blocks. Same flat-selector and whitelisted-property discipline
+   as the verse rules above. */
+.note {
+  text-indent: 0;
+  margin: 0.5em 0;
+}
+
+.doc-list {
+  text-indent: 0;
+  margin: 0.6em 0 0.6em 1.5em;
+  padding: 0;
+}
+
+li {
+  text-indent: 0;
+  margin: 0.15em 0;
 }
 
 /* Headings. Centring is semantic here, not a typographic preference. */

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.Deepseek.common.atomic_io import atomic_write_json
+from src.Deepseek.common.chapter_signals import build_chapter_signal_guidance, parse_chapter_signals
 from src.Deepseek.common.config import WORK_DIR, get_safety_fallback_config
 from src.Deepseek.common.llm_types import LLMTermination
 from src.Deepseek.common.safety_fallback import fallback_translate_chapter
@@ -46,6 +47,7 @@ class QwenTranslator:
         roster_handles = parse_character_roster_handles(context_xml)
         self._voice_profiles = resolve_voice_aliases(self._voice_profiles, roster_handles)
         self._eps_signals = parse_eps_signals(context_xml)
+        self._chapter_signals = parse_chapter_signals(context_xml)
         self._volume_type = parse_volume_type(context_xml)
         self.system_instruction = build_system_instruction(
             prompt_path=get_qwen_prompt_path(),
@@ -80,6 +82,9 @@ class QwenTranslator:
                 if signal.get("name")
             ]
         guidance = build_chapter_guidance(eps_band, active_characters, self.optimizations, self._volume_type)
+        signal_guidance = build_chapter_signal_guidance(self._chapter_signals.get(chapter_id))
+        if signal_guidance:
+            guidance = "\n\n".join(part for part in (guidance, signal_guidance) if part)
         prompt = build_chapter_message(
             chapter_id, jp_source, guidance,
             previous_guidance_text=self._previous_guidance_text,

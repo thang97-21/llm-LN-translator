@@ -23,8 +23,8 @@ export type ConfigFieldSpec = {
 
 const MODEL_CHOICES = ['deepseek-v4-pro', 'deepseek-v4-flash'] as const;
 const MODEL_LABELS = ['DeepSeek-V4-Pro-0813', 'DeepSeek-V4-Flash-0731'] as const;
-const PROVIDER_CHOICES = ['deepseek', 'qwen', 'openai', 'anthropic'] as const;
-const PROVIDER_LABELS = ['DeepSeek', 'Qwen', 'OpenAI', 'Anthropic'] as const;
+const PROVIDER_CHOICES = ['deepseek', 'qwen', 'openai', 'anthropic', 'glm'] as const;
+const PROVIDER_LABELS = ['DeepSeek', 'Qwen', 'OpenAI', 'Anthropic', 'GLM (Z.AI)'] as const;
 // Frontier-class (*-max) names roll between versions, so both live here —
 // qwen3.7-max was configured but absent from this list, which made the
 // currently-set model unselectable in the menu. Pricing follows the CLASS, not
@@ -50,16 +50,19 @@ const XTC_FORMAT_LABELS = ['XTC — 1-bit mono', 'XTCH — 2-bit grayscale, ~2×
 // shares one capability profile end to end (adaptive thinking, 1M context,
 // 128K output) — Claude Haiku 4.5 (manual budget_tokens thinking, 200K/64K)
 // is out of scope by design, so it is never offered here.
-const ANTHROPIC_MODEL_CHOICES = ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5'] as const;
-const ANTHROPIC_MODEL_LABELS = ['Claude Sonnet 5', 'Claude Opus 5', 'Claude Fable 5'] as const;
+// Wire ids, not display names: Anthropic model ids never contain a dot, so
+// the id is 'claude-fable-5-1' while the label reads 'Claude Fable 5.1'.
+const ANTHROPIC_MODEL_CHOICES = ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1'] as const;
+const ANTHROPIC_MODEL_LABELS = ['Claude Sonnet 5', 'Claude Opus 5', 'Claude Fable 5.1'] as const;
 const ANTHROPIC_DISPLAY_CHOICES = ['summarized', 'omitted'] as const;
 const ANTHROPIC_EFFORT_CHOICES = ['max', 'xhigh', 'high', 'medium', 'low'] as const;
 const ANTHROPIC_TTL_CHOICES = ['5m', '1h'] as const;
-const PREP_PROVIDER_CHOICES = ['minimax', 'deepseek'] as const;
-const PREP_PROVIDER_LABELS = ['MiniMax — official Anthropic API', 'DeepSeek — recovery paths'] as const;
+const PREP_PROVIDER_CHOICES = ['minimax', 'deepseek', 'glm', 'openai'] as const;
+const PREP_PROVIDER_LABELS = ['MiniMax — official Anthropic API', 'DeepSeek — recovery paths', 'GLM — Z.AI Chat Completions', 'OpenAI — Responses / Batch'] as const;
 const MINIMAX_MODEL_CHOICES = ['MiniMax-M3', 'MiniMax-M3-highspeed', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] as const;
 const MINIMAX_MODEL_LABELS = ['MiniMax M3', 'MiniMax M3 High Speed', 'MiniMax M2.7 — explicit cache capable', 'MiniMax M2.7 High Speed — explicit cache capable'] as const;
 const MINIMAX_CACHE_MODE_CHOICES = ['passive', 'explicit'] as const;
+const OPENAI_PREP_MODEL_CHOICES = ['gpt-6-astra', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const;
 
 export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
 // ─── Project ─────────────────────────────────────────────────────────────────────
@@ -92,6 +95,27 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Per-block Anthropic SDK timeout in seconds.' },
   { path: 'prep.minimax.fallback_to_deepseek', menu: 'Prep', section: 'MiniMax — Model & Cache', label: 'DeepSeek Recovery', kind: 'boolean',
     description: 'Off by default: a failed MiniMax block fails loudly instead of charging a second provider without an explicit operator choice.' },
+  { path: 'prep.glm.model', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Model', kind: 'enum', choices: ['glm-5.3-flash', 'glm-5.3'], choiceLabels: ['GLM-5.3-Flash — economy', 'GLM-5.3 — flagship'], description: 'GLM model used by the prep cache loop.' },
+  { path: 'prep.glm.endpoint', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Endpoint', kind: 'text', description: 'Z.AI OpenAI-compatible Chat Completions base URL.' },
+  { path: 'prep.glm.api_key_env', menu: 'Prep', section: 'GLM — Model & Cache', label: 'API Key Variable', kind: 'text', description: 'Environment variable holding the Z.AI API key.' },
+  { path: 'prep.glm.max_output_tokens', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Maximum Output Tokens', kind: 'integer', min: 1, description: 'Per-block GLM output ceiling.' },
+  { path: 'prep.glm.context_window', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Context Window', kind: 'integer', min: 1, description: 'Input ceiling used by the GLM cache-loop guard.' },
+  { path: 'prep.glm.reasoning_effort', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Reasoning Effort', kind: 'enum', choices: ['low', 'high', 'max'], description: 'GLM reasoning depth for structured prep blocks.' },
+  { path: 'prep.glm.http_timeout_seconds', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Request Timeout', kind: 'integer', min: 1, description: 'Per-block Z.AI request timeout in seconds.' },
+  { path: 'prep.glm.fallback_to_deepseek', menu: 'Prep', section: 'GLM — Model & Cache', label: 'DeepSeek Recovery', kind: 'boolean', description: 'Off by default: failed GLM prep does not silently spend a second provider.' },
+  { path: 'prep.openai.model', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Model', kind: 'enum', choices: OPENAI_PREP_MODEL_CHOICES, description: 'OpenAI Responses model used for every prep block.' },
+  { path: 'prep.openai.endpoint', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Endpoint', kind: 'text', description: 'OpenAI Responses API base URL.' },
+  { path: 'prep.openai.api_key_env', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'API Key Variable', kind: 'text', description: 'Environment variable holding the OpenAI API key.' },
+  { path: 'prep.openai.prompt', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Prompt File', kind: 'text', description: 'Prep prompt whose DeepSeek-derived block schemas are reused verbatim.' },
+  { path: 'prep.openai.generation.max_output_tokens', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Maximum Output Tokens', kind: 'integer', min: 1, description: 'Per-block Responses output ceiling.' },
+  { path: 'prep.openai.reasoning.effort', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Reasoning Effort', kind: 'enum', choices: OPENAI_REASONING_EFFORT_CHOICES, description: 'Reasoning effort applied to each prep block.' },
+  { path: 'prep.openai.batch.enabled', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Batch API', kind: 'boolean', description: 'Submit all active prep blocks as one durable OpenAI Batch job; off uses synchronous Responses calls.' },
+  { path: 'prep.openai.batch.completion_window', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Completion Window', kind: 'text', description: 'OpenAI Batch completion window, normally 24h.' },
+  { path: 'prep.openai.batch.poll_seconds', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Poll Interval (seconds)', kind: 'integer', min: 0, description: 'Interval between Batch status checks.' },
+  { path: 'prep.openai.batch.max_wait_seconds', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Maximum Wait (seconds)', kind: 'integer', min: 0, description: 'Local polling deadline; accepted jobs remain in the ledger when it expires.' },
+  { path: 'prep.openai.batch.max_attempts', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Maximum Batch Attempts', kind: 'integer', min: 1, description: 'Maximum submissions including bounded retries for unresolved blocks.' },
+  { path: 'prep.openai.batch.resume_completed_blocks', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Resume Completed Blocks', kind: 'boolean', description: 'Reuse validated local JSON-node artifacts on restart.' },
+  { path: 'prep.openai.batch.persistence_file', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Batch Ledger Path', kind: 'text', description: 'Durable local record of accepted OpenAI Batch jobs.' },
   { path: 'prep.model', menu: 'Prep', section: 'Context Build', label: 'Model', kind: 'enum', choices: MODEL_CHOICES, choiceLabels: MODEL_LABELS,
     description: 'Model for the single call that fills context.xml. Flash trades instruction-following for throughput — Pro is required for reliable 15-block structured output.' },
   { path: 'prep.endpoint', menu: 'Prep', section: 'Context Build', label: 'Endpoint', kind: 'enum', choices: ENDPOINT_CHOICES, choiceLabels: ENDPOINT_LABELS,
@@ -222,6 +246,34 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Per-call Responses API timeout, in seconds.' },
   { path: 'translation.openai.master_prompt', menu: 'Translation', section: 'OpenAI — Model & Connection', label: 'Primary Translation Prompt', kind: 'text',
     description: 'Hybrid Markdown/XML prompt used only by the OpenAI Responses route.' },
+  { path: 'translation.openai.fallback.enabled', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Status', kind: 'boolean',
+    description: 'Allow an eligible Astra availability failure to use the configured GPT-5.6 route.' },
+  { path: 'translation.openai.fallback.model', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Fallback Model', kind: 'text',
+    description: 'Existing GPT-5.6 model used after retryable Astra access or transport failures.' },
+  { path: 'translation.openai.fallback.master_prompt', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Fallback Prompt', kind: 'text',
+    description: 'Prompt path for the fallback profile; keep it pinned to the established translation contract.' },
+  { path: 'translation.openai.fallback.allow_mixed_model_volume', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Allow Mixed-Model Volume', kind: 'boolean',
+    description: 'Permit automatic fallback after chapters from the primary model have already been committed.' },
+  { path: 'translation.openai.fallback.resume_pending', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Resume Pending Fallback', kind: 'boolean',
+    description: 'Explicitly resume a volume recorded as fallback_pending using the fallback model.' },
+  { path: 'translation.openai.routing.persistence_file', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Route State Path', kind: 'text',
+    description: 'Per-volume route decision ledger used to pin the selected model across restarts.' },
+  { path: 'translation.openai.batch.enabled', menu: 'Translation', section: 'OpenAI — Batch', label: 'Enable for GPT-5.6', kind: 'boolean',
+    description: 'Opt in to asynchronous Batch processing for GPT-5.6-family routes. Astra batches automatically when auto_for_astra is enabled.' },
+  { path: 'translation.openai.batch.auto_for_astra', menu: 'Translation', section: 'OpenAI — Batch', label: 'Auto-Batch Astra', kind: 'boolean',
+    description: 'Use Batch by default when the selected model is GPT-6 Astra; disable to force synchronous Astra calls.' },
+  { path: 'translation.openai.batch.wave_size', menu: 'Translation', section: 'OpenAI — Batch', label: 'Wave Size', kind: 'integer', min: 1,
+    description: 'Chapters submitted per frozen-prefix wave. Smaller waves preserve more chapter awareness; larger waves improve throughput.' },
+  { path: 'translation.openai.batch.seed_chapters', menu: 'Translation', section: 'OpenAI — Batch', label: 'Seed Chapters', kind: 'integer', min: 0,
+    description: 'Fresh-volume chapters committed before later waves are assembled, establishing continuity for the batch route.' },
+  { path: 'translation.openai.batch.seed_via_batch', menu: 'Translation', section: 'OpenAI — Batch', label: 'Batch Seed', kind: 'boolean',
+    description: 'Submit the continuity seed through Batch at the discounted rate instead of a synchronous call.' },
+  { path: 'translation.openai.batch.poll_seconds', menu: 'Translation', section: 'OpenAI — Batch', label: 'Poll Interval (s)', kind: 'integer', min: 1,
+    description: 'Seconds between Batch status checks.' },
+  { path: 'translation.openai.batch.completion_window', menu: 'Translation', section: 'OpenAI — Batch', label: 'Completion Window', kind: 'text',
+    description: 'OpenAI Batch completion window. The API currently supports 24h.' },
+  { path: 'translation.openai.batch.persistence_file', menu: 'Translation', section: 'OpenAI — Batch', label: 'Batch Ledger Path', kind: 'text',
+    description: 'Durable per-volume record of submitted Batch jobs used for restart recovery without duplicate billing.' },
   { path: 'translation.openai.generation.max_output_tokens', menu: 'Translation', section: 'OpenAI — Generation', label: 'Maximum Output Tokens', kind: 'integer', min: 1,
     description: 'Combined visible-output and reasoning token ceiling for one Responses turn.' },
   { path: 'translation.openai.generation.service_tier', menu: 'Translation', section: 'OpenAI — Generation', label: 'Service Tier', kind: 'text',
@@ -239,7 +291,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'translation.openai.caching.mode', menu: 'Translation', section: 'OpenAI — Caching', label: 'Cache Mode', kind: 'enum', choices: OPENAI_CACHE_MODE_CHOICES,
     description: 'Explicit places an OpenAI cache breakpoint; implicit uses the provider default; disabled omits cache options.' },
   { path: 'translation.openai.caching.ttl', menu: 'Translation', section: 'OpenAI — Caching', label: 'Cache TTL', kind: 'text',
-    description: 'Explicit prompt-cache lifetime. GPT-5.6 accepts 30m.' },
+    description: 'Explicit prompt-cache lifetime. GPT-6 Astra and GPT-5.6 accept 30m.' },
   { path: 'translation.openai.caching.cache_monitor.enabled', menu: 'Translation', section: 'OpenAI — Caching — Cache Monitor', label: 'Status', kind: 'boolean',
     description: 'Track breakpoint health, total coverage, and cache economics across translation calls.' },
   { path: 'translation.openai.caching.cache_monitor.warn_threshold_breakpoint_success_rate', menu: 'Translation', section: 'OpenAI — Caching — Cache Monitor', label: 'Breakpoint Success Threshold', kind: 'float', min: 0, max: 1,
@@ -262,6 +314,16 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Model context window used to calculate local replay pressure.' },
   { path: 'translation.openai.conversation.max_input_tokens', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Maximum Input Tokens', kind: 'integer', min: 1,
     description: 'Input ceiling used to compact local replay before the Responses API limit.' },
+  { path: 'translation.openai.conversation.max_verbatim_chapters', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Maximum Verbatim Chapters', kind: 'integer', min: 1,
+    description: 'Soft ceiling for the append-only replay window before a continuity summary fold.' },
+  { path: 'translation.openai.conversation.verbatim_ceiling_ratio', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Verbatim Ceiling Pressure', kind: 'float', min: 0, max: 1,
+    description: 'Context-pressure fraction required before the verbatim chapter ceiling folds older turns.' },
+  { path: 'translation.openai.conversation.previous_chapter_tail_chars', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Predecessor Tail Characters', kind: 'integer', min: 0,
+    description: 'Ending characters from a predecessor chapter supplied when the ledger only has a summary or a frozen batch wave cannot replay it.' },
+  { path: 'translation.openai.conversation.summary_head_chars', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Summary Head Characters', kind: 'integer', min: 0,
+    description: 'Opening characters retained for each folded chapter continuity entry.' },
+  { path: 'translation.openai.conversation.summary_tail_chars', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Summary Tail Characters', kind: 'integer', min: 0,
+    description: 'Ending characters retained for each folded chapter continuity entry.' },
   { path: 'translation.openai.conversation.soft_notice_ratio', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Soft Notice Threshold', kind: 'float', min: 0, max: 1,
     description: 'Replay-pressure fraction that logs only; no state is discarded.' },
   { path: 'translation.openai.conversation.compact_ratio', menu: 'Translation', section: 'OpenAI — Conversation', label: 'Compaction Threshold', kind: 'float', min: 0, max: 1,
@@ -288,7 +350,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Inject only active-character voice fingerprints into the current translation turn.' },
 
   { path: 'translation.anthropic.model', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'Model', kind: 'enum', choices: ANTHROPIC_MODEL_CHOICES, choiceLabels: ANTHROPIC_MODEL_LABELS,
-    description: 'Claude-5 family model. Scoped to claude-sonnet-5/opus-5/fable-5 — all three share one adaptive-thinking, 1M-context, 128K-output capability profile.' },
+    description: 'Claude-5 family model. Scoped to claude-sonnet-5/opus-5/fable-5-1 — all three share one adaptive-thinking, 1M-context, 128K-output capability profile.' },
   { path: 'translation.anthropic.endpoint', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'Endpoint', kind: 'text',
     description: 'Anthropic Messages API base URL.' },
   { path: 'translation.anthropic.api_key_env', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'API Key Variable', kind: 'text',
@@ -300,9 +362,9 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'translation.anthropic.master_prompt', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'Primary Translation Prompt', kind: 'text',
     description: 'Hybrid Markdown/XML prompt used only by the Anthropic Messages route.' },
   { path: 'translation.anthropic.generation.max_output_tokens', menu: 'Translation', section: 'Anthropic — Generation', label: 'Maximum Output Tokens', kind: 'integer', min: 1,
-    description: '128K is the shared output ceiling across claude-sonnet-5/opus-5/fable-5. temperature/top_p/top_k are never sent — non-default values are a hard 400 on every model this route supports.' },
+    description: '128K is the shared output ceiling across claude-sonnet-5/opus-5/fable-5-1. temperature/top_p/top_k are never sent — non-default values are a hard 400 on every model this route supports.' },
   { path: 'translation.anthropic.thinking.enabled', menu: 'Translation', section: 'Anthropic — Thinking', label: 'Status', kind: 'boolean',
-    description: 'Master toggle for adaptive thinking. claude-fable-5 rejects thinking:{type:"disabled"} outright, so the client keeps thinking on for that model regardless of this setting.' },
+    description: 'Master toggle for adaptive thinking. claude-fable-5-1 rejects thinking:{type:"disabled"} outright (thinking is always on), so the client keeps it on for that model regardless of this setting.' },
   { path: 'translation.anthropic.thinking.display', menu: 'Translation', section: 'Anthropic — Thinking', label: 'Thinking Display', kind: 'enum', choices: ANTHROPIC_DISPLAY_CHOICES,
     description: 'Summarized returns readable thinking text into THINKING/*.md logs; omitted returns an empty thinking field for faster time-to-first-text-token. Billed identically either way.' },
   { path: 'translation.anthropic.thinking.effort', menu: 'Translation', section: 'Anthropic — Thinking', label: 'Effort', kind: 'enum', choices: ANTHROPIC_EFFORT_CHOICES,
@@ -315,8 +377,16 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Track prompt-cache reads across translation calls.' },
   { path: 'translation.anthropic.caching.cache_monitor.warn_threshold_cache_hit_ratio', menu: 'Translation', section: 'Anthropic — Caching — Cache Monitor', label: 'Cache Warning Threshold', kind: 'float', min: 0, max: 1,
     description: 'Log a warning when the accumulated cache hit ratio falls below this fraction.' },
+  { path: 'translation.anthropic.telemetry.enabled', menu: 'Translation', section: 'Anthropic — Telemetry', label: 'Status', kind: 'boolean',
+    description: 'Per-call token and cost accounting for the most expensive route in the project. Each call appends a row to the volume token log with fresh, cache-read and cache-write counts and the actual cost at today\'s rates. On by default.' },
+  { path: 'translation.anthropic.telemetry.cache_quality', menu: 'Translation', section: 'Anthropic — Telemetry', label: 'Cache Quality Columns', kind: 'boolean',
+    description: 'Adds breakpoint success rate, prefix recovery, cache coverage and net cache savings. Watch prefix recovery: a cache write costs 1.25x fresh input, so a prefix that keeps missing is more expensive than not caching at all. Synchronous path only — batch results belong to no session.' },
   { path: 'translation.anthropic.batch.enabled', menu: 'Translation', section: 'Anthropic — Batch', label: 'Status', kind: 'boolean',
     description: 'Opt-in: submit every pending chapter as one Message Batches job instead of translating sequentially. Never an automatic fallback from the synchronous path.' },
+  { path: 'translation.anthropic.batch.wave_size', menu: 'Translation', section: 'Anthropic — Batch', label: 'Wave Size (chapters)', kind: 'integer', min: 1,
+    description: 'Chapters per batch job. A batch submits every request before any runs, so chapters in the same wave cannot see each other — they share one frozen prefix of already-translated history. 1 gives the synchronous path\'s continuity at batch prices; a wave as large as the volume gives none.' },
+  { path: 'translation.anthropic.batch.seed_chapters', menu: 'Translation', section: 'Anthropic — Batch', label: 'Seed Chapters', kind: 'integer', min: 0,
+    description: 'Chapters translated synchronously before the first wave, so later waves inherit their decisions. Only spends on a fresh volume; a resumed one already has ledger history. 0 batches from the first chapter and accepts a blind opening wave.' },
   { path: 'translation.anthropic.batch.poll_seconds', menu: 'Translation', section: 'Anthropic — Batch', label: 'Poll Interval (seconds)', kind: 'integer', min: 1,
     description: 'How often the batch translator checks job status while waiting for results.' },
   { path: 'translation.anthropic.batch.completion_window', menu: 'Translation', section: 'Anthropic — Batch', label: 'Completion Window', kind: 'text',
@@ -357,6 +427,27 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Inject the current chapter’s emotional-proximity guidance.' },
   { path: 'translation.anthropic.optimizations.voice_block', menu: 'Translation', section: 'Anthropic — Optimizations', label: 'Voice Block', kind: 'boolean',
     description: 'Inject only active-character voice fingerprints into the current translation turn.' },
+
+  { path: 'translation.glm.model', menu: 'Translation', section: 'GLM — Model & Connection', label: 'Model', kind: 'enum', choices: ['glm-5.3-flash', 'glm-5.3'], choiceLabels: ['GLM-5.3-Flash — economy', 'GLM-5.3 — flagship'], description: 'Z.AI GLM-5.3 model tier.' },
+  { path: 'translation.glm.endpoint', menu: 'Translation', section: 'GLM — Model & Connection', label: 'Endpoint', kind: 'text', description: 'Z.AI OpenAI-compatible Chat Completions base URL.' },
+  { path: 'translation.glm.api_key_env', menu: 'Translation', section: 'GLM — Model & Connection', label: 'API Key Variable', kind: 'text', description: 'Environment variable holding the Z.AI API key.' },
+  { path: 'translation.glm.master_prompt', menu: 'Translation', section: 'GLM — Model & Connection', label: 'Primary Translation Prompt', kind: 'text', description: 'GLM translation prompt; context stays in the cacheable system message.' },
+  { path: 'translation.glm.generation.max_output_tokens', menu: 'Translation', section: 'GLM — Generation', label: 'Maximum Output Tokens', kind: 'integer', min: 1, description: 'GLM output ceiling, including the model’s reasoning and visible response.' },
+  { path: 'translation.glm.generation.temperature', menu: 'Translation', section: 'GLM — Generation', label: 'Temperature', kind: 'float', min: 0, max: 1, description: 'Sampling temperature; GLM documentation recommends 1.0.' },
+  { path: 'translation.glm.generation.top_p', menu: 'Translation', section: 'GLM — Generation', label: 'Top P', kind: 'float', min: 0.01, max: 1, description: 'Nucleus sampling parameter.' },
+  { path: 'translation.glm.reasoning.effort', menu: 'Translation', section: 'GLM — Reasoning', label: 'Default Effort', kind: 'enum', choices: ['low', 'high', 'max'], description: 'Default GLM reasoning effort; chapter EPS bands override it.' },
+  { path: 'translation.glm.thinking.clear_thinking', menu: 'Translation', section: 'GLM — Reasoning', label: 'Clear Historical Thinking', kind: 'boolean', description: 'Keep true until the local ledger replays full, ordered reasoning_content blocks.' },
+  { path: 'translation.glm.caching.enabled', menu: 'Translation', section: 'GLM — Caching', label: 'Status', kind: 'boolean', description: 'Track Z.AI implicit prefix-cache telemetry; the API uses no explicit markers.' },
+  { path: 'translation.glm.streaming.enabled', menu: 'Translation', section: 'GLM — Streaming', label: 'Status', kind: 'boolean', description: 'Stream Chat Completions deltas, including reasoning_content.' },
+  { path: 'translation.glm.conversation.enabled', menu: 'Translation', section: 'GLM — Conversation', label: 'Status', kind: 'boolean', description: 'Persist a local role:user/assistant replay ledger across chapters.' },
+  { path: 'translation.glm.conversation.persistence_file', menu: 'Translation', section: 'GLM — Conversation', label: 'Conversation Ledger Path', kind: 'text', description: 'Path under the volume work directory for the GLM message ledger.' },
+  { path: 'translation.glm.conversation.recent_verbatim_chapters', menu: 'Translation', section: 'GLM — Conversation', label: 'Recent Verbatim Chapters', kind: 'integer', min: 0, description: 'Recent chapter turns replayed before local compaction.' },
+  { path: 'translation.glm.conversation.context_window', menu: 'Translation', section: 'GLM — Conversation', label: 'Context Window', kind: 'integer', min: 1, description: 'GLM context window used for local replay-pressure calculations.' },
+  { path: 'translation.glm.continuation.enabled', menu: 'Translation', section: 'GLM — Continuation', label: 'Status', kind: 'boolean', description: 'Continue a chapter when GLM returns finish_reason=length.' },
+  { path: 'translation.glm.continuation.max_continuations', menu: 'Translation', section: 'GLM — Continuation', label: 'Maximum Continuations', kind: 'integer', min: 0, description: 'Maximum continuation turns after an output limit.' },
+  { path: 'translation.glm.retry.max_retries', menu: 'Translation', section: 'GLM — Retry', label: 'Maximum Retries', kind: 'integer', min: 0, description: 'Maximum retries for transient Z.AI transport failures.' },
+  { path: 'translation.glm.optimizations.eps_guidance', menu: 'Translation', section: 'GLM — Optimizations', label: 'EPS Guidance', kind: 'boolean', description: 'Inject the EPS band and map it to GLM effort and strategy.' },
+  { path: 'translation.glm.optimizations.voice_block', menu: 'Translation', section: 'GLM — Optimizations', label: 'Voice Block', kind: 'boolean', description: 'Inject active-character voice fingerprints into the user turn.' },
 
 // ─── Builder ─────────────────────────────────────────────────────────────────────
   { path: 'builder.device_profile', menu: 'Builder', section: 'Device Profile', label: 'Target Device', kind: 'enum',
@@ -493,6 +584,7 @@ export function filterFieldsForProvider<T extends { path: string }>(fields: read
     if (field.path.startsWith('translation.qwen.')) return selected === 'qwen';
     if (field.path.startsWith('translation.openai.')) return selected === 'openai';
     if (field.path.startsWith('translation.anthropic.')) return selected === 'anthropic';
+    if (field.path.startsWith('translation.glm.')) return selected === 'glm';
     return true;
   });
 }

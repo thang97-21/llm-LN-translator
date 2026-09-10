@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MENU_DIR="$SCRIPT_DIR/mtls-menu-ts"
+MENU_DIR="$SCRIPT_DIR/ts"
 
 if [ ! -d "$MENU_DIR/node_modules" ]; then
     echo "Installing TypeScript menu dependencies..."

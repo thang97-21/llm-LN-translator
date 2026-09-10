@@ -210,8 +210,16 @@ p.blockquote {
   margin: 0.35em 1.25em;
 }
 
-p.lyric {
+div.poem {
   text-indent: 0;
+  margin: 1em 0 1em 1.5em;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+p.lyric {
+  text-indent: -1em;
+  padding-left: 1em;
   margin: 0.05em 0;
   text-align: left;
 }
@@ -219,6 +227,25 @@ p.lyric {
 p.lyric-break {
   text-indent: 0;
   margin: 0.35em 0;
+}
+
+/* Structured blocks: in-world documents, message-board posts, cast lists,
+   aligned grids. These are never prose, so they never take the prose
+   first-line indent. */
+.note {
+  text-indent: 0;
+  margin: 0.5em 0;
+}
+
+.doc-list {
+  text-indent: 0;
+  margin: 0.6em 0 0.6em 1.5em;
+  padding: 0;
+}
+
+li {
+  text-indent: 0;
+  margin: 0.15em 0;
 }
 
 /* Footnotes */
