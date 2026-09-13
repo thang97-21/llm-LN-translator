@@ -23,6 +23,7 @@ decisions inherited rather than reinvented. See
 - [Architecture](#architecture)
   - [Providers](#providers)
   - [OpenAI Responses — Application and Cache Telemetry](#openai-responses--application-and-cache-telemetry)
+  - [Anthropic Advisor Mode — Proofreading & Validation](#anthropic-advisor-mode--proofreading--validation)
   - [Safety-Refusal Fallback](#safety-refusal-fallback)
   - [Prep — Cached Multi-turn Path](#prep--cached-multi-turn-path)
   - [Series Continuity — The Bible Writer](#series-continuity--the-bible-writer)
@@ -242,6 +243,76 @@ later retry; model-access failures may switch at a clean boundary to the
 configured GPT-5.6 fallback. If an Astra chapter has already committed and
 mixed-model continuation is disabled, the route records `fallback_pending`
 instead of silently combining incompatible reasoning state.
+
+### Anthropic Advisor Mode — Proofreading & Validation
+
+`translation.anthropic.advisor` wires Anthropic's beta `advisor_20260301` tool
+into the Anthropic route: a second, higher-intelligence model consulted
+mid-generation by the executor itself, mid-turn, on its own judgment of need —
+not a second pass, not a separate QC stage. One advisor serves both purposes
+Runs 1–11 validated independently and then confirmed work together in the same
+consult: real-world reference grounding (does a claimed subculture reference,
+public figure, or historical detail actually check out) and craft/proofreading
+judgment (name-form drift, locked-anchor collisions, register calls the
+executor is too close to the prose to catch on its own). `enabled: true` by
+default — eleven manual dry runs (`docs/anthropic-advisor-mode-plan.md`,
+`docs/anthropic-advisor-mode-spec.md`) closed out the validation this ships on.
+
+**Model choice.** `advisor.model` selects among four models, each on
+Anthropic's own executor/advisor compatibility table (`ADVISOR_COMPATIBILITY`
+in `src/Anthropic/client.py`, checked fail-fast at startup):
+
+| Advisor model | Result type | Notes |
+|---|---|---|
+| `claude-opus-4-8` (default) | plaintext `advisor_result`, human-readable | Validated in Runs 8–11. Requires executor `claude-sonnet-5`. |
+| `claude-sonnet-5` | plaintext | Same-tier peer to a `claude-sonnet-5` executor. |
+| `claude-opus-5` | encrypted `advisor_redacted_result` | Not compatible with `claude-opus-4-8` as executor. |
+| `claude-fable-5-1` | encrypted | Anthropic's own recommendation for maximum quality lift on a Sonnet executor; the only advisor valid against any of this route's three supported executors. |
+
+The default executor is `claude-sonnet-5` specifically because it is the only
+one of the route's supported executors this project actually validated the
+proofreading advisor against, and the only one compatible with the
+plaintext-readable `claude-opus-4-8` advisor default. Changing the executor
+away from `claude-sonnet-5` requires either an advisor model one of the opus-5
+/ fable-5-1 pairings accepts, or `advisor.enabled: false`.
+
+**Economic gating.** `advisor.require_signal: true` (default) wires the tool
+into a request only for a chapter that actually carries a `chapter_signals`
+risk entry — ambiguity, ateji, multi-speaker, voice-contrast, or a
+subculture reference — combined with a WARM/HOT EPS band. EPS band alone is
+deliberately not sufficient; this session's evidence measured that gate as
+uneconomical and rejected it (`src/Anthropic/agent.py::_tools_qualify`,
+`optimization.py::build_advisor_guidance`). `max_uses: 2` caps advisor
+consults per request; `max_tokens: 24000` bounds each consult's own output.
+
+**Pause-turn resumption.** A deep advisor consult can end the turn early with
+`stop_reason: pause_turn` rather than completing generation. Both the
+synchronous and Batch paths resend the unchanged assistant message
+(`agent.py::_resolve_pauses`) until the turn actually finishes or
+`max_pause_resumes` (default 2) is exhausted — content already written before
+the pause is preserved and accumulated across every resumed response, never
+discarded. Verified directly against Anthropic's Batch documentation: server
+tools including `advisor` run inside Batch, and a batch-path pause is resolved
+via one synchronous follow-up call per pause rather than a second batch job,
+since Batch already runs more agentic-loop iterations before pausing than the
+synchronous path does.
+
+**Master-prompt coupling.** The advisor's craft judgment is measured against
+the same standard the executor itself writes to: a `<proofreading_discipline>`
+block in `master_prompt_anthropic_en.md` (a sibling to `<anti_translationese>`)
+codifying recurring LLM-output patterns this project's own QC audits have
+caught — em-dash overuse as a default connector rather than a deliberate
+device, nonstandard ellipsis runs, hedge-word monotony, reflexive "somehow"
+translations, italics doing double duty for both interiority and emphasis, and
+uniform acknowledgment tags. The advisor is directed to weigh in on these the
+same way it weighs in on name-form drift or a locked-anchor collision.
+
+**`web_search` (opt-in, independent of advisor).** A separate,
+non-beta tool (`translation.anthropic.web_search`, `enabled: false` by
+default) a chapter can need independently of, alongside, or instead of the
+advisor — Run 9 confirmed all four combinations behave correctly. Off by
+default because its $10/1,000-search cost and query-level economy guardrail
+remain unvalidated at the same standard the advisor cleared.
 
 ### Safety-Refusal Fallback
 
