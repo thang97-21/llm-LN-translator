@@ -151,9 +151,21 @@ class BatchLedger:
         )
 
 
-def submit_batch(client, requests: List[Dict[str, Any]]) -> str:
-    """Submit one Message Batches job (one request per chapter). Returns the batch id."""
-    batch = client._client.messages.batches.create(requests=requests)
+def submit_batch(client, requests: List[Dict[str, Any]], *, betas: Optional[List[str]] = None) -> str:
+    """Submit one Message Batches job (one request per chapter). Returns the
+    batch id.
+
+    ``betas`` is a batch-level parameter (unlike ``tools``, which is per
+    request) -- populated when any request in this batch may carry the
+    advisor tool, which requires the ``advisor-tool-2026-03-01`` beta header.
+    Routes through ``client._client.beta.messages.batches.create`` when
+    present, mirroring the synchronous client's beta-surface switch
+    (AnthropicClient._messages_namespace).
+    """
+    if betas:
+        batch = client._client.beta.messages.batches.create(betas=betas, requests=requests)
+    else:
+        batch = client._client.messages.batches.create(requests=requests)
     batch_dict = as_dict(batch)
     return str(batch_dict.get("id") or "")
 

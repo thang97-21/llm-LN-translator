@@ -39,6 +39,14 @@ def get_anthropic_batch_config() -> Dict[str, Any]:
     return get_anthropic_config().get("batch", {}) or {}
 
 
+def get_anthropic_advisor_config() -> Dict[str, Any]:
+    return get_anthropic_config().get("advisor", {}) or {}
+
+
+def get_anthropic_websearch_config() -> Dict[str, Any]:
+    return get_anthropic_config().get("web_search", {}) or {}
+
+
 def get_anthropic_caching_config() -> Dict[str, Any]:
     return get_anthropic_config().get("caching", {}) or {}
 

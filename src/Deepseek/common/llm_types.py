@@ -32,6 +32,7 @@ class LLMTermination(str, Enum):
     REFUSED = "refused"
     CONTEXT_LIMIT = "context_limit"
     TOOL_USE = "tool_use"
+    PAUSED = "paused"
     ERROR = "error"
     UNKNOWN = "unknown"
 
@@ -87,6 +88,12 @@ def normalize_termination(raw_reason: Any, *, provider: str = "") -> LLMTerminat
         return LLMTermination.CONTEXT_LIMIT
     if value in {"tool_use", "tool_calls", "function_call"}:
         return LLMTermination.TOOL_USE
+    if value in {"pause_turn"}:
+        # A server-side tool (advisor, web_search) is mid-call and the turn is
+        # incomplete -- distinct from TOOL_USE, which is a COMPLETED turn that
+        # ended on a client-side tool call. Resumed by resending the unchanged
+        # assistant message; see src/Anthropic/agent.py::_resolve_pauses.
+        return LLMTermination.PAUSED
     if value in {"error", "batch_error", "failed", "cancelled", "expired"}:
         return LLMTermination.ERROR
     return LLMTermination.UNKNOWN

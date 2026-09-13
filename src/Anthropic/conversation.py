@@ -158,7 +158,7 @@ class AnthropicConversationManager:
     def turns(self) -> List[Dict[str, Any]]:
         return self.state.setdefault("turns", [])
 
-    def bind_system(self, system_segments: Sequence[str]) -> None:
+    def bind_system(self, system_segments: Sequence[str], *, tool_fingerprint_extra: str = "") -> None:
         """Record the system prefix these turns were produced under, dropping
         replayable thinking if it has changed since.
 
@@ -171,11 +171,20 @@ class AnthropicConversationManager:
         Anthropic documents for exactly this case; the chapters' English is
         untouched.
 
+        ``tool_fingerprint_extra`` folds the active tool configuration
+        (advisor enabled/model, web_search enabled) into the same fingerprint.
+        Anthropic's advisor documentation states the tool set is part of what
+        binds a thinking block's signature on a prefix-bound model, exactly
+        like the system prompt — so toggling ``advisor.enabled`` between runs
+        on a claude-fable-5-1-executed volume needs the identical
+        "strip thinking, don't fail" recovery a changed system prompt already
+        gets here, not a raw 400 the first time the ledger is replayed.
+
         A no-op on claude-opus-5 / claude-sonnet-5: the fingerprint is still
         recorded (so a later switch to a bound model has something to compare
         against) but nothing is stripped.
         """
-        fingerprint = _system_fingerprint(system_segments)
+        fingerprint = _system_fingerprint(system_segments, tool_fingerprint_extra)
         recorded = str(self.state.get("system_fingerprint") or "")
         self.state["system_fingerprint"] = fingerprint
         if not self.enabled or not recorded or recorded == fingerprint or not self.turns:
@@ -457,10 +466,14 @@ def _apply_history_cache_breakpoint(
         return
 
 
-def _system_fingerprint(system_segments: Sequence[str]) -> str:
-    """Stable digest of the system prefix. NUL-joined so that concatenating
-    two segments differently can never collide with a single segment."""
-    joined = "\x00".join(str(segment) for segment in system_segments)
+def _system_fingerprint(system_segments: Sequence[str], tool_fingerprint_extra: str = "") -> str:
+    """Stable digest of the system prefix plus the active tool configuration.
+    NUL-joined so that concatenating segments differently, or a tool-config
+    string that happens to share bytes with a segment, can never collide."""
+    parts = [str(segment) for segment in system_segments]
+    if tool_fingerprint_extra:
+        parts.append(tool_fingerprint_extra)
+    joined = "\x00".join(parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 

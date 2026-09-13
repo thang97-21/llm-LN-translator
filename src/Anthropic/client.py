@@ -62,6 +62,29 @@ def normalize_model_id(model: str) -> str:
     return MODEL_ID_ALIASES.get(name, name)
 
 
+# Executor -> valid advisor model ids, restricted to the executors this route
+# actually supports (SUPPORTED_MODELS above). Sourced directly from Anthropic's
+# advisor-tool documentation's Model compatibility table (fetched 2026-09-13),
+# not inferred: "the advisor must be Claude Sonnet 4.6 or a more capable model,
+# and it must be at least as capable as the executor." claude-fable-5-1 is the
+# most restrictive row -- only Fable 5.1 / Mythos 5.1 may advise it -- which is
+# why claude-opus-4-8 (the plaintext-readable default validated in Runs 8-11)
+# requires a claude-sonnet-5 executor, not claude-opus-5.
+ADVISOR_COMPATIBILITY: Dict[str, tuple] = {
+    "claude-sonnet-5": (
+        "claude-mythos-5-1", "claude-fable-5-1", "claude-mythos-5", "claude-fable-5",
+        "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5",
+    ),
+    "claude-opus-5": (
+        "claude-mythos-5-1", "claude-fable-5-1", "claude-mythos-5", "claude-fable-5",
+        "claude-opus-5",
+    ),
+    "claude-fable-5-1": (
+        "claude-mythos-5-1", "claude-fable-5-1",
+    ),
+}
+
+
 @dataclass(frozen=True)
 class AnthropicCapabilities:
     provider_name: str = "anthropic"
@@ -111,6 +134,7 @@ class AnthropicClient:
                 self.model,
                 SUPPORTED_MODELS,
             )
+        self._validate_advisor_config(cfg)
         self.api_key_env = str(cfg.get("api_key_env", "ANTHROPIC_API_KEY"))
         self.api_key = api_key or os.getenv(self.api_key_env)
         if not self.api_key and not dry_run:
@@ -160,6 +184,54 @@ class AnthropicClient:
             },
         }
 
+    def _validate_advisor_config(self, cfg: Dict[str, Any]) -> None:
+        """Fail fast on a broken advisor/web_search config, matching the
+        existing SUPPORTED_MODELS fail-fast pattern above -- discovering an
+        invalid pairing or a silently-defeated escalation design as a live 400
+        or a dead feature mid-volume is exactly what this guards against."""
+        advisor_cfg = cfg.get("advisor", {}) or {}
+        advisor_enabled = bool(advisor_cfg.get("enabled", False))
+        websearch_cfg = cfg.get("web_search", {}) or {}
+        websearch_enabled = bool(websearch_cfg.get("enabled", False))
+
+        if advisor_enabled:
+            advisor_model = normalize_model_id(str(advisor_cfg.get("model", "claude-opus-4-8")))
+            valid_advisors = ADVISOR_COMPATIBILITY.get(self.model, ())
+            if advisor_model not in valid_advisors:
+                raise ValueError(
+                    f"translation.anthropic.advisor.model={advisor_model!r} is not a valid advisor "
+                    f"for executor {self.model!r}. Valid advisors for this executor: {valid_advisors}. "
+                    "See Anthropic's advisor-tool Model compatibility table."
+                )
+            thinking_cfg = cfg.get("thinking", {}) or {}
+            effort = str(thinking_cfg.get("effort", "high") or "high")
+            if effort != "high":
+                # Runs 5-7: any effort below "high" either kills escalation
+                # entirely or produces a consult whose scoping sentence has
+                # nowhere safe to land (the exact leak §7.3's filter guards
+                # against, at a configuration this session never validated).
+                raise ValueError(
+                    "translation.anthropic.advisor.enabled requires thinking.effort: \"high\" "
+                    f"(configured: {effort!r}). Effort below \"high\" is unvalidated for advisor mode "
+                    "and known to either silently disable escalation or produce an unsafely-placed "
+                    "pre-consult text fragment."
+                )
+
+        batch_enabled = bool((cfg.get("batch", {}) or {}).get("enabled", False))
+        if batch_enabled and advisor_enabled:
+            logger.warning(
+                "[ANTHROPIC] advisor.enabled and batch.enabled are both true: a paused batch "
+                "chapter (stop_reason=pause_turn) resolves via one synchronous follow-up call per "
+                "pause, so batch-path telemetry will show a small number of sync-rate rows mixed "
+                "into an otherwise batch-rate run. This is expected, not an error."
+            )
+        if batch_enabled and websearch_enabled:
+            logger.warning(
+                "[ANTHROPIC] web_search.enabled and batch.enabled are both true: the same "
+                "synchronous pause-resolution applies to a web_search pause as it does to an "
+                "advisor pause."
+            )
+
     def attach_conversation(self, *, work_dir, volume_id: str, conversation_config: Optional[Dict[str, Any]] = None):
         from src.Anthropic.conversation import AnthropicConversationManager
 
@@ -180,6 +252,8 @@ class AnthropicClient:
         messages: Optional[List[Dict[str, Any]]] = None,
         dry_run: bool = False,
         stream: Optional[bool] = None,
+        advisor_enable: Optional[bool] = None,
+        websearch_enable: Optional[bool] = None,
     ) -> LLMResponse:
         """Build and execute a Messages request, or render it without a key."""
         cfg = self._cfg
@@ -213,7 +287,52 @@ class AnthropicClient:
         else:
             request["thinking"] = {"type": "disabled"}
 
-        use_stream = bool(streaming_cfg.get("enabled", True) if stream is None else stream)
+        # ── Advisor / web_search server tools (advisor-tool-2026-03-01 beta) ──
+        # Beta-header policy exception, stated precisely: this route sends no
+        # anthropic-beta headers by standing policy (see
+        # AnthropicConversationManager's docstring in conversation.py, re:
+        # thinking-binding-controls-2026-08-01) because a beta flag tied to a
+        # dated feature can go stale/unrecognized server-side and turn into a
+        # hard 400 on every request that carries it. The exception here is
+        # narrower than that general concern: `betas` is populated only inside
+        # the `if advisor_enabled:` branch below, never unconditionally, and
+        # only for the one dated feature this route explicitly supports and
+        # tests -- not a reversal of the policy, a scoped carve-out from it.
+        #
+        # advisor_enable / websearch_enable let a caller (agent.py's per-chapter
+        # economic gate, spec §2.1-2.2) turn a tool off for THIS call even when
+        # config enables it globally -- None means "no override, use config."
+        # A caller can never turn a tool ON that config disabled; only narrow.
+        advisor_cfg = cfg.get("advisor", {}) or {}
+        advisor_enabled = bool(advisor_cfg.get("enabled", False)) and (advisor_enable is not False)
+        websearch_cfg = cfg.get("web_search", {}) or {}
+        websearch_enabled = bool(websearch_cfg.get("enabled", False)) and (websearch_enable is not False)
+
+        tools: List[Dict[str, Any]] = []
+        if advisor_enabled:
+            tools.append({
+                "type": "advisor_20260301",
+                "name": "advisor",
+                "model": normalize_model_id(str(advisor_cfg.get("model", "claude-opus-4-8"))),
+                "max_tokens": int(advisor_cfg.get("max_tokens", 24000) or 24000),
+            })
+            request["betas"] = ["advisor-tool-2026-03-01"]  # web_search needs no beta header of its own
+        if websearch_enabled:
+            tools.append({
+                "type": str(websearch_cfg.get("type", "web_search_20250305")),
+                "name": "web_search",
+                "max_uses": int(websearch_cfg.get("max_uses", 5) or 5),
+            })
+        if tools:
+            request["tools"] = tools
+
+        # A long-running server-tool turn (advisor or web_search) can
+        # independently return stop_reason: "pause_turn" mid-generation --
+        # Anthropic's own docs confirm this for both tools, not just advisor.
+        # Streaming is required so the client observes that pause rather than
+        # blocking silently until the connection idles out.
+        force_stream = advisor_enabled or websearch_enabled
+        use_stream = True if force_stream else bool(streaming_cfg.get("enabled", True) if stream is None else stream)
         request_for_meta = {**request, "stream": use_stream}
         if dry_run:
             return LLMResponse(
@@ -256,12 +375,19 @@ class AnthropicClient:
         """The configured cache TTL, which selects the cache-write rate."""
         return str((self._cfg.get("caching", {}) or {}).get("ttl", "5m") or "5m")
 
+    def _messages_namespace(self, request: Dict[str, Any]):
+        """The beta surface is required whenever `betas` is populated (the
+        advisor tool's request shape) -- the plain `messages` namespace
+        rejects that key. Every other request uses the stable namespace
+        unchanged, exactly as before this route added the advisor tool."""
+        return self._client.beta.messages if "betas" in request else self._client.messages
+
     def _generate_blocking(self, request: Dict[str, Any]) -> LLMResponse:
-        response = self._client.messages.create(**request)
+        response = self._messages_namespace(request).create(**request)
         return response_to_llm_response(response, model=self.model, streamed=False, cache_ttl=self.cache_ttl)
 
     def _generate_streaming(self, request: Dict[str, Any]) -> LLMResponse:
-        with self._client.messages.stream(**request) as stream:
+        with self._messages_namespace(request).stream(**request) as stream:
             final = stream.get_final_message()
         return response_to_llm_response(final, model=self.model, streamed=True, cache_ttl=self.cache_ttl)
 

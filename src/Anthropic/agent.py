@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from src.Anthropic.advisor_prompts import ESCALATION_BLOCK
 from src.Anthropic.client import AnthropicClient
 from src.Anthropic.config import (
+    get_anthropic_advisor_config,
     get_anthropic_batch_config,
     get_anthropic_config,
     get_anthropic_telemetry_config,
@@ -20,6 +22,7 @@ from src.Anthropic.config import (
     get_anthropic_optimization_config,
     get_anthropic_caching_config,
     get_anthropic_prompt_path,
+    get_anthropic_websearch_config,
 )
 from src.Anthropic.context import (
     derive_chapter_eps_band,
@@ -30,16 +33,25 @@ from src.Anthropic.context import (
     resolve_voice_aliases,
 )
 from src.Anthropic.errors import AnthropicAPIError, AnthropicRefusalError
-from src.Anthropic.optimization import build_chapter_guidance
+from src.Anthropic.optimization import build_advisor_guidance, build_chapter_guidance
 from src.Anthropic.prompt_loader import (
     build_chapter_message,
     build_continuation_message,
     build_system_segments,
 )
-from src.Anthropic.client import THINKING_ALWAYS_ON_MODELS, build_cache_control, build_system_blocks
+from src.Anthropic.client import (
+    THINKING_ALWAYS_ON_MODELS,
+    build_cache_control,
+    build_system_blocks,
+    normalize_model_id,
+)
 from src.Anthropic.response import sanitize_replayable_block
 from src.Deepseek.common.atomic_io import atomic_write_json, atomic_write_text
-from src.Deepseek.common.chapter_signals import build_chapter_signal_guidance, parse_chapter_signals
+from src.Deepseek.common.chapter_signals import (
+    HIGH_RISK_SIGNALS,
+    build_chapter_signal_guidance,
+    parse_chapter_signals,
+)
 from src.Deepseek.common.config import PIPELINE_ROOT, WORK_DIR, get_safety_fallback_config
 from src.Deepseek.common.verbatim_anchors import (
     anchors_in_source,
@@ -77,6 +89,8 @@ class AnthropicTranslator:
         self.work_dir = Path(work_dir)
         self.volume_id = str(volume_id)
         self._config = config or get_anthropic_config()
+        self._advisor_cfg = get_anthropic_advisor_config()
+        self._websearch_cfg = get_anthropic_websearch_config()
         self.dry_run = dry_run
         self.client = AnthropicClient(dry_run=dry_run)
         conversation_cfg = get_anthropic_conversation_config()
@@ -115,6 +129,13 @@ class AnthropicTranslator:
         self.system_segments = build_system_segments(
             prompt_path=get_anthropic_prompt_path(), context_xml=context_xml
         )
+        # Layer 1 escalation text (proofreading advisor) — appended as its
+        # own cache-breakpointed segment, only when enabled, so toggling
+        # advisor.enabled invalidates just this one segment's cache entry
+        # rather than the whole system prefix. Placed last: after the static
+        # craft policy and the volume's project context.
+        if bool(self._advisor_cfg.get("enabled", False)):
+            self.system_segments.append(ESCALATION_BLOCK)
         self.system_instruction = "\n\n".join(self.system_segments)
         # Tell the ledger which system prefix these turns belong to. On a
         # prefix-bound model (Fable 5.1) the system prompt is part of every
@@ -124,8 +145,16 @@ class AnthropicTranslator:
         # here lets the manager strip the now-unreplayable blocks once,
         # instead of the volume failing on its next call. A no-op on
         # claude-opus-5 / claude-sonnet-5, which do not bind the prefix.
+        #
+        # tool_fingerprint_extra folds the active advisor/web_search config
+        # into the same check: Anthropic's advisor docs state the tool set is
+        # also part of what binds a Fable-5.1 thinking block's signature, so
+        # toggling advisor.enabled between runs needs the identical recovery a
+        # changed system prompt already gets here.
         if self.client.conversation_manager is not None:
-            self.client.conversation_manager.bind_system(self.system_segments)
+            self.client.conversation_manager.bind_system(
+                self.system_segments, tool_fingerprint_extra=self._tool_fingerprint()
+            )
         self._previous_guidance_text: Optional[str] = None
         # Characters of the preceding chapter's ENDING spliced into an
         # envelope when the ledger no longer replays that chapter in full.
@@ -142,6 +171,111 @@ class AnthropicTranslator:
         )
         self.thinking_log_dir_name = thinking_log_cfg.get("output_dir", "THINKING")
         self.thinking_density_enabled = thinking_log_cfg.get("density_map", {}).get("enabled", True)
+
+    def _tool_fingerprint(self) -> str:
+        """A short deterministic string capturing the active advisor/web_search
+        config, folded into the conversation ledger's system fingerprint (see
+        conversation.py::bind_system) so a tool-set change on a prefix-bound
+        model gets the same "strip thinking, don't fail" recovery a changed
+        system prompt already gets."""
+        return "|".join([
+            f"advisor={bool(self._advisor_cfg.get('enabled', False))}",
+            f"advisor_model={self._advisor_cfg.get('model', '')}",
+            f"web_search={bool(self._websearch_cfg.get('enabled', False))}",
+        ])
+
+    def _tools_qualify(self, chapter_id: str, eps_band: str) -> bool:
+        """Per-chapter economic gate (spec §2.1-2.2): a chapter qualifies for
+        the advisor/web_search tools only when it carries an actual risk
+        signal -- EPS band WARM/HOT alone is not sufficient. Chapter 7 of
+        d77bf8 is this session's own counter-example: the volume's own tracked
+        peak, correctly handled with no tool at all (Run 6 vs. Run 8 showed no
+        measurable delta on that chapter).
+
+        subculture_reference qualifies unconditionally once prep populates it
+        (prep-side detection work is out of scope here, tracked separately in
+        the plan's §6.1 -- this branch is forward-compatible, not yet
+        reachable, since no signal category by that name exists in
+        chapter_signals.py today). Every other HIGH_RISK_SIGNALS member
+        requires EPS WARM/HOT alongside it -- AND logic, not OR.
+        """
+        record = self._chapter_signals.get(chapter_id) or {}
+        signals = record.get("signals") or []
+        names = {str(s.get("name") or "") for s in signals if isinstance(s, dict)}
+        if "subculture_reference" in names:
+            return True
+        band = str(eps_band or "").upper()
+        return band in ("WARM", "HOT") and bool(names & HIGH_RISK_SIGNALS)
+
+    def _resolve_pauses(
+        self,
+        response,
+        current_messages: List[Dict[str, Any]],
+        assistant_message: Dict[str, Any],
+        *,
+        chapter_id: str,
+        advisor_enable: bool,
+        websearch_enable: bool,
+    ):
+        """Resend the unchanged assistant message for every PAUSED result,
+        synchronously, until the turn actually finishes or the pause budget
+        is exhausted. Shared by the sync path (translate_chapter) and the
+        batch path (_absorb_results) -- a paused batch result is resolved via
+        one sync follow-up call per pause, not a second batch job, since
+        Anthropic's own batch docs note the batch worker already runs more
+        loop iterations before pausing than the synchronous path does, making
+        a batch-path pause an expected rarity rather than the common case.
+
+        advisor_enable/websearch_enable must match whatever the ORIGINAL call
+        used: Anthropic's docs are explicit that omitting the advisor tool
+        from a resume request with a pending server_tool_use block is a 400 —
+        the tool must be present on every resend while a call is pending.
+
+        CONTENT DOES NOT REPEAT ACROSS A PAUSE/RESUME BOUNDARY. Anthropic's
+        server-tools docs are explicit: "the server_tool_use block is not
+        repeated in the second one" — a resumed response contains only newly
+        generated content, not a copy of what the paused response already
+        held. A PAUSED response can carry real chapter prose the executor
+        wrote before pausing to consult a tool (e.g. "Here's the opening..."
+        before it stops to check a reference) — discarding it and keeping
+        only the final resumed response's content would silently drop that
+        prose. ``resumed_responses`` therefore returns every response object
+        this method itself produced, in order, so the caller can fold each
+        one's ``.content``/``.thinking_content`` into its own accumulation
+        (the caller already has the response passed in as an argument, which
+        is why that one is not repeated here either).
+
+        Returns (response, current_messages, assistant_message, pause_count,
+        resumed_responses). ``pause_count`` tells the caller whether this
+        call's usage was already logged in here (pause_count > 0, under an
+        #advisor-resume-N label) or still needs the caller's own _log_usage
+        call (pause_count == 0, the common case where the response never
+        paused at all) -- logging both would double-count the same response's
+        spend under two labels.
+        """
+        pause_budget = max(0, int(self._advisor_cfg.get("max_pause_resumes", 2) or 2))
+        pause_count = 0
+        resumed_responses: List[Any] = []
+        while response.termination == LLMTermination.PAUSED and pause_count < pause_budget:
+            pause_count += 1
+            current_messages = [*current_messages, assistant_message]
+            response = self.client.generate(
+                prompt="",
+                system_instruction=self.system_segments,
+                messages=current_messages,
+                advisor_enable=advisor_enable,
+                websearch_enable=websearch_enable,
+            )
+            resumed_responses.append(response)
+            assistant_message = _assistant_message(response)
+            self._log_usage(f"{chapter_id}#advisor-resume-{pause_count}", response)
+        if response.termination == LLMTermination.PAUSED:
+            logger.warning(
+                "[ANTHROPIC] %s: still PAUSED after %d resume attempt(s) (max_pause_resumes=%d); "
+                "giving up on this call rather than looping indefinitely",
+                chapter_id, pause_count, pause_budget,
+            )
+        return response, current_messages, assistant_message, pause_count, resumed_responses
 
     def _series_bible_anchors_path(self) -> Path:
         """bibles/<series_id>/verbatim_anchors.json for this volume's series.
@@ -330,6 +464,16 @@ class AnthropicTranslator:
         signal_guidance = build_chapter_signal_guidance(self._chapter_signals.get(chapter_id))
         if signal_guidance:
             guidance = "\n\n".join(part for part in (guidance, signal_guidance) if part)
+        # Layer 2 reinforcement (spec §5): a soft nudge on top of Layer 1's
+        # escalation block, not a separate trigger -- "" on a chapter with
+        # nothing to reinforce.
+        advisor_nudge = (
+            build_advisor_guidance(eps_band, self._chapter_signals.get(chapter_id))
+            if self._advisor_cfg.get("enabled", False)
+            else ""
+        )
+        if advisor_nudge:
+            guidance = "\n\n".join(part for part in (guidance, advisor_nudge) if part)
         prompt = build_chapter_message(
             chapter_id,
             jp_source,
@@ -345,11 +489,19 @@ class AnthropicTranslator:
             if manager is not None and not self.dry_run
             else None
         )
+        # Economic gate (spec §2.1-2.2): a chapter without an actual risk
+        # signal gets the tool(s) withheld for THIS call even when config
+        # enables them globally, unless require_signal is explicitly false.
+        qualifies = self._tools_qualify(chapter_id, eps_band)
+        advisor_enable = qualifies if bool(self._advisor_cfg.get("require_signal", True)) else True
+        websearch_enable = qualifies if bool(self._websearch_cfg.get("require_signal", True)) else True
         response = self.client.generate(
             prompt=prompt,
             system_instruction=self.system_segments,
             messages=messages,
             dry_run=self.dry_run,
+            advisor_enable=advisor_enable,
+            websearch_enable=websearch_enable,
         )
         if response.provider_metadata.get("dry_run"):
             from src.Deepseek.translator.dry_run import write_dry_run_prompt
@@ -362,21 +514,44 @@ class AnthropicTranslator:
                 provider="anthropic",
             )
             return f"[DRY RUN — no translation performed. Payload written to {path}]"
+        chapter_user_message = _user_message(prompt)
+        current_messages = messages or _single_turn_messages(prompt)
+        assistant_message = _assistant_message(response)
+        first_response = response  # _resolve_pauses reassigns `response`; keep the original for content accumulation
+        # A pending advisor/web_search call returns stop_reason: "pause_turn"
+        # -- resolved here, before the REFUSED/MAX_OUTPUT checks below, by
+        # resending the unchanged assistant message. Not an advisor-only
+        # concern: Anthropic's docs confirm a long-running web_search turn can
+        # independently pause the same way.
+        response, current_messages, assistant_message, pause_count, resumed = self._resolve_pauses(
+            response, current_messages, assistant_message,
+            chapter_id=chapter_id, advisor_enable=advisor_enable, websearch_enable=websearch_enable,
+        )
         if response.termination == LLMTermination.REFUSED:
             return self._safety_fallback_translate(
                 chapter_path, chapter_id,
                 AnthropicRefusalError(f"Anthropic declined translation of {chapter_id}."),
             )
+        if pause_count == 0:
+            # Only logged here when nothing paused -- a paused call's final
+            # response was already logged inside _resolve_pauses under its own
+            # #advisor-resume-N label, and logging it again here would count
+            # the same spend twice.
+            self._log_usage(chapter_id, response)
 
-        chapter_user_message = _user_message(prompt)
-        current_messages = messages or _single_turn_messages(prompt)
-        parts = [response.content]
+        # Content does NOT repeat across a pause/resume boundary (Anthropic's
+        # server-tools docs: "the server_tool_use block is not repeated in
+        # the second one") -- the original response can carry real prose
+        # written before the pause, so every response in the chain is folded
+        # in, in order, not just the last.
+        parts = [first_response.content] + [r.content for r in resumed]
         thinking_parts: List[str] = []
-        if response.thinking_content:
-            thinking_parts.append(str(response.thinking_content))
-        assistant_message = _assistant_message(response)
+        if first_response.thinking_content:
+            thinking_parts.append(str(first_response.thinking_content))
+        for r in resumed:
+            if r.thinking_content:
+                thinking_parts.append(str(r.thinking_content))
         continuation_count = 0
-        self._log_usage(chapter_id, response)
         while (
             response.termination == LLMTermination.MAX_OUTPUT
             and self.continuation_enabled
@@ -389,17 +564,30 @@ class AnthropicTranslator:
                 prompt=continuation_prompt,
                 system_instruction=self.system_segments,
                 messages=current_messages,
+                advisor_enable=advisor_enable,
+                websearch_enable=websearch_enable,
+            )
+            assistant_message = _assistant_message(response)
+            continuation_response = response
+            continuation_label = f"{chapter_id}#continue-{continuation_count}"
+            response, current_messages, assistant_message, pause_count, resumed = self._resolve_pauses(
+                response, current_messages, assistant_message,
+                chapter_id=continuation_label, advisor_enable=advisor_enable, websearch_enable=websearch_enable,
             )
             if response.termination == LLMTermination.REFUSED:
                 return self._safety_fallback_translate(
                     chapter_path, chapter_id,
                     AnthropicRefusalError(f"Anthropic declined continuation of {chapter_id}."),
                 )
-            parts.append(response.content)
-            if response.thinking_content:
-                thinking_parts.append(str(response.thinking_content))
-            assistant_message = _assistant_message(response)
-            self._log_usage(f"{chapter_id}#continue-{continuation_count}", response)
+            parts.append(continuation_response.content)
+            parts.extend(r.content for r in resumed)
+            if continuation_response.thinking_content:
+                thinking_parts.append(str(continuation_response.thinking_content))
+            for r in resumed:
+                if r.thinking_content:
+                    thinking_parts.append(str(r.thinking_content))
+            if pause_count == 0:
+                self._log_usage(continuation_label, response)
 
         raw_text = "\n".join(part for part in parts if part)
         text, leaked_blocks = split_thinking_from_output(raw_text)
@@ -682,6 +870,13 @@ class AnthropicTranslator:
             if aborted:
                 break
             prompts: Dict[str, str] = {}
+            # Captured so a PAUSED result can be resumed with the EXACT
+            # messages array its request was submitted with -- rebuilding it
+            # later via manager.build_messages would be wrong for any wave
+            # member after the first, since earlier siblings commit to the
+            # ledger as _absorb_results iterates, and a rebuild at that point
+            # would wrongly include turns the original request never had.
+            messages_by_id: Dict[str, List[Dict[str, Any]]] = {}
             requests: List[Dict[str, Any]] = []
             path_by_id: Dict[str, Path] = {}
             # ONE compaction check for the whole wave, taken before any
@@ -710,7 +905,12 @@ class AnthropicTranslator:
                     if manager is not None
                     else [_user_message(prompt)]
                 )
-                requests.append({"custom_id": chapter_id, "params": self._batch_params(messages)})
+                eps_band = derive_chapter_eps_band(self._eps_signals.get(chapter_id, []))
+                messages_by_id[chapter_id] = messages
+                requests.append({
+                    "custom_id": chapter_id,
+                    "params": self._batch_params(messages, chapter_id=chapter_id, eps_band=eps_band),
+                })
 
             # Cache pilot. Every request in a wave carries the same history
             # breakpoint, so exactly one of them should WRITE the prefix and the
@@ -754,7 +954,13 @@ class AnthropicTranslator:
                 group_paths = [path_by_id[cid] for cid in group_ids]
                 role = "" if len(groups) == 1 else (" pilot" if group_number == 1 else " remainder")
 
-                batch_id = submit_batch(self.client, group)
+                # The advisor beta header is a batch-level parameter, not a
+                # per-request one -- populated whenever advisor is enabled at
+                # all, regardless of whether every request in THIS group
+                # actually wired the tool in (an unused beta header on a
+                # request that carries no advisor tool is inert).
+                batch_betas = ["advisor-tool-2026-03-01"] if bool(self._advisor_cfg.get("enabled", False)) else None
+                batch_id = submit_batch(self.client, group, betas=batch_betas)
                 # Recorded before the poll loop starts: the failure this guards
                 # against is the process not surviving to write anything later.
                 ledger.record_submitted(batch_id, wave=wave_number, chapter_ids=group_ids)
@@ -789,7 +995,10 @@ class AnthropicTranslator:
                 ledger.record_ended(batch_id)
                 outcome = retrieve_batch_results(self.client, batch_id, model=self.client.model)
                 unfinished.update(outcome.unfinished)
-                self._absorb_results(outcome, group_paths, prompts, manager, written, unfinished)
+                self._absorb_results(
+                    outcome, group_paths, prompts, manager, written, unfinished,
+                    messages_by_id=messages_by_id,
+                )
 
         self._finish_batch_run(written, unfinished)
         return written
@@ -876,6 +1085,8 @@ class AnthropicTranslator:
         manager,
         written: Dict[str, Path],
         unfinished: Dict[str, str],
+        *,
+        messages_by_id: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> None:
         """Persist one job's succeeded results and commit them to the
         conversation ledger, in chapter order.
@@ -883,12 +1094,67 @@ class AnthropicTranslator:
         Shared by the wave loop and the recovery path deliberately: the batch
         and synchronous paths drifted apart precisely because each grew its own
         copy of this logic.
+
+        ``messages_by_id``, when present (the live wave path only), is the
+        EXACT ``messages`` array each chapter's request was submitted with --
+        needed to resume a PAUSED result correctly. The recovery path
+        (_drain_open_batches, after a killed/restarted process) has no such
+        record; a PAUSED result there is left unfinished rather than resumed
+        with a reconstructed-and-possibly-wrong history.
         """
         for path in wave:
             chapter_id = path.stem
             response = outcome.succeeded.get(chapter_id)
             if response is None:
                 continue  # already accounted for in outcome.unfinished
+
+            pause_count = 0
+            extra_content_parts: List[str] = []
+            extra_thinking_parts: List[str] = []
+            if response.termination == LLMTermination.PAUSED:
+                if messages_by_id is None or chapter_id not in messages_by_id:
+                    # Recovery path: no record of the exact request this
+                    # result came from. Anthropic's batch worker already runs
+                    # more loop iterations before pausing than the synchronous
+                    # path does, so this is expected to be rare -- but resuming
+                    # with a reconstructed history risks sending a mismatched
+                    # prefix, which is worse than leaving it pending for a
+                    # manual re-run.
+                    unfinished[chapter_id] = "paused (pause_turn) — no live request record to resume from; re-run"
+                    logger.error(
+                        "[ANTHROPIC-BATCH] %s: PAUSED result recovered without its original request "
+                        "context; NOT resumed. Re-run it (synchronous or batch).",
+                        chapter_id,
+                    )
+                    continue
+                eps_band = derive_chapter_eps_band(self._eps_signals.get(chapter_id, []))
+                qualifies = self._tools_qualify(chapter_id, eps_band)
+                advisor_enable = qualifies if bool(self._advisor_cfg.get("require_signal", True)) else True
+                websearch_enable = qualifies if bool(self._websearch_cfg.get("require_signal", True)) else True
+                assistant_message = _assistant_message(response)
+                # Content does NOT repeat across a pause/resume boundary
+                # (Anthropic's server-tools docs: "the server_tool_use block
+                # is not repeated in the second one") -- the paused response
+                # can carry real chapter prose written before the pause, so
+                # it is captured here before _resolve_pauses reassigns
+                # `response` to the final one.
+                paused_response = response
+                response, _messages, _assistant, pause_count, resumed = self._resolve_pauses(
+                    response, messages_by_id[chapter_id], assistant_message,
+                    chapter_id=chapter_id, advisor_enable=advisor_enable, websearch_enable=websearch_enable,
+                )
+                if response.termination == LLMTermination.PAUSED:
+                    # Exhausted max_pause_resumes without finishing.
+                    unfinished[chapter_id] = f"still paused after {pause_count} resume attempt(s) — not persisted"
+                    continue
+                extra_content_parts = [paused_response.content] + [r.content for r in resumed[:-1]]
+                if paused_response.thinking_content:
+                    extra_thinking_parts.append(str(paused_response.thinking_content))
+                for r in resumed[:-1]:
+                    if r.thinking_content:
+                        extra_thinking_parts.append(str(r.thinking_content))
+                # resumed[-1] IS `response` (the final one) -- its content is
+                # read directly off `response` below, not duplicated here.
 
             if response.termination == LLMTermination.REFUSED:
                 # Parity with translate_chapter: a refusal routes to the
@@ -924,19 +1190,28 @@ class AnthropicTranslator:
                 )
                 continue
 
-            text, leaked_blocks = split_thinking_from_output(response.content)
+            raw_text = "\n".join(part for part in (*extra_content_parts, response.content) if part)
+            text, leaked_blocks = split_thinking_from_output(raw_text)
             text = _CJK_LEAK_RE.sub("", text)
             if not text.strip():
                 unfinished[chapter_id] = "no visible translation text"
                 logger.error("[ANTHROPIC-BATCH] %s returned no visible text; NOT persisted", chapter_id)
                 continue
 
+            combined_thinking = "\n\n".join(
+                part for part in (*extra_thinking_parts, response.thinking_content or "") if part
+            ) or None
             self._maybe_write_thinking_log(
                 chapter_id=chapter_id,
-                api_thinking=response.thinking_content,
+                api_thinking=combined_thinking,
                 leaked_blocks=leaked_blocks,
             )
-            self._log_usage(chapter_id, response)
+            if pause_count == 0:
+                # A paused-then-resolved response's final call was already
+                # logged inside _resolve_pauses under its own
+                # #advisor-resume-N label; logging it again here would count
+                # the same spend twice.
+                self._log_usage(chapter_id, response)
             output_path = self._write_chapter(chapter_id, text)
             written[chapter_id] = output_path
             if manager is not None:
@@ -1028,7 +1303,7 @@ class AnthropicTranslator:
             ttl=str(caching_cfg.get("ttl", "5m") or "5m"),
         )
 
-    def _batch_params(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _batch_params(self, messages: List[Dict[str, Any]], *, chapter_id: str, eps_band: str) -> Dict[str, Any]:
         """One batch request's params, taking a full ``messages`` array.
 
         It used to take a bare prompt string and wrap it as a single user
@@ -1037,6 +1312,11 @@ class AnthropicTranslator:
         — from the conversation ledger in the normal case — and the cached
         system blocks are shared with the synchronous path so a batch run is
         not the only route paying full price for its own prefix.
+
+        ``chapter_id``/``eps_band`` apply the same per-chapter economic gate
+        (spec §2.1-2.2) the synchronous path applies in translate_chapter --
+        a chapter without an actual risk signal gets the tool(s) withheld
+        from ITS request even when config enables them globally.
         """
         cfg = self._config
         generation_cfg = cfg.get("generation", {}) or {}
@@ -1053,6 +1333,30 @@ class AnthropicTranslator:
                 "display": str(thinking_cfg.get("display", "summarized") or "summarized"),
             }
             params["output_config"] = {"effort": str(thinking_cfg.get("effort", "high") or "high")}
+
+        qualifies = self._tools_qualify(chapter_id, eps_band)
+        advisor_enabled = bool(self._advisor_cfg.get("enabled", False)) and (
+            qualifies if bool(self._advisor_cfg.get("require_signal", True)) else True
+        )
+        websearch_enabled = bool(self._websearch_cfg.get("enabled", False)) and (
+            qualifies if bool(self._websearch_cfg.get("require_signal", True)) else True
+        )
+        tools: List[Dict[str, Any]] = []
+        if advisor_enabled:
+            tools.append({
+                "type": "advisor_20260301",
+                "name": "advisor",
+                "model": normalize_model_id(str(self._advisor_cfg.get("model", "claude-opus-4-8"))),
+                "max_tokens": int(self._advisor_cfg.get("max_tokens", 24000) or 24000),
+            })
+        if websearch_enabled:
+            tools.append({
+                "type": str(self._websearch_cfg.get("type", "web_search_20250305")),
+                "name": "web_search",
+                "max_uses": int(self._websearch_cfg.get("max_uses", 5) or 5),
+            })
+        if tools:
+            params["tools"] = tools
         return params
 
 

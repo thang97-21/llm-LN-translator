@@ -37,6 +37,10 @@ _SIGNAL_ALIASES = {
     "structural_risk": "structural",
 }
 _HIGH_RISK_SIGNALS = {"ambiguity", "ateji", "multi_speaker", "voice_contrast"}
+# Public alias: other routes (src/Anthropic/optimization.py's advisor-mode
+# gating) need to test category membership without reaching into a
+# module-private name.
+HIGH_RISK_SIGNALS = frozenset(_HIGH_RISK_SIGNALS)
 _SEVERITIES = {"low", "medium", "high", "critical"}
 
 

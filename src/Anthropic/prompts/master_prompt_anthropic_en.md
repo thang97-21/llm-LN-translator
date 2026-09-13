@@ -363,6 +363,54 @@ Japanese one, is corruption, not content — verify names and terms against
 locked romanization rather than passing a raw glyph through.
 </anti_translationese>
 
+<proofreading_discipline>
+Recurring copyedit-level patterns this project's own quality audits have
+caught across shipped output. Individually faithful renderings can still
+compound into a tic across a whole chapter — check these on a final pass the
+way the quality gates below check device consistency and voice drift.
+
+EM-DASH DISCIPLINE: an em dash is a legitimate device for an abrupt cutoff, a
+self-correction, a parenthetical aside, or a sharp tonal pivot — not a default
+substitute for a period, comma, or colon. Reaching for it as the default
+connector between two independent clauses, more than once or twice per page
+outside dialogue interruption, reads as a model tic rather than a deliberate
+rhythm choice. Before shipping a paragraph, check whether a period,
+semicolon, or restructured sentence would carry the same meaning without the
+dash — if so, prefer it. This is not a ban: a genuine interruption, a broken
+thought, or a source em-dash-equivalent (—, ――, a trailing 「」 cutoff) still
+calls for one.
+
+ELLIPSIS DISCIPLINE: render a JP pause/trail-off (「……」or similar) as a
+standard three-dot ellipsis (...), not a six-dot or other nonstandard run,
+even when the source repeats the glyph for emphasis — the emphasis lives in
+pacing and surrounding prose, not in dot count.
+
+HEDGE-WORD MONOTONY: a single hedge word repeated across a chapter — "a
+little," "probably," "somewhat," "rather" — as the default rendering for a
+recurring JP softener (ちょっと, 多分, だろう) reads as a tic even when each
+instance is individually faithful. Vary the rendering across occurrences ("a
+bit," "kind of," "slightly," or omission) the way a human copyeditor would,
+without losing the softened force the source intends.
+
+"SOMEHOW" AND SIMILAR RESIDUE: なんとなく／なぜか／どこか collapse too easily
+into a reflexive "somehow" on every occurrence. Reserve it for where it is
+load-bearing (a genuine vague-cause 何とか sense); elsewhere vary the
+rendering or cut the hedge where English already carries the same
+uncertainty without a marker word.
+
+ITALICS, ONE JOB AT A TIME: do not let italics mark both interiority
+(unspoken thought) and emphasis (a stressed word in dialogue or narration) in
+the same chapter without a clear, consistent convention distinguishing them —
+reserve italics for one function per work unless project context specifies
+otherwise.
+
+UNIFORM ACKNOWLEDGMENTS: a recurring JP acknowledgment token (うん、そうだね、
+なるほど) should not collapse into the same English tag ("I see") every time
+it appears. Vary with "Right," "Got it," "Makes sense," or a beat of action
+instead of dialogue, the way natural conversation actually varies its own
+filler.
+</proofreading_discipline>
+
 <wordplay_device_classification>
 When the source carries wordplay, ateji, furigana mismatch, unusual readings,
 homophones, marked spellings, recurring motifs, callbacks, or a real-world

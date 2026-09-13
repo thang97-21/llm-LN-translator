@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
 
 from src.Deepseek.common.llm_types import (
@@ -12,6 +13,8 @@ from src.Deepseek.common.llm_types import (
     normalize_termination,
 )
 from src.Deepseek.common.token_telemetry import cost_breakdown_usd
+
+logger = logging.getLogger(__name__)
 
 
 def response_to_llm_response(
@@ -26,6 +29,26 @@ def response_to_llm_response(
     """
     raw = as_dict(response)
     raw_content = raw.get("content") or []
+    # A `text` block immediately preceding a `server_tool_use` call is the
+    # executor's own pre-consult scoping sentence ("I'll consult the advisor
+    # on..."), not chapter prose -- confirmed reproducing at effort="high" with
+    # the ratified soft escalation wording (Run 11), the exact configuration
+    # previously believed safe after one clean sample (Run 8). This is a
+    # required filter, not optional hardening -- see
+    # docs/anthropic-advisor-mode-spec.md §7.3.
+    leaked_indices = {
+        i for i, block in enumerate(raw_content)
+        if isinstance(block, dict) and block.get("type") == "text"
+        and i + 1 < len(raw_content)
+        and isinstance(raw_content[i + 1], dict)
+        and raw_content[i + 1].get("type") == "server_tool_use"
+    }
+    if leaked_indices:
+        logger.warning(
+            "[ANTHROPIC] %d text block(s) immediately precede a server_tool_use call; "
+            "excluding from visible_text as a likely pre-consult scoping fragment, not chapter prose",
+            len(leaked_indices),
+        )
     blocks = normalize_anthropic_content(raw_content)
     stop_reason = str(raw.get("stop_reason") or "")
     termination = normalize_termination(stop_reason, provider="anthropic")
@@ -54,8 +77,36 @@ def response_to_llm_response(
         cache_ttl=cache_ttl,
         batch=batch,
     )
-    visible_text = "".join(block.text for block in blocks if block.type == "text")
+    visible_text = "".join(
+        block.text for i, block in enumerate(blocks)
+        if block.type == "text" and i not in leaked_indices
+    )
     thinking_text = "\n".join(block.text for block in blocks if block.type == "reasoning" and block.text) or None
+
+    provider_metadata: Dict[str, Any] = {
+        "raw_response": raw,
+        "raw_content": raw_content,
+        "streamed": streamed,
+        "stop_reason": stop_reason,
+        "cache_creation": as_dict(usage_raw.get("cache_creation") or {}),
+    }
+    # The advisor sub-inference is billed at its OWN model's rate, tracked
+    # separately from the executor's usage in usage.iterations (type:
+    # "advisor_message"). Left unread, _log_usage would attribute the
+    # advisor's entire spend to response.model (the executor) at the
+    # executor's rate -- silently wrong billing the moment advisor mode ships.
+    iterations = usage_raw.get("iterations") or []
+    advisor_iterations = [it for it in iterations if str(as_dict(it).get("type")) == "advisor_message"]
+    if advisor_iterations:
+        provider_metadata["advisor_usage"] = [
+            {
+                "model": as_dict(it).get("model"),
+                "input_tokens": _as_int(as_dict(it).get("input_tokens")),
+                "output_tokens": _as_int(as_dict(it).get("output_tokens")),
+            }
+            for it in advisor_iterations
+        ]
+
     return LLMResponse(
         content=visible_text,
         input_tokens=usage.input_tokens,
@@ -78,13 +129,7 @@ def response_to_llm_response(
         cache_creation_cost_usd=float(costs["cache_creation_cost_usd"]),
         total_cost_usd=float(costs["total_cost_usd"]),
         batch_pricing=batch,
-        provider_metadata={
-            "raw_response": raw,
-            "raw_content": raw_content,
-            "streamed": streamed,
-            "stop_reason": stop_reason,
-            "cache_creation": as_dict(usage_raw.get("cache_creation") or {}),
-        },
+        provider_metadata=provider_metadata,
     )
 
 
@@ -117,6 +162,56 @@ def normalize_anthropic_content(raw_content: Any) -> List[LLMContentBlock]:
                     payload=payload,
                 )
             )
+        elif item_type == "server_tool_use":
+            # The executor's call into a server-side tool (advisor, web_search).
+            # input is always {} -- the server builds the tool's own view from
+            # the transcript; nothing the executor puts here is used.
+            blocks.append(
+                LLMContentBlock(
+                    type="tool_call",
+                    block_id=str(payload.get("id") or ""),
+                    name=str(payload.get("name") or ""),
+                    arguments=payload.get("input"),
+                    payload=payload,
+                )
+            )
+        elif item_type == "advisor_tool_result":
+            # A distinct type, not reused "tool_call"/"tool_result" -- an
+            # advisor consult isn't interchangeable with an ordinary tool
+            # result for any caller branching on type (see _log_usage below,
+            # which needs to find advisor calls without re-parsing payload).
+            # `text` is empty for the encrypted advisor_redacted_result variant
+            # (Fable 5.1 / Mythos 5.1 / Opus 5 / Fable 5 / Mythos 5 advisors);
+            # populated for the plaintext advisor_result variant (e.g. Opus 4.8).
+            result = as_dict(payload.get("content") or {})
+            blocks.append(
+                LLMContentBlock(
+                    type="advisor_result",
+                    block_id=str(payload.get("tool_use_id") or ""),
+                    text=str(result.get("text") or ""),
+                    payload=payload,
+                )
+            )
+        elif item_type == "web_search_tool_result":
+            # content is a list of results on success, or a single
+            # web_search_tool_result_error object on failure -- never assume
+            # the list shape. `text` here is a thin summary (result titles)
+            # for quick inspection only; a chapter that needs to carry
+            # citations forward would read them from `payload`, not `text`.
+            raw_results = payload.get("content")
+            if isinstance(raw_results, list):
+                titles = [str(as_dict(r).get("title") or "") for r in raw_results]
+                text = "\n".join(t for t in titles if t)
+            else:
+                text = ""
+            blocks.append(
+                LLMContentBlock(
+                    type="web_search_result",
+                    block_id=str(payload.get("tool_use_id") or ""),
+                    text=text,
+                    payload=payload,
+                )
+            )
         else:
             blocks.append(LLMContentBlock(type="provider_block", payload=payload))
     return blocks
@@ -136,6 +231,18 @@ REPLAYABLE_BLOCK_FIELDS: Dict[str, set] = {
     "thinking": {"type", "thinking", "signature"},
     "redacted_thinking": {"type", "data"},
     "tool_use": {"type", "id", "name", "input", "cache_control"},
+    # advisor / web_search server-tool blocks (advisor-tool-2026-03-01).
+    # server_tool_use also carries a response-only `caller` field (observed
+    # None in every archived dry-run response) -- excluded here per this
+    # file's existing policy: only fields the API accepts on an INBOUND
+    # block survive replay.
+    "server_tool_use": {"type", "id", "name", "input", "cache_control"},
+    "advisor_tool_result": {"type", "tool_use_id", "content"},
+    # web_search_tool_result.content carries each result's `encrypted_content`,
+    # which must round-trip byte-exact on a later turn (the server decrypts it
+    # server-side) -- the field-level allowlist already covers this since
+    # `content` is kept whole, not trimmed further.
+    "web_search_tool_result": {"type", "tool_use_id", "content"},
 }
 
 

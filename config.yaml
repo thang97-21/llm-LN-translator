@@ -34,7 +34,7 @@ paths:
 prep:
   # The default is the direct MiniMax-M3 cache loop. The original DeepSeek
   # unified, multi-turn, and parallel paths remain selectable recovery routes.
-  provider: deepseek                 # minimax | deepseek | glm | openai
+  provider: openai                 # minimax | deepseek | glm | openai
   minimax:
     model: MiniMax-M3
     endpoint: https://api.minimax.io/anthropic
@@ -102,13 +102,12 @@ prep:
       persistence_file: .context/openai_prep_batch_state.json
 
   # DeepSeek recovery-path defaults. Read only when prep.provider is deepseek.
-  model: deepseek-v4-pro
+  model: deepseek-flash
   endpoint: https://api.deepseek.com/anthropic
   api_key_env: DEEPSEEK_API_KEY
   prompt: src/Deepseek/prompt/prep_prompt_deepseek_en.xml
-  thinking_budget: 32000
-  max_output_tokens: 64000
-  effort: xhigh                       # output_config.effort for every prep
+  max_output_tokens: 384000
+  effort: high                       # output_config.effort for every prep
                                       # Pro call (unified path's single call,
                                       # and the parallel path's phase1_pro_root)
   http_timeout_seconds: 900
@@ -269,7 +268,7 @@ translation:
   # ════════════════════════════════════════════════════════════════════════
 
   # Phase 2 provider route: deepseek | qwen | openai | anthropic | glm.
-  provider: openai                 # deepseek | qwen | openai | anthropic | glm
+  provider: anthropic                 # deepseek | qwen | openai | anthropic | glm
 
   # Master prompt selection. The base prompt consolidates all 13 RAG module
   # policies inline — no external RAG modules, ChromaDB, or vector stores
@@ -669,7 +668,7 @@ translation:
     # GPT-5.6 Terra remains active until Astra access is provisioned. Astra is
     # deliberately opt-in: change this one value only after an access probe.
     # Both models have a 1.05M-token context window and a 128K output cap.
-    model: gpt-5.6-sol
+    model: gpt-6-astra
     endpoint: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     organization_env: OPENAI_ORG_ID
@@ -828,7 +827,15 @@ translation:
     # Wire id, not the display name: Anthropic model ids never contain a dot.
     # "claude-fable-5.1" is a hard 404 at request time; the client normalises
     # it, but write the real id here.
-    model: claude-fable-5-1        # claude-sonnet-5 | claude-opus-5 | claude-fable-5-1
+    # claude-sonnet-5 (default as of advisor mode's launch): the only executor
+    # of the three this route supports that Runs 1-11 actually validated the
+    # proofreading advisor against, and the only one compatible with the
+    # plaintext-readable claude-opus-4-8 advisor default below -- claude-opus-5
+    # as executor does not accept claude-opus-4-8 as advisor at all (see
+    # ADVISOR_COMPATIBILITY in client.py). Changing this away from
+    # claude-sonnet-5 requires either changing advisor.model to one opus-5 or
+    # fable-5-1 accept, or setting advisor.enabled: false.
+    model: claude-sonnet-5      # claude-sonnet-5 | claude-opus-5 | claude-fable-5-1
     endpoint: https://api.anthropic.com
     api_key_env: ANTHROPIC_API_KEY
     anthropic_version: "2023-06-01"
@@ -966,6 +973,57 @@ translation:
       # not caching at all - the one failure mode that looks like an
       # optimization while costing more.
       cache_quality: true
+
+    # ── Proofreading Advisor (advisor_20260301, beta) ───────────────────────
+    # Pairs a faster executor (this route's `model` above) with a
+    # higher-intelligence advisor model consulted mid-generation. Validated
+    # across eleven manual dry runs (docs/anthropic-advisor-mode-plan.md) and
+    # implemented per docs/anthropic-advisor-mode-spec.md: catches real-world
+    # reference validation AND craft/proofreading judgment calls (name-form
+    # drift, locked-anchor collisions, register calls) in a single consult —
+    # not two separate advisor pairings.
+    advisor:
+      enabled: true             # on by default -- testing is done
+      # The advisor model. Must be on Anthropic's executor/advisor
+      # compatibility table for whichever `model` above is configured (see
+      # ADVISOR_COMPATIBILITY in client.py) -- fails fast at startup if not.
+      #   claude-opus-4-8  -- plaintext advisor_result (readable), validated
+      #                       in Runs 8-11. Requires executor claude-sonnet-5.
+      #   claude-sonnet-5  -- same-tier peer; valid with claude-sonnet-5 executor.
+      #   claude-opus-5    -- encrypted advisor_redacted_result.
+      #   claude-fable-5-1 -- encrypted; Anthropic's own pick for maximizing
+      #                       quality lift on a Sonnet executor; the only
+      #                       advisor valid against ANY of this route's three
+      #                       supported executors.
+      model: claude-opus-4-8
+      max_tokens: 24000          # validated in Run 8
+      max_uses: 2                # per-request cap (the tool has no per-conversation cap)
+      max_pause_resumes: 2       # resend budget for stop_reason: pause_turn
+      require_signal: true       # wire the tool in only for a chapter carrying
+                                  # an actual chapter_signals risk entry (or
+                                  # subculture_reference, once prep populates
+                                  # it) -- EPS band WARM/HOT alone is NOT
+                                  # sufficient (see optimization.py::build_advisor_guidance
+                                  # and agent.py::_tools_qualify). false restores
+                                  # the uneconomical "any WARM/HOT chapter" gate
+                                  # this session's evidence measured and rejected.
+      caching:
+        enabled: false           # off by default; Anthropic puts the break-even
+                                  # at ~3 advisor calls per conversation, and this
+                                  # route calls it 0-2 times per chapter
+
+    # ── web_search (basic version, no beta header) ──────────────────────────
+    # Independent of advisor.enabled -- a chapter can need one, the other,
+    # both, or neither (Run 9). Opt-in: its $10/1,000-search cost and the
+    # query-level-economy guardrail (spec §2.5) are unvalidated.
+    web_search:
+      enabled: false
+      type: web_search_20250305  # validated in Run 9; later versions
+                                  # (web_search_20260209+) add dynamic
+                                  # filtering via code execution -- untested here
+      max_uses: 5                # validated in Run 9 (covered every real-world
+                                  # reference in a dense shiritori chapter)
+      require_signal: true       # same gate as advisor.require_signal above
 
     # ── Streaming ───────────────────────────────────────────────────────────
     streaming:
