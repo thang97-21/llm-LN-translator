@@ -57,6 +57,19 @@ const ANTHROPIC_MODEL_LABELS = ['Claude Sonnet 5', 'Claude Opus 5', 'Claude Fabl
 const ANTHROPIC_DISPLAY_CHOICES = ['summarized', 'omitted'] as const;
 const ANTHROPIC_EFFORT_CHOICES = ['max', 'xhigh', 'high', 'medium', 'low'] as const;
 const ANTHROPIC_TTL_CHOICES = ['5m', '1h'] as const;
+// Proofreading Mode's advisor model is a separate compatibility table from
+// the executor choices above (ADVISOR_COMPATIBILITY in client.py) — Opus 4.8
+// is valid here as an ADVISOR even though it is never offered as an executor.
+// claude-sonnet-5 as executor is the only one of the three executor choices
+// that accepts every one of these four; switching the executor away from it
+// narrows which of these remain valid (client.py fails fast on a bad pairing).
+const ADVISOR_MODEL_CHOICES = ['claude-opus-4-8', 'claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1'] as const;
+const ADVISOR_MODEL_LABELS = [
+  'Claude Opus 4.8 — plaintext, validated default',
+  'Claude Sonnet 5 — plaintext, same-tier peer',
+  'Claude Opus 5 — encrypted result',
+  'Claude Fable 5.1 — encrypted, Anthropic’s own pick for max quality lift',
+] as const;
 const PREP_PROVIDER_CHOICES = ['minimax', 'deepseek', 'glm', 'openai'] as const;
 const PREP_PROVIDER_LABELS = ['MiniMax — official Anthropic API', 'DeepSeek — recovery paths', 'GLM — Z.AI Chat Completions', 'OpenAI — Responses / Batch'] as const;
 const MINIMAX_MODEL_CHOICES = ['MiniMax-M3', 'MiniMax-M3-highspeed', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] as const;
@@ -391,6 +404,31 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'How often the batch translator checks job status while waiting for results.' },
   { path: 'translation.anthropic.batch.completion_window', menu: 'Translation', section: 'Anthropic — Batch', label: 'Completion Window', kind: 'text',
     description: 'Anthropic Batch API completion-window setting.' },
+
+  { path: 'translation.anthropic.advisor.enabled', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Status', kind: 'boolean',
+    description: 'On-the-fly cultural validation and proofreading: a second, higher-intelligence model the executor consults mid-generation on its own judgment of need — real-world reference checks (does a named subculture reference or public figure actually check out) and craft calls (name-form drift, locked-anchor collisions, em-dash/register discipline) in one consult. On by default; eleven manual dry runs validated it before this shipped.' },
+  { path: 'translation.anthropic.advisor.model', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Advisor Model', kind: 'enum', choices: ADVISOR_MODEL_CHOICES, choiceLabels: ADVISOR_MODEL_LABELS,
+    description: 'Must be on the executor/advisor compatibility table for the Model chosen above (client.py fails fast at startup if not) — Opus 4.8 requires a claude-sonnet-5 executor.' },
+  { path: 'translation.anthropic.advisor.max_tokens', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Advisor Output Ceiling', kind: 'integer', min: 1,
+    description: 'Output ceiling for each advisor consult, not the executor turn itself. 24,000 is the validated default.' },
+  { path: 'translation.anthropic.advisor.max_uses', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Maximum Consults Per Request', kind: 'integer', min: 1,
+    description: 'Per-request cap on advisor consults. The tool itself has no per-conversation cap.' },
+  { path: 'translation.anthropic.advisor.max_pause_resumes', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Maximum Pause Resumes', kind: 'integer', min: 0,
+    description: 'A deep consult can end the turn early with stop_reason: pause_turn. This bounds how many times the unchanged assistant turn is resent (sync or Batch) before the chapter is left unfinished for manual re-run.' },
+  { path: 'translation.anthropic.advisor.require_signal', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Require Chapter Signal', kind: 'boolean',
+    description: 'On: wires the advisor in only for a chapter carrying an actual risk signal (ambiguity, ateji, multi-speaker, voice-contrast, subculture reference) plus a WARM/HOT EPS band — the economical gate this session\'s evidence validated. Off restores "any WARM/HOT chapter," measured and rejected as uneconomical.' },
+  { path: 'translation.anthropic.advisor.caching.enabled', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Advisor Cache Reuse', kind: 'boolean',
+    description: 'Off by default: Anthropic\'s own break-even sits around 3 advisor calls per conversation, and this route calls it 0-2 times per chapter.' },
+
+  { path: 'translation.anthropic.web_search.enabled', menu: 'Translation', section: 'Anthropic — Web Search', label: 'Status', kind: 'boolean',
+    description: 'Independent, non-beta tool a chapter can need alongside, instead of, or without the Proofreading Mode advisor (all four combinations validated in Run 9). Opt-in: its $10/1,000-search cost and query-level economy guardrail are unvalidated at the same standard the advisor cleared.' },
+  { path: 'translation.anthropic.web_search.type', menu: 'Translation', section: 'Anthropic — Web Search', label: 'Tool Version', kind: 'text',
+    description: 'web_search_20250305 is the validated version. Later versions add dynamic filtering via code execution — untested here.' },
+  { path: 'translation.anthropic.web_search.max_uses', menu: 'Translation', section: 'Anthropic — Web Search', label: 'Maximum Searches Per Request', kind: 'integer', min: 1,
+    description: 'Per-request search cap. 5 covered every real-world reference in a dense validated test chapter.' },
+  { path: 'translation.anthropic.web_search.require_signal', menu: 'Translation', section: 'Anthropic — Web Search', label: 'Require Chapter Signal', kind: 'boolean',
+    description: 'Same economical chapter-risk gate as the Proofreading Mode advisor above, applied independently.' },
+
   { path: 'translation.anthropic.streaming.enabled', menu: 'Translation', section: 'Anthropic — Streaming', label: 'Status', kind: 'boolean',
     description: 'Stream the Messages response rather than wait for the full response object.' },
   { path: 'translation.anthropic.conversation.enabled', menu: 'Translation', section: 'Anthropic — Conversation', label: 'Status', kind: 'boolean',
