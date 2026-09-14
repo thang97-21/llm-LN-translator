@@ -51,6 +51,16 @@ def get_anthropic_caching_config() -> Dict[str, Any]:
     return get_anthropic_config().get("caching", {}) or {}
 
 
+def get_anthropic_fidelity_config() -> Dict[str, Any]:
+    """Post-translation completeness gate for the Anthropic route.
+
+    Deterministic, token-free, and the only layer in this pipeline that
+    actually verifies a finished chapter against its source: the proofreading
+    advisor is consulted BEFORE drafting and never sees the output it is
+    named for."""
+    return get_anthropic_config().get("fidelity_gate", {}) or {}
+
+
 def get_anthropic_telemetry_config() -> Dict[str, Any]:
     """Per-call token/cost logging for the Anthropic route. On by default:
     this is the most expensive pipeline in the project and the one whose

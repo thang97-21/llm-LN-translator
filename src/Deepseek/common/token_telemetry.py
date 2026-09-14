@@ -126,6 +126,13 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
     "claude-sonnet-5":  {"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50,  "cache_write_1h": 4.00,  "output": 10.00},
     "claude-opus-5":    {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25,  "cache_write_1h": 10.00, "output": 25.00},
     "claude-fable-5-1": {"cache_hit": 0.25, "cache_miss": 10.00, "cache_write": 12.50, "cache_write_1h": 20.00, "output": 50.00},
+    # Proofreading Mode's plaintext-advisor default. Verified 2026-09-14
+    # against platform.claude.com/docs/en/about-claude/pricing: byte-identical
+    # to claude-opus-5's row above. Before this entry existed, an advisor
+    # consult billed at this model fell through to the "unknown claude-*"
+    # fallback (the per-column MAX across sonnet-5/opus-5/fable-5-1), which
+    # priced its output at fable-5-1's $50/MTok -- double the real rate.
+    "claude-opus-4-8":  {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25,  "cache_write_1h": 10.00, "output": 25.00},
     # Z.AI GLM-5.3 pricing (USD / 1M tokens), verified 2026-08-27. Cached
     # input storage is limited-time free, so it is not a token-billed write.
     "glm-5.3":       {"cache_hit": 0.26,  "cache_miss": 1.40, "cache_write": 0.0, "output": 4.40},

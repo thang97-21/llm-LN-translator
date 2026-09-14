@@ -8,7 +8,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from src.Anthropic.advisor_prompts import ESCALATION_BLOCK
 from src.Anthropic.client import AnthropicClient
@@ -16,6 +16,7 @@ from src.Anthropic.config import (
     get_anthropic_advisor_config,
     get_anthropic_batch_config,
     get_anthropic_config,
+    get_anthropic_fidelity_config,
     get_anthropic_telemetry_config,
     get_anthropic_continuation_config,
     get_anthropic_conversation_config,
@@ -61,8 +62,13 @@ from src.Deepseek.common.verbatim_anchors import (
     reconcile_chapter,
 )
 from src.Deepseek.common.llm_types import LLMTermination
+from src.Deepseek.common.structural_fidelity import (
+    DEFAULT_RATIO_TOLERANCE,
+    length_ratio,
+    structural_report,
+)
 from src.Deepseek.common.safety_fallback import fallback_translate_chapter
-from src.Deepseek.common.token_telemetry import log_call
+from src.Deepseek.common.token_telemetry import cost_breakdown_usd, log_call
 from src.Deepseek.translator.config import get_thinking_log_config
 from src.Deepseek.translator.thinking_output import merge_thinking_log, split_thinking_from_output
 
@@ -329,31 +335,87 @@ class AnthropicTranslator:
             )
         return rows
 
-    def _reconcile_anchors(self, chapter_id: str, en_text: str) -> None:
-        """Record whether a finished chapter honoured the locks its source hit.
+    def _peer_length_ratios(self, chapter_id: str) -> List[float]:
+        """JP-chars-per-EN-word for every OTHER chapter already on disk.
 
-        The return leg of the reconciliation. context.xml's anchors already
-        carry an <en_output status="pending"> slot for exactly this, and on a
-        completed 21-chapter Vol.4 run every one of the fifteen was still
-        "pending" -- the schema anticipated the check and nothing performed it.
+        Read from EN/ rather than accumulated in memory so a resumed run, a
+        recovered batch, and a straight sequential run all compute the same
+        baseline from the same evidence.
+        """
+        ratios: List[float] = []
+        en_dir = self.work_dir / "EN"
+        if not en_dir.is_dir():
+            return ratios
+        for en_path in sorted(en_dir.glob("*_EN.md")):
+            peer_id = en_path.name[: -len("_EN.md")]
+            if peer_id == chapter_id:
+                continue
+            try:
+                ratio = length_ratio(
+                    (self.work_dir / "JP" / f"{peer_id}.md").read_text(encoding="utf-8"),
+                    en_path.read_text(encoding="utf-8"),
+                )
+            except OSError:
+                continue
+            if ratio:
+                ratios.append(ratio)
+        return ratios
 
-        It is deliberately NOT written back into context.xml. That document is
-        the cached system prefix, and on a prefix-bound model rewriting it
+    def _check_chapter_fidelity(self, chapter_id: str, en_text: str) -> List[str]:
+        """Verify a finished chapter against its source. Returns blocking reasons.
+
+        Two halves, and the second exists because the first cannot see it.
+
+        The ANCHOR half records whether the locks the source hit survived into
+        the English. context.xml's anchors already carry an
+        <en_output status="pending"> slot for exactly this, and on a completed
+        21-chapter Vol.4 run every one of the fifteen was still "pending" --
+        the schema anticipated the check and nothing performed it.
+
+        The STRUCTURAL half counts what no anchor covers: illustration plates
+        and translated bulk. Volume 6e63bc's CHAPTER_04 honoured every anchor
+        it carried and still shipped without both of its source's plates
+        (p085.jpg, p121.jpg) plus a dropped dialogue exchange. Nothing noticed,
+        because nothing was counting. The proofreading advisor could not have
+        noticed either: it is consulted before drafting and never sees the
+        finished prose.
+
+        Neither half is written back into context.xml. That document is the
+        cached system prefix, and on a prefix-bound model rewriting it
         mid-volume invalidates the prompt cache and every stored thinking
         block (see AnthropicConversationManager.bind_system). A later QC or
         bible pass can fold this artifact home when the run is over.
+
+        An empty return means the chapter passed and may be stamped completed.
         """
-        if not self._anchors:
-            return
+        cfg = get_anthropic_fidelity_config()
+        gate_enabled = bool(cfg.get("enabled", True))
+        block_on = {
+            str(item).strip().lower()
+            for item in (cfg.get("block_on") or ["missing", "drifted", "structural"])
+        }
+        try:
+            tolerance = float(cfg.get("ratio_tolerance", DEFAULT_RATIO_TOLERANCE) or DEFAULT_RATIO_TOLERANCE)
+        except (TypeError, ValueError):
+            tolerance = DEFAULT_RATIO_TOLERANCE
+
         try:
             jp_source = (self.work_dir / "JP" / f"{chapter_id}.md").read_text(encoding="utf-8")
         except OSError:
-            return
-        rows = reconcile_chapter(
-            self._anchors, chapter_id=chapter_id, jp_source=jp_source, en_text=en_text
+            logger.warning(
+                "[ANTHROPIC-FIDELITY] %s: JP source unreadable; completeness NOT verified", chapter_id
+            )
+            return []
+
+        anchor_rows = (
+            reconcile_chapter(self._anchors, chapter_id=chapter_id, jp_source=jp_source, en_text=en_text)
+            if self._anchors
+            else []
         )
-        if not rows:
-            return
+        structural_rows = structural_report(
+            jp_source, en_text, self._peer_length_ratios(chapter_id), tolerance=tolerance
+        )
+
         path = self.work_dir / ".context" / "anchor_reconciliation.json"
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
@@ -363,17 +425,59 @@ class AnthropicTranslator:
             existing = {}
         existing.setdefault("volume_id", self.volume_id)
         existing.setdefault("chapters", {})
-        existing["chapters"][chapter_id] = rows
+        # Schema bump: the per-chapter value was a bare list of anchor rows and
+        # is now a mapping, so the structural rows have somewhere to live
+        # beside them. Readers of the old shape should branch on isinstance.
+        existing["chapters"][chapter_id] = {"anchors": anchor_rows, "structural": structural_rows}
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(path, existing)
-        flagged = [row for row in rows if row.get("status") in ("missing", "drifted")]
-        if flagged:
+
+        blocking: List[str] = []
+        anchor_flagged = [row for row in anchor_rows if str(row.get("status")) in ("missing", "drifted")]
+        if anchor_flagged:
             logger.warning(
-                "[ANTHROPIC-ANCHORS] %s: %d anchor(s) not honoured: %s",
+                "[ANTHROPIC-FIDELITY] %s: %d anchor(s) not honoured: %s",
                 chapter_id,
-                len(flagged),
-                ", ".join(f"{row['anchor_id']}({row['status']})" for row in flagged),
+                len(anchor_flagged),
+                ", ".join(f"{row['anchor_id']}({row['status']})" for row in anchor_flagged),
             )
+        blocking.extend(
+            f"anchor {row.get('anchor_id')} {row.get('status')} ({row.get('en')!r})"
+            for row in anchor_flagged
+            if str(row.get("status")) in block_on
+        )
+
+        for row in structural_rows:
+            status = str(row.get("status") or "")
+            if row.get("check") == "illustration_parity" and status == "mismatch":
+                detail = (
+                    f"illustration parity: source has {row.get('jp_count')}, output has "
+                    f"{row.get('en_count')}; missing={row.get('missing')} unexpected={row.get('unexpected')}"
+                )
+                logger.error("[ANTHROPIC-FIDELITY] %s: %s", chapter_id, detail)
+                if "structural" in block_on:
+                    blocking.append(detail)
+            elif row.get("check") == "length_ratio" and status == "outlier":
+                # Advisory only, never blocking: translation density genuinely
+                # varies with a chapter's dialogue-to-narration mix, and a
+                # two-line omission cannot move this ratio at all (measured on
+                # 6e63bc CH04: 7.7% deviation while missing real content). It
+                # earns its keep by pointing a reviewer at the right chapter
+                # out of twenty, not by deciding anything on its own.
+                logger.warning(
+                    "[ANTHROPIC-FIDELITY] %s: translated bulk is an outlier for this volume "
+                    "(ratio=%s, median=%s, deviation=%s) — worth a look, not blocking",
+                    chapter_id, row.get("ratio"), row.get("median"), row.get("deviation"),
+                )
+
+        if blocking and not gate_enabled:
+            logger.warning(
+                "[ANTHROPIC-FIDELITY] %s: %d fidelity problem(s) found but the gate is disabled; "
+                "chapter will be stamped completed anyway: %s",
+                chapter_id, len(blocking), "; ".join(blocking),
+            )
+            return []
+        return blocking
 
     def _preceding_chapter_id(self, chapter_id: str) -> Optional[str]:
         """The chapter id immediately before this one, or None.
@@ -546,11 +650,14 @@ class AnthropicTranslator:
         # in, in order, not just the last.
         parts = [first_response.content] + [r.content for r in resumed]
         thinking_parts: List[str] = []
+        advisor_texts: List[str] = []
         if first_response.thinking_content:
             thinking_parts.append(str(first_response.thinking_content))
+        advisor_texts.extend(_advisor_consult_texts(first_response))
         for r in resumed:
             if r.thinking_content:
                 thinking_parts.append(str(r.thinking_content))
+            advisor_texts.extend(_advisor_consult_texts(r))
         continuation_count = 0
         while (
             response.termination == LLMTermination.MAX_OUTPUT
@@ -583,9 +690,11 @@ class AnthropicTranslator:
             parts.extend(r.content for r in resumed)
             if continuation_response.thinking_content:
                 thinking_parts.append(str(continuation_response.thinking_content))
+            advisor_texts.extend(_advisor_consult_texts(continuation_response))
             for r in resumed:
                 if r.thinking_content:
                     thinking_parts.append(str(r.thinking_content))
+                advisor_texts.extend(_advisor_consult_texts(r))
             if pause_count == 0:
                 self._log_usage(continuation_label, response)
 
@@ -598,6 +707,7 @@ class AnthropicTranslator:
             chapter_id=chapter_id,
             api_thinking="\n\n".join(thinking_parts) or None,
             leaked_blocks=leaked_blocks,
+            advisor_texts=advisor_texts,
         )
         if manager is not None:
             manager.commit(
@@ -659,6 +769,13 @@ class AnthropicTranslator:
         ``input_tokens - cached_tokens`` drove the fresh figure to zero
         whenever the cached prefix exceeded the chapter envelope, which is the
         normal case here.
+
+        Also logs one additional row per Proofreading Mode advisor consult
+        this response carried (``provider_metadata["advisor_usage"]``, built
+        in response.py from ``usage.iterations``'s advisor_message entries) --
+        billed at the ADVISOR's own model rate, never folded into the
+        executor's row. Before this existed, an advisor consult's real spend
+        was invisible: paid for, but attributed nowhere.
         """
         telemetry_cfg = get_anthropic_telemetry_config()
         if not bool(telemetry_cfg.get("enabled", True)):
@@ -687,6 +804,37 @@ class AnthropicTranslator:
                 total_cache_coverage=metrics.get("total_cache_coverage") if quality else None,
                 cache_net_savings_usd=economics.get("net_input_savings_usd") if quality else None,
             )
+            for i, advisor_call in enumerate(response.provider_metadata.get("advisor_usage") or [], start=1):
+                advisor_model = str(advisor_call.get("model") or "")
+                if not advisor_model:
+                    continue
+                advisor_cache_hit = int(advisor_call.get("cache_read_tokens") or 0)
+                advisor_cache_write = int(advisor_call.get("cache_creation_tokens") or 0)
+                advisor_fresh = int(advisor_call.get("input_tokens") or 0)
+                advisor_output = int(advisor_call.get("output_tokens") or 0)
+                advisor_costs = cost_breakdown_usd(
+                    model_name=advisor_model,
+                    input_tokens=advisor_fresh,
+                    output_tokens=advisor_output,
+                    cache_read_tokens=advisor_cache_hit,
+                    cache_creation_tokens=advisor_cache_write,
+                    cache_read_included_in_input=False,
+                    cache_ttl=self.client.cache_ttl,
+                    batch=bool(response.batch_pricing),
+                )
+                log_call(
+                    phase="translator",
+                    volume_id=self.volume_id,
+                    call_label=f"{call_label}#advisor-{i}",
+                    model=advisor_model,
+                    provider="anthropic",
+                    cache_hit_tokens=advisor_cache_hit,
+                    cache_write_tokens=advisor_cache_write,
+                    fresh_tokens=advisor_fresh,
+                    output_tokens=advisor_output,
+                    cost_usd=float(advisor_costs["total_cost_usd"]),
+                    batch=bool(response.batch_pricing),
+                )
         except Exception as exc:  # telemetry must never prevent a translation
             logger.warning("[ANTHROPIC] token log failed for %s: %s", call_label, exc)
 
@@ -696,6 +844,7 @@ class AnthropicTranslator:
         chapter_id: str,
         api_thinking: Optional[str],
         leaked_blocks: List[str],
+        advisor_texts: Optional[List[str]] = None,
     ) -> None:
         """Archive this chapter's thinking text to THINKING/<chapter_id>_THINKING.md.
 
@@ -705,10 +854,24 @@ class AnthropicTranslator:
         either way), and this correctly writes nothing rather than a
         near-empty file. Reasoning tokens are already paid for regardless of
         this flag; it only controls whether any returned text is archived.
+
+        ``advisor_texts`` is the Proofreading Mode advisor's own plaintext
+        consult(s) for this chapter, if any — populated only when
+        ``advisor.model`` returns the plaintext advisor_result variant
+        (claude-opus-4-8, claude-sonnet-5); silently empty for an encrypted
+        advisor (claude-fable-5-1, claude-opus-5, and the Mythos family),
+        whose guidance never reaches this file or any other, by Anthropic's
+        own design (see docs/anthropic-advisor-mode-plan.md).
         """
         if not self.thinking_log_enabled:
             return
         merged = merge_thinking_log(api_thinking, leaked_blocks, chapter_id=chapter_id)
+        if advisor_texts:
+            advisor_section = (
+                "## Proofreading Advisor Consult (plaintext advisor_result)\n\n"
+                + "\n\n---\n\n".join(advisor_texts)
+            )
+            merged = f"{merged}\n\n{advisor_section}" if merged else advisor_section
         if not merged:
             return
 
@@ -747,7 +910,20 @@ class AnthropicTranslator:
         output_path = self.work_dir / "EN" / f"{chapter_id}_EN.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(text, encoding="utf-8")
-        self._reconcile_anchors(chapter_id, text)
+        blocking = self._check_chapter_fidelity(chapter_id, text)
+        if blocking:
+            # The text stays on disk so it can be inspected and diffed, but the
+            # chapter is NOT stamped completed -- _filter_completed_chapters
+            # will offer it again on the next run. Same discipline the batch
+            # path already applies to a MAX_OUTPUT fragment: a chapter that
+            # lost content quietly deserves the treatment one that lost it
+            # loudly already gets.
+            logger.error(
+                "[ANTHROPIC-FIDELITY] %s: %d fidelity problem(s); written to %s but NOT marked "
+                "completed, so it will be re-translated on the next run: %s",
+                chapter_id, len(blocking), output_path, "; ".join(blocking),
+            )
+            return output_path
         _update_manifest_after_translation(self.work_dir, {chapter_id})
         return output_path
 
@@ -963,7 +1139,7 @@ class AnthropicTranslator:
                 batch_id = submit_batch(self.client, group, betas=batch_betas)
                 # Recorded before the poll loop starts: the failure this guards
                 # against is the process not surviving to write anything later.
-                ledger.record_submitted(batch_id, wave=wave_number, chapter_ids=group_ids)
+                ledger.record_submitted(batch_id, wave=wave_number, chapter_ids=group_ids, betas=batch_betas)
                 logger.info(
                     "[ANTHROPIC-BATCH] wave %d%s submitted batch_id=%s chapters=%d history_turns=%d",
                     wave_number,
@@ -993,7 +1169,7 @@ class AnthropicTranslator:
                     break
 
                 ledger.record_ended(batch_id)
-                outcome = retrieve_batch_results(self.client, batch_id, model=self.client.model)
+                outcome = retrieve_batch_results(self.client, batch_id, model=self.client.model, betas=batch_betas)
                 unfinished.update(outcome.unfinished)
                 self._absorb_results(
                     outcome, group_paths, prompts, manager, written, unfinished,
@@ -1068,7 +1244,9 @@ class AnthropicTranslator:
                 continue
 
             ledger.record_ended(batch_id)
-            outcome = retrieve_batch_results(self.client, batch_id, model=self.client.model)
+            outcome = retrieve_batch_results(
+                self.client, batch_id, model=self.client.model, betas=entry.get("betas") or None
+            )
             unfinished.update(outcome.unfinished)
             paths = [jp_by_id[cid] for cid in chapter_ids]
             prompts = {path.stem: self._build_chapter_prompt(path.stem, path) for path in paths}
@@ -1111,6 +1289,7 @@ class AnthropicTranslator:
             pause_count = 0
             extra_content_parts: List[str] = []
             extra_thinking_parts: List[str] = []
+            extra_advisor_texts: List[str] = []
             if response.termination == LLMTermination.PAUSED:
                 if messages_by_id is None or chapter_id not in messages_by_id:
                     # Recovery path: no record of the exact request this
@@ -1150,9 +1329,11 @@ class AnthropicTranslator:
                 extra_content_parts = [paused_response.content] + [r.content for r in resumed[:-1]]
                 if paused_response.thinking_content:
                     extra_thinking_parts.append(str(paused_response.thinking_content))
+                extra_advisor_texts.extend(_advisor_consult_texts(paused_response))
                 for r in resumed[:-1]:
                     if r.thinking_content:
                         extra_thinking_parts.append(str(r.thinking_content))
+                    extra_advisor_texts.extend(_advisor_consult_texts(r))
                 # resumed[-1] IS `response` (the final one) -- its content is
                 # read directly off `response` below, not duplicated here.
 
@@ -1170,7 +1351,16 @@ class AnthropicTranslator:
                     unfinished[chapter_id] = f"refused; safety fallback failed: {exc}"
                     logger.error("[ANTHROPIC-BATCH] %s refused and fallback failed: %s", chapter_id, exc)
                     continue
-                written[chapter_id] = self._write_chapter(chapter_id, text)
+                fallback_path, fallback_blocking = self._write_chapter(chapter_id, text)
+                if fallback_blocking:
+                    unfinished[chapter_id] = "fidelity gate: " + "; ".join(fallback_blocking)
+                    logger.error(
+                        "[ANTHROPIC-FIDELITY] %s: safety-fallback text failed its completeness "
+                        "check; written to %s but NOT marked completed: %s",
+                        chapter_id, fallback_path, "; ".join(fallback_blocking),
+                    )
+                    continue
+                written[chapter_id] = fallback_path
                 continue
 
             if response.termination == LLMTermination.MAX_OUTPUT:
@@ -1201,10 +1391,12 @@ class AnthropicTranslator:
             combined_thinking = "\n\n".join(
                 part for part in (*extra_thinking_parts, response.thinking_content or "") if part
             ) or None
+            combined_advisor_texts = [*extra_advisor_texts, *_advisor_consult_texts(response)]
             self._maybe_write_thinking_log(
                 chapter_id=chapter_id,
                 api_thinking=combined_thinking,
                 leaked_blocks=leaked_blocks,
+                advisor_texts=combined_advisor_texts,
             )
             if pause_count == 0:
                 # A paused-then-resolved response's final call was already
@@ -1212,7 +1404,20 @@ class AnthropicTranslator:
                 # #advisor-resume-N label; logging it again here would count
                 # the same spend twice.
                 self._log_usage(chapter_id, response)
-            output_path = self._write_chapter(chapter_id, text)
+            output_path, blocking = self._write_chapter(chapter_id, text)
+            if blocking:
+                # Not entered in `written`, so _finish_batch_run never stamps it
+                # completed and the next run re-translates it. The conversation
+                # ledger is deliberately NOT committed either: a chapter that
+                # lost content should not become the continuity its successors
+                # are built on.
+                unfinished[chapter_id] = "fidelity gate: " + "; ".join(blocking)
+                logger.error(
+                    "[ANTHROPIC-FIDELITY] %s: %d fidelity problem(s); written to %s but NOT "
+                    "marked completed and NOT committed to the ledger: %s",
+                    chapter_id, len(blocking), output_path, "; ".join(blocking),
+                )
+                continue
             written[chapter_id] = output_path
             if manager is not None:
                 # The batch decoder routes through the same
@@ -1278,12 +1483,18 @@ class AnthropicTranslator:
             anchor_rows=self._anchor_rows(chapter_id, jp_source),
         )
 
-    def _write_chapter(self, chapter_id: str, text: str) -> Path:
+    def _write_chapter(self, chapter_id: str, text: str) -> Tuple[Path, List[str]]:
+        """Persist one chapter and verify it. Returns (path, blocking_reasons).
+
+        The text is always written -- a chapter that failed its check is far
+        more useful on disk, where it can be read and diffed, than discarded.
+        What the blocking reasons govern is whether the caller may record it
+        as DONE.
+        """
         output_path = self.work_dir / "EN" / f"{chapter_id}_EN.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(text, encoding="utf-8")
-        self._reconcile_anchors(chapter_id, text)
-        return output_path
+        return output_path, self._check_chapter_fidelity(chapter_id, text)
 
     def _history_cache_control(self) -> Optional[Dict[str, Any]]:
         """The breakpoint closing the replayed history, or None when caching is off."""
@@ -1474,3 +1685,18 @@ def _assistant_message(response) -> Dict[str, Any]:
 
 def _single_turn_messages(prompt: str) -> List[Dict[str, Any]]:
     return [_user_message(prompt)]
+
+
+def _advisor_consult_texts(response) -> List[str]:
+    """Plaintext advisor consult text from one response, if any.
+
+    ``block.text`` is populated only for the plaintext advisor_result variant
+    (e.g. claude-opus-4-8, claude-sonnet-5 as advisor); it is "" by
+    construction for the encrypted advisor_redacted_result variant
+    (claude-fable-5-1, claude-opus-5, and the Mythos family), so this is
+    naturally silent for those without any type-specific branching.
+    """
+    return [
+        block.text for block in (response.content_blocks or [])
+        if block.type == "advisor_result" and block.text
+    ]

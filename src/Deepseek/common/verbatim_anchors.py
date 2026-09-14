@@ -47,7 +47,7 @@ _MAX_RECONCILABLE_SURFACE = 60
 
 # Characters that make a surface behave like an English word, and therefore
 # want word-boundary matching rather than raw substring counting.
-_ALPHA_RE = re.compile(r"[A-Za-z]")
+_WORD_EDGE_RE = re.compile(r"\w")
 
 
 @dataclass(frozen=True)
@@ -215,14 +215,30 @@ def anchors_in_source(anchors: Sequence[Anchor], jp_source: str) -> List[Tuple[A
 def _surface_pattern(surface: str) -> re.Pattern:
     """Case-insensitive matcher for an English surface.
 
-    Word boundaries only where the surface is alphabetic: 'splendid' must not
-    match inside 'splendidly'-style neighbours by accident, while a surface
-    carrying punctuation or kana is matched literally.
+    Word boundaries are decided PER EDGE, and only where that edge's own
+    character is a word character: 'splendid' still must not match inside
+    'splendidly', while a surface carrying punctuation or kana at an edge is
+    matched literally there.
+
+    Why per edge rather than "does the surface contain a letter anywhere".
+    ``\\b`` asserts a transition between a word and a non-word character, so
+    appending it after a surface that ALREADY ends in punctuation ("As you
+    wish.", "I win!", "Kiss me.") demands the next character be alphanumeric
+    — and a sentence-final period in real prose is followed by a space or a
+    closing quote. That assertion can essentially never hold, which made every
+    punctuation-terminated lock permanently unmatchable and reported it
+    ``missing`` while it sat in the shipped text. Measured on volume 6e63bc
+    before this fix: 10 of 10 "missing" verdicts were false, every one a line
+    of dialogue; all six genuinely-confirmed anchors happened to end in a
+    letter. A fidelity check that cries missing on a phrase in plain sight
+    does not merely fail — it teaches its operator to stop reading it.
     """
     escaped = re.escape(surface)
-    if _ALPHA_RE.search(surface):
-        return re.compile(rf"\b{escaped}\b", re.IGNORECASE)
-    return re.compile(escaped, re.IGNORECASE)
+    if not surface:
+        return re.compile(escaped, re.IGNORECASE)
+    prefix = r"\b" if _WORD_EDGE_RE.match(surface[0]) else ""
+    suffix = r"\b" if _WORD_EDGE_RE.match(surface[-1]) else ""
+    return re.compile(rf"{prefix}{escaped}{suffix}", re.IGNORECASE)
 
 
 def _excerpt(text: str, match: re.Match, width: int = 70) -> str:

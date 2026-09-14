@@ -34,7 +34,7 @@ paths:
 prep:
   # The default is the direct MiniMax-M3 cache loop. The original DeepSeek
   # unified, multi-turn, and parallel paths remain selectable recovery routes.
-  provider: openai                 # minimax | deepseek | glm | openai
+  provider: deepseek                 # minimax | deepseek | glm | openai
   minimax:
     model: MiniMax-M3
     endpoint: https://api.minimax.io/anthropic
@@ -1008,9 +1008,15 @@ translation:
                                   # the uneconomical "any WARM/HOT chapter" gate
                                   # this session's evidence measured and rejected.
       caching:
-        enabled: false           # off by default; Anthropic puts the break-even
-                                  # at ~3 advisor calls per conversation, and this
-                                  # route calls it 0-2 times per chapter
+        enabled: true            # NOTE: inert today -- client.py's advisor tool
+                                  # definition never sends Anthropic's `caching`
+                                  # field, so this flag currently changes nothing
+                                  # either way. Left on deliberately so the wiring,
+                                  # once added, starts in the intended state.
+                                  # Economics when it does take effect: Anthropic
+                                  # puts the break-even at ~3 advisor calls per
+                                  # conversation, and this route calls it 0-2
+                                  # times per chapter.
 
     # ── web_search (basic version, no beta header) ──────────────────────────
     # Independent of advisor.enabled -- a chapter can need one, the other,
@@ -1024,6 +1030,35 @@ translation:
       max_uses: 5                # validated in Run 9 (covered every real-world
                                   # reference in a dense shiritori chapter)
       require_signal: true       # same gate as advisor.require_signal above
+
+    # ── Fidelity Gate ───────────────────────────────────────────────────────
+    # Deterministic post-translation completeness check, run on every finished
+    # chapter before it is stamped completed in manifest.json. Costs nothing --
+    # no model call, no tokens.
+    #
+    # Why this exists beside Proofreading Mode rather than inside it: the
+    # advisor is consulted BEFORE drafting and never sees the finished prose,
+    # so it structurally cannot verify the output. Volume 6e63bc CHAPTER_04
+    # honoured every verbatim anchor it carried and still shipped without both
+    # of its source's illustration plates (p085.jpg, p121.jpg). Counting is a
+    # job for code; craft judgement is a job for the advisor.
+    fidelity_gate:
+      enabled: true
+      # Which findings refuse the "completed" stamp. A blocked chapter is still
+      # written to EN/ (so it can be read and diffed) but is left pending, so
+      # the next run re-translates it -- the same discipline the batch path
+      # already applies to a MAX_OUTPUT fragment.
+      #   missing    -- a locked anchor the source carried is absent from the English
+      #   drifted    -- a forbidden synonym was used and the locked surface is absent
+      #   structural -- illustration-plate parity between JP and EN broke
+      # Set to [] to record findings without ever blocking.
+      block_on: [missing, drifted, structural]
+      # Advisory-only sentinel (never blocks): how far a chapter's
+      # JP-chars-per-EN-word may stray from the volume's own median before it
+      # is logged as worth a look. Loose on purpose -- translation density
+      # varies honestly with dialogue-to-narration mix, and a two-line omission
+      # cannot move it at all (6e63bc CH04 measured 7.7% while missing content).
+      ratio_tolerance: 0.35
 
     # ── Streaming ───────────────────────────────────────────────────────────
     streaming:

@@ -103,6 +103,13 @@ def response_to_llm_response(
                 "model": as_dict(it).get("model"),
                 "input_tokens": _as_int(as_dict(it).get("input_tokens")),
                 "output_tokens": _as_int(as_dict(it).get("output_tokens")),
+                # Currently always 0 -- client.py's advisor tool definition
+                # never sends the `caching` field Anthropic's advisor tool
+                # accepts, so advisor.caching.enabled is a no-op today.
+                # Extracted anyway so a future fix doesn't silently drop cost
+                # once that wiring exists.
+                "cache_read_tokens": _as_int(as_dict(it).get("cache_read_input_tokens")),
+                "cache_creation_tokens": _as_int(as_dict(it).get("cache_creation_input_tokens")),
             }
             for it in advisor_iterations
         ]

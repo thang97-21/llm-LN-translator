@@ -110,12 +110,20 @@ class BatchLedger:
     def _find(self, batch_id: str) -> Optional[Dict[str, Any]]:
         return next((entry for entry in self.batches if entry.get("batch_id") == batch_id), None)
 
-    def record_submitted(self, batch_id: str, *, wave: int, chapter_ids: List[str]) -> None:
+    def record_submitted(
+        self, batch_id: str, *, wave: int, chapter_ids: List[str], betas: Optional[List[str]] = None
+    ) -> None:
         self.batches.append(
             {
                 "batch_id": batch_id,
                 "wave": int(wave),
                 "chapter_ids": list(chapter_ids),
+                # Persisted so a recovered batch (process killed before this
+                # run's results() call) can still route through the correct
+                # beta-typed accessor on retrieval -- without this, recovery
+                # has no way to know a job it never itself submitted carried
+                # advisor-shaped content.
+                "betas": list(betas) if betas else [],
                 "submitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "status": "submitted",
                 "resolved_at": None,
@@ -177,7 +185,9 @@ def poll_batch(client, batch_id: str) -> Dict[str, Any]:
     return as_dict(batch)
 
 
-def retrieve_batch_results(client, batch_id: str, *, model: str) -> BatchOutcome:
+def retrieve_batch_results(
+    client, batch_id: str, *, model: str, betas: Optional[List[str]] = None
+) -> BatchOutcome:
     """Decode every JSONL result line, keyed by chapter_id (the request's
     custom_id) and sorted into succeeded / retryable / permanent.
 
@@ -186,10 +196,25 @@ def retrieve_batch_results(client, batch_id: str, *, model: str) -> BatchOutcome
     what lets a batch result be committed to the conversation ledger exactly
     as a synchronous one is.
 
+    ``betas`` mirrors ``submit_batch``'s own branch (and
+    ``AnthropicClient._messages_namespace``'s synchronous-path equivalent at
+    client.py) -- when the batch was submitted with the advisor beta, its
+    results must be decoded through ``client._client.beta.messages.batches``,
+    not the stable ``client._client.messages.batches``. The stable SDK types
+    (``types/server_tool_use_block.py`` etc.) have no ``"advisor"`` variant
+    in their ``name``/``type`` literals at all; handed an advisor-shaped
+    block, Pydantic doesn't raise, it emits a PydanticSerializationUnexpectedValue
+    warning per mismatched field and falls back to best-effort coercion --
+    the exact place inline content (a markdown image tag, a short dialogue
+    exchange) can go missing from a decoded chapter with no exception ever
+    raised. Confirmed live on 6e63bc's Chapter 4, decoded through the stable
+    accessor despite its batch carrying the advisor beta.
+
     Results arrive in arbitrary order; nothing here depends on position.
     """
     outcome = BatchOutcome()
-    for entry in client._client.messages.batches.results(batch_id):
+    results_namespace = client._client.beta.messages.batches if betas else client._client.messages.batches
+    for entry in results_namespace.results(batch_id):
         payload = as_dict(entry)
         custom_id = str(payload.get("custom_id") or "")
         if not custom_id:
