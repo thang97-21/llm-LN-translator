@@ -17,22 +17,25 @@ decisions inherited rather than reinvented. See
 
 ## Navigation
 
-- [What It Is](#what-it-is)
-- [What It Is NOT](#what-it-is-not)
-- [Quick Start](#quick-start)
-- [Architecture](#architecture)
-  - [Providers](#providers)
-  - [OpenAI Responses — Application and Cache Telemetry](#openai-responses--application-and-cache-telemetry)
-  - [Proofreading Mode — Powered by Anthropic's Advisor Tool](#proofreading-mode--powered-by-anthropics-advisor-tool)
-  - [Safety-Refusal Fallback](#safety-refusal-fallback)
-  - [Prep — Cached Multi-turn Path](#prep--cached-multi-turn-path)
-  - [Series Continuity — The Bible Writer](#series-continuity--the-bible-writer)
-- [Configuration](#configuration)
-- [File Structure](#file-structure)
-- [CLI Reference](#cli-reference)
-- [MCP Tools](#mcp-tools)
-- [Requirements](#requirements)
-- [context.xml](#contextxml)
+- [LLM Translator - DeepSeek/Qwen/OpenAI/Anthropic/Z.AI-Powered](#llm-translator---deepseekqwenopenaianthropiczai-powered)
+  - [Navigation](#navigation)
+  - [What It Is](#what-it-is)
+  - [What It Is NOT](#what-it-is-not)
+  - [Quick Start](#quick-start)
+  - [Architecture](#architecture)
+    - [Providers](#providers)
+    - [OpenAI Responses — Application and Cache Telemetry](#openai-responses--application-and-cache-telemetry)
+    - [Proofreading Mode — Powered by Anthropic's Advisor Tool](#proofreading-mode--powered-by-anthropics-advisor-tool)
+    - [Safety-Refusal Fallback](#safety-refusal-fallback)
+    - [Prep — Cached Multi-turn Path](#prep--cached-multi-turn-path)
+    - [Prep — OpenAI Responses / Batch Path](#prep--openai-responses--batch-path)
+    - [Series Continuity — The Bible Writer](#series-continuity--the-bible-writer)
+  - [Configuration](#configuration)
+  - [File Structure](#file-structure)
+  - [CLI Reference](#cli-reference)
+  - [MCP Tools](#mcp-tools)
+  - [Requirements](#requirements)
+  - [context.xml](#contextxml)
 
 ---
 
@@ -142,16 +145,19 @@ output/<vol_id>.epub          ← Finished English light novel
 
 ### Providers
 
-Five isolated Phase 2 routes, selected by `translation.provider`. Specs as
-configured in `config.yaml`:
+llm-LN-translator runs Phase 2 on frontier-class LLMs, one isolated route per
+provider, selected by `translation.provider`. Model IDs, context limits, and
+reasoning settings change with every provider release, so this README does not
+pin them. `config.yaml` is the source of truth for what each route is currently
+configured to call.
 
-| Provider | Model | Context Window | Max Output | Reasoning Control |
-|---|---|---:|---:|---|
-| DeepSeek | `deepseek-v4-pro` | 1M tokens | 384K tokens | 64K thinking budget + DRDI (EPS-band reasoning directives injected into the user turn — this route has no native effort parameter) |
-| Qwen | `qwen3.7-max` | 1M tokens | 128K tokens | Native thinking, 56K token budget |
-| OpenAI | `gpt-5.6-terra` (Astra-ready) | 1.05M tokens (922K configured input guard) | 128K tokens | `reasoning.mode: pro`, `reasoning.effort: xhigh`, `context: all_turns` |
-| Anthropic | `claude-sonnet-5` | 1M tokens | 128K tokens | Adaptive thinking (`type: adaptive`), `effort: high` |
-| Z.AI | `GLM-5.3-FLASH` | 1M tokens | 128K tokens | Deep Thinking , `effort: max` |
+| Provider | Route | Specialized tooling |
+|---|---|---|
+| DeepSeek | `src/Deepseek/` | DRDI: EPS-band reasoning directives injected into the user turn, standing in for a native effort parameter |
+| Qwen | `src/Qwen/` | Native thinking with a configurable token budget |
+| OpenAI | `src/OpenAI/` | Native Responses API (not a compatibility wrapper) with encrypted-reasoning replay and cache telemetry. See [OpenAI Responses](#openai-responses--application-and-cache-telemetry) |
+| Anthropic | `src/Anthropic/` | **Proofreading Mode** (Anthropic's beta advisor tool) as an in-loop proofreader and validator, plus opt-in `web_search`. See [Proofreading Mode](#proofreading-mode--powered-by-anthropics-advisor-tool) |
+| Z.AI | `src/GLM/` | Deep Thinking reasoning mode |
 
 Every route receives the same prepared `context.xml` (voice guidance,
 terminology locks, scene/emotional guidance) and enforces the same
@@ -203,12 +209,12 @@ A healthy fixed-prefix run may therefore report 100% breakpoint success, 100%
 prefix recovery, and only about 15% total coverage; those values describe a
 narrow but fully functioning cache rather than a cache failure.
 
-Astra remains opt-in in `config.yaml`; when selected, an eligible access or
-transport failure can pin the volume to the configured GPT-5.6 fallback. A
-fallback after an already committed Astra chapter records `fallback_pending`
-instead of silently mixing model-native conversation state. Set
-`translation.openai.fallback.resume_pending: true` only when explicitly
-resuming that boundary on GPT-5.6.
+Astra remains selectable in `config.yaml`; GPT-6 Sol is the default and GPT-6
+Luna is its fallback. An eligible access or transport failure can pin the
+volume to Luna. The checked-in `allow_mixed_model_volume: true` permits a
+chapter-boundary switch after committed Sol chapters, with a model-specific
+conversation ledger. Set it to `false` to record `fallback_pending` instead;
+`resume_pending: true` then explicitly resumes that boundary on Luna.
 
 **Artifacts.** Each OpenAI translator call adds cache reads, cache writes,
 ordinary input, output, the three cumulative ratios, net cache savings, and
@@ -221,11 +227,9 @@ Logs created before `cache_write_tokens` telemetry was added retain valid cache
 read counts, but their write cost and net savings cannot be reconstructed
 exactly. Use a new live run when billing-accurate cache economics are required.
 
-**OpenAI Batch migration (Astra-ready).** `translation.openai.batch.enabled`
-is the explicit opt-in for the GPT-5.6 family. When `translation.openai.model`
-is set to `gpt-6-astra`, `batch.auto_for_astra: true` enables Batch by default;
-set it to `false` to force synchronous Astra calls. The checked-in route remains
-`gpt-5.6-terra` until Astra credentials are provisioned.
+**OpenAI Batch.** `translation.openai.batch.enabled` is on by default for the
+GPT-6 family. Set it to `false` to force synchronous Responses calls. The
+checked-in translation route uses `gpt-6-sol`, with `gpt-6-luna` as fallback.
 
 Batch requests follow the Anthropic Fable 5.1 wave pattern while retaining
 OpenAI's persistent Responses reasoning ledger. Each wave freezes one replay
@@ -240,7 +244,7 @@ translation decisions without abandoning Batch pricing.
 interrupted run drains that ledger before submitting new work, so it does not
 duplicate accepted jobs. Missing or transient result lines remain pending for a
 later retry; model-access failures may switch at a clean boundary to the
-configured GPT-5.6 fallback. If an Astra chapter has already committed and
+configured GPT-6 Luna fallback. If a primary-model chapter has already committed and
 mixed-model continuation is disabled, the route records `fallback_pending`
 instead of silently combining incompatible reasoning state.
 
@@ -271,14 +275,15 @@ at startup):
 | `claude-opus-4-8` (default) | plaintext `advisor_result`, human-readable | Validated in Runs 8–11. Requires executor `claude-sonnet-5`. |
 | `claude-sonnet-5` | plaintext | Same-tier peer to a `claude-sonnet-5` executor. |
 | `claude-opus-5` | encrypted `advisor_redacted_result` | Not compatible with `claude-opus-4-8` as executor. |
-| `claude-fable-5-1` | encrypted | Anthropic's own recommendation for maximum quality lift on a Sonnet executor; the only advisor valid against any of this route's three supported executors. |
+| `claude-fable-5-1` | encrypted | Anthropic's own recommendation for maximum quality lift on a Sonnet executor; valid against every documented executor this route supports. |
 
-The default executor is `claude-sonnet-5` specifically because it is the only
-one of the route's supported executors this project actually validated
-Proofreading Mode against, and the only one compatible with the
-plaintext-readable `claude-opus-4-8` advisor default. Changing the executor
-away from `claude-sonnet-5` requires either an advisor model one of the opus-5
-/ fable-5-1 pairings accepts, or `advisor.enabled: false`.
+**Proofreading Mode is off by default.** The route's default executor is
+`claude-opus-5-5`, and Anthropic's advisor compatibility table documents no
+advisor for it, and does not list it as an advisor either (checked 2026-09-23). An
+undocumented pairing is not assumed valid, so `client.py` fails fast if
+`advisor.enabled: true` meets an Opus 5.5 executor. To run Proofreading Mode,
+set `model: claude-sonnet-5` (the executor Runs 1–11 validated it against)
+and `advisor.enabled: true`.
 
 **Economic gating.** `advisor.require_signal: true` (default) turns
 Proofreading Mode on for a request only when the chapter actually carries a

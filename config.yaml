@@ -71,7 +71,7 @@ prep:
   # as one request in a durable OpenAI Batch job. Set batch.enabled to false
   # for the same block loop through synchronous Responses calls.
   openai:
-    model: gpt-5.6-luna
+    model: gpt-6-sol
     endpoint: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     organization_env: OPENAI_ORG_ID
@@ -107,8 +107,9 @@ prep:
   api_key_env: DEEPSEEK_API_KEY
   prompt: src/Deepseek/prompt/prep_prompt_deepseek_en.xml
   max_output_tokens: 384000
+  thinking_budget: 48000              # DeepSeek prep fallback default
   effort: high                       # output_config.effort for every prep
-                                      # Pro call (unified path's single call,
+                                       # Pro call (unified path's single call,
                                       # and the parallel path's phase1_pro_root)
   http_timeout_seconds: 900
   # Where cross-volume series bibles live. Sequel detection: if
@@ -268,7 +269,7 @@ translation:
   # ════════════════════════════════════════════════════════════════════════
 
   # Phase 2 provider route: deepseek | qwen | openai | anthropic | glm.
-  provider: anthropic                 # deepseek | qwen | openai | anthropic | glm
+  provider: openai                 # deepseek | qwen | openai | anthropic | glm
 
   # Master prompt selection. The base prompt consolidates all 13 RAG module
   # policies inline — no external RAG modules, ChromaDB, or vector stores
@@ -665,10 +666,9 @@ translation:
   # provider: openai. The client uses the native OpenAI Responses API.
   # ════════════════════════════════════════════════════════════════════════
   openai:
-    # GPT-5.6 Terra remains active until Astra access is provisioned. Astra is
-    # deliberately opt-in: change this one value only after an access probe.
-    # Both models have a 1.05M-token context window and a 128K output cap.
-    model: gpt-6-astra
+    # GPT-6 Sol is the primary literary route; Astra remains selectable.
+    # GPT-6 Luna is the lower-cost operational fallback.
+    model: gpt-6-sol
     endpoint: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     organization_env: OPENAI_ORG_ID
@@ -677,18 +677,16 @@ translation:
     master_prompt: src/OpenAI/prompts/master_prompt_openai_en.md
 
     # Shared categorical chapter-risk metadata is consumed by every provider.
-    # Only GPT-6 Astra turns a changed signal profile into a Responses
-    # configuration_update item, and that route must use reasoning.mode=standard.
+    # GPT-6 turns a changed signal profile into a Responses
+    # configuration_update item in reasoning.mode=standard.
     chapter_signals:
       enabled: true
 
-    # Operational fallback. When model is later changed to gpt-6-astra, an
-    # exhausted availability/transport failure may use this existing GPT-5.6
-    # route at a clean chapter boundary. With Terra active today the two model
-    # ids are equal, so this circuit is inert.
+    # An exhausted availability/transport failure switches at a clean chapter
+    # boundary and pins the selected route in the volume ledger.
     fallback:
       enabled: true
-      model: gpt-5.6-terra
+      model: gpt-6-luna
       master_prompt: src/OpenAI/prompts/master_prompt_openai_en.md
       allow_mixed_model_volume: true
       resume_pending: true
@@ -697,7 +695,7 @@ translation:
       persistence_file: .context/openai_route.json
 
     generation:
-      # Includes both visible output and reasoning tokens on GPT-5.6.
+      # Includes both visible output and reasoning tokens.
       max_output_tokens: 128000
       service_tier: default            # auto | default | flex | scale | priority | fast — NEVER "standard", that literal does not exist in this enum
       text:
@@ -721,13 +719,12 @@ translation:
       # must complete OpenAI's organization verification before summarizers
       # are returned at all — see
       # https://help.openai.com/en/articles/10910291-api-organization-verification
-      # (2) not every model tier supports summaries; gpt-5.6-luna's own
-      # model page does not list summary support among its features, unlike
-      # plain gpt-5.6. Set to null to stop requesting a summary entirely.
+      # (2) summary support can vary by model and account. Set to null to
+      # stop requesting a summary entirely.
       summary: detailed                  # auto | concise | detailed | null
 
     caching:
-      # GPT-5.6 explicit cache breakpoints support only the 30-minute TTL.
+      # GPT-6 explicit cache breakpoints support the 30-minute TTL.
       mode: explicit                 # explicit | implicit | disabled
       ttl: 30m
       cache_monitor:
@@ -740,13 +737,10 @@ translation:
         min_repeat_calls_before_warning: 2
 
     # ── Batch API ────────────────────────────────────────────────────────────
-    # GPT-6 Astra uses Batch by default because OpenAI publishes Batch at 50%
-    # of Standard rates. GPT-5.6 remains synchronous unless this explicit
-    # switch is enabled. Set auto_for_astra: false to force Astra synchronous
-    # while access or output quality is being evaluated.
+    # Batch is the default for the whole GPT-6 family; disable this switch to
+    # force synchronous Responses calls for a selected run.
     batch:
       enabled: true
-      auto_for_astra: true
       # Every request in a wave is built against one frozen conversation
       # prefix. Lower this for stronger chapter-to-chapter awareness; raise it
       # for throughput at the cost of sibling requests being mutually blind.
@@ -803,8 +797,8 @@ translation:
   # (not an Anthropic-compatible passthrough the way DeepSeek/Qwen do).
   #
   # Scoped, deliberately, to the current Claude-5 family that shares one
-  # capability profile end to end: claude-sonnet-5, claude-opus-5,
-  # claude-fable-5-1 — all three adaptive-thinking-only, 1M context, 128K max
+  # capability profile end to end: claude-opus-5-5 (default), claude-sonnet-5,
+  # claude-opus-5, claude-fable-5-1 — all four adaptive-thinking-only, 1M context, 128K max
   # output, and a hard 400 on any non-default temperature/top_p/top_k
   # regardless of thinking state. Claude Haiku 4.5 (the one current-family
   # model still on manual budget_tokens thinking, 200K context, 64K output)
@@ -816,26 +810,30 @@ translation:
   # NOT the family's usual 10%-of-input multiplier, so the telemetry table
   # states it per-model rather than deriving it.
   #
-  # Fable 5.1 alone adds "preserved thinking": a thinking block's signature
+  # Fable 5.1 and Opus 5.5 add "preserved thinking": a thinking block's signature
   # binds the system prompt and every message ahead of it, so replaying one
   # after that prefix changed is a 400 before any output. The conversation
   # ledger handles this by stripping thinking from retained turns at each
   # compaction boundary — gated on the model id, so claude-opus-5 and
   # claude-sonnet-5 keep every block exactly as they did before.
+  #
+  # claude-opus-5-5 (released 2026-09-22, default here since 2026-09-23):
+  # $4/$20 per MTok, cache reads $0.20 (0.05x input), batch $2/$10. Thinking
+  # cannot be disabled at any effort, and its default effort is "medium", not
+  # "high" — so thinking.effort below is always sent explicitly. Source:
+  # platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5
   # ════════════════════════════════════════════════════════════════════════
   anthropic:
     # Wire id, not the display name: Anthropic model ids never contain a dot.
     # "claude-fable-5.1" is a hard 404 at request time; the client normalises
     # it, but write the real id here.
-    # claude-sonnet-5 (default as of advisor mode's launch): the only executor
-    # of the three this route supports that Runs 1-11 actually validated the
-    # proofreading advisor against, and the only one compatible with the
-    # plaintext-readable claude-opus-4-8 advisor default below -- claude-opus-5
-    # as executor does not accept claude-opus-4-8 as advisor at all (see
-    # ADVISOR_COMPATIBILITY in client.py). Changing this away from
-    # claude-sonnet-5 requires either changing advisor.model to one opus-5 or
-    # fable-5-1 accept, or setting advisor.enabled: false.
-    model: claude-sonnet-5      # claude-sonnet-5 | claude-opus-5 | claude-fable-5-1
+    # claude-opus-5-5 is the default. Anthropic's advisor-tool compatibility
+    # table documents NO advisor for it (checked 2026-09-23), so Proofreading
+    # Mode is off below and client.py fails fast if it is re-enabled against
+    # this executor. To run Proofreading Mode, switch to claude-sonnet-5 --
+    # the executor Runs 1-11 validated the advisor against -- and set
+    # advisor.enabled: true.
+    model: claude-opus-5-5      # claude-opus-5-5 | claude-sonnet-5 | claude-opus-5 | claude-fable-5-1
     endpoint: https://api.anthropic.com
     api_key_env: ANTHROPIC_API_KEY
     anthropic_version: "2023-06-01"
@@ -843,8 +841,10 @@ translation:
     master_prompt: src/Anthropic/prompts/master_prompt_anthropic_en.md
 
     generation:
-      # Uniform across all three supported models: 128K is the shared
-      # max-output ceiling for claude-sonnet-5/opus-5/fable-5-1.
+      # Uniform across all four supported models: 128K is the shared
+      # max-output ceiling. Keep it at the maximum on claude-opus-5-5 in
+      # particular: thinking counts toward max_tokens even when not returned,
+      # and Opus 5.5 thinks more per turn than Opus 5 at the same effort.
       max_output_tokens: 128000
       # temperature / top_p / top_k are intentionally absent. Non-default
       # values on any of them are a hard 400 on every model this route
@@ -852,9 +852,10 @@ translation:
 
     # ── Adaptive Thinking ────────────────────────────────────────────────────
     thinking:
-      # Master toggle. claude-fable-5-1 rejects thinking:{type:"disabled"}
-      # outright (and budget_tokens likewise) — thinking is always on and the
-      # client keeps it on for that model even if this is set to false.
+      # Master toggle. claude-fable-5-1 and claude-opus-5-5 reject
+      # thinking:{type:"disabled"} outright (and budget_tokens likewise) —
+      # thinking is always on and the client keeps it on for those models
+      # even if this is set to false. Lower effort instead.
       enabled: true
 
       # "summarized" returns readable thinking text (billed the same either
@@ -863,9 +864,14 @@ translation:
       # set to "summarized" here so THINKING/*.md logs actually capture text.
       display: summarized              # summarized | omitted
 
-      # output_config.effort — steers reasoning depth in adaptive mode.
-      # Default on the API is "high"; xhigh/max cost more but reason deeper.
-      effort: high                     # max | xhigh | high | medium | low
+      # output_config.effort — steers reasoning depth in adaptive mode, and
+      # is always sent explicitly. The API default is "high" on every model
+      # here EXCEPT claude-opus-5-5, where it is "medium". Anthropic's Opus 5.5
+      # prompting guide says to start at medium and sweep rather than carry
+      # Opus 5's "high" over: at a given level Opus 5.5 thinks more per turn.
+      # PROVISIONAL until the low/medium/high sweep on this route's own
+      # chapters settles it. Advisor mode requires "high" (client.py).
+      effort: medium                   # max | xhigh | high | medium | low
 
     # ── Prompt Caching ───────────────────────────────────────────────────────
     caching:
@@ -983,7 +989,11 @@ translation:
     # drift, locked-anchor collisions, register calls) in a single consult —
     # not two separate advisor pairings.
     advisor:
-      enabled: true             # on by default -- testing is done
+      enabled: false            # OFF: the default executor (claude-opus-5-5)
+                                  # has no row in Anthropic's advisor
+                                  # compatibility table. Re-enable only with a
+                                  # claude-sonnet-5 executor (validated in Runs
+                                  # 1-11), or once Anthropic documents a pairing.
       # The advisor model. Must be on Anthropic's executor/advisor
       # compatibility table for whichever `model` above is configured (see
       # ADVISOR_COMPATIBILITY in client.py) -- fails fast at startup if not.
@@ -992,9 +1002,9 @@ translation:
       #   claude-sonnet-5  -- same-tier peer; valid with claude-sonnet-5 executor.
       #   claude-opus-5    -- encrypted advisor_redacted_result.
       #   claude-fable-5-1 -- encrypted; Anthropic's own pick for maximizing
-      #                       quality lift on a Sonnet executor; the only
-      #                       advisor valid against ANY of this route's three
-      #                       supported executors.
+      #                       quality lift on a Sonnet executor; valid against
+      #                       every documented executor this route supports.
+      #   claude-opus-5-5  -- NOT listed in the table as an advisor; rejected.
       model: claude-sonnet-5
       max_tokens: 24000          # validated in Run 8
       max_uses: 2                # per-request cap (the tool has no per-conversation cap)

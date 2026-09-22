@@ -11,7 +11,7 @@ import re
 from typing import Any, Dict, List, Optional
 from xml.etree import ElementTree as ET
 
-ASTRA_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
+ASTRA_EFFORT_ORDER = ("none", "low", "medium", "high", "xhigh", "max")
 
 _SIGNAL_ALIASES = {
     "ambiguity": "ambiguity",
@@ -144,13 +144,13 @@ def select_reasoning_effort(
     configured_effort: Any,
     record: Optional[Dict[str, Any]],
 ) -> Optional[str]:
-    """Select an Astra-only effort target without changing other providers.
+    """Select a GPT-6 effort target without changing other providers.
 
     This is a policy result, not an API mutation.  The OpenAI client decides
     whether the target differs from the currently applied effort and, only for
-    GPT-6 Astra, serializes the resulting configuration_update item.
+    GPT-6, serializes the resulting configuration_update item.
     """
-    if str(model).strip().lower() != "gpt-6-astra":
+    if str(model).strip().lower() not in {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}:
         return None
 
     baseline = normalize_reasoning_effort(model, configured_effort)
@@ -188,9 +188,11 @@ def select_reasoning_effort(
 
 
 def normalize_reasoning_effort(model: str, configured_effort: Any) -> str:
-    """Normalize legacy disabled/minimal values for Astra's effort enum."""
+    """Normalize model-specific GPT-6 effort values."""
     effort = str(configured_effort or "medium").strip().lower()
     if str(model).strip().lower() == "gpt-6-astra" and effort in {"none", "minimal"}:
+        return "low"
+    if effort == "minimal":
         return "low"
     return effort if effort in ASTRA_EFFORT_ORDER else "medium"
 

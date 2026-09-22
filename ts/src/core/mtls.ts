@@ -201,9 +201,12 @@ function humanizeConfigValue(key: string, value: string): { text: string; boolSt
   if (value === 'deepseek-v4-pro') return { text: 'DeepSeek-V4-Pro-0813', boolState: null };
   if (value === 'deepseek-v4-flash') return { text: 'DeepSeek-V4-Flash-0731', boolState: null };
   if (value === 'gpt-6-astra') return { text: 'GPT-6 Astra', boolState: null };
+  if (value === 'gpt-6-sol') return { text: 'GPT-6 Sol', boolState: null };
+  if (value === 'gpt-6-luna') return { text: 'GPT-6 Luna', boolState: null };
   if (value === 'gpt-5.6-sol') return { text: 'GPT-5.6 Sol', boolState: null };
   if (value === 'gpt-5.6-terra') return { text: 'GPT-5.6 Terra', boolState: null };
   if (value === 'gpt-5.6-luna') return { text: 'GPT-5.6 Luna', boolState: null };
+  if (value === 'claude-opus-5-5' || value === 'claude-opus-5.5') return { text: 'Claude Opus 5.5', boolState: null };
   if (value === 'claude-sonnet-5') return { text: 'Claude Sonnet 5', boolState: null };
   if (value === 'claude-opus-5') return { text: 'Claude Opus 5', boolState: null };
   if (value === 'claude-fable-5-1') return { text: 'Claude Fable 5.1', boolState: null };

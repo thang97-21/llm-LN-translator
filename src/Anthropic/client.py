@@ -1,12 +1,19 @@
 """Anthropic Messages API client for the Phase 2 literary translator.
 
 Scoped, per the operator's explicit choice, to the current Claude-5 family
-that shares one capability profile end to end: claude-sonnet-5, claude-opus-5,
-claude-fable-5-1. All three use adaptive thinking only (no budget_tokens
-manual mode), share a 1M-token context window and 128K max output, and
-reject non-default temperature/top_p/top_k with a hard 400 regardless of
-thinking state. Claude Haiku 4.5 — the one current-family model still on
-manual extended thinking — is deliberately out of scope for this route.
+that shares one capability profile end to end: claude-opus-5-5 (the route's
+default since 2026-09-23), claude-sonnet-5, claude-opus-5, claude-fable-5-1.
+All four use adaptive thinking only (no budget_tokens manual mode), share a
+1M-token context window and 128K max output, and reject non-default
+temperature/top_p/top_k with a hard 400 regardless of thinking state. Claude
+Haiku 4.5 — the one current-family model still on manual extended thinking —
+is deliberately out of scope for this route.
+
+claude-opus-5-5 (released 2026-09-22) shares Fable 5.1's two constraints that
+matter here: thinking cannot be disabled at any effort level, and its thinking
+blocks bind the conversation prefix. It also defaults to effort "medium" rather
+than "high", so the route always sends effort explicitly. Sources:
+platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5.
 
 claude-fable-5 was retired from this route on 2026-09-03 in favour of
 claude-fable-5-1 (released 2026-09-01), which carries the same input/output
@@ -34,13 +41,15 @@ from src.Deepseek.common.llm_types import LLMApiFamily, LLMResponse, LLMUsage
 logger = logging.getLogger(__name__)
 
 # The only models this route is built and verified against.
-SUPPORTED_MODELS = ("claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
+SUPPORTED_MODELS = ("claude-opus-5-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
 
-# claude-fable-5-1 rejects `thinking: {type: "disabled"}` outright — thinking
-# is always on and cannot be turned off at all (Anthropic's thinking docs;
-# `budget_tokens` is likewise a 400). The client never attempts to disable
-# thinking for this model regardless of translation.anthropic.thinking.enabled.
-THINKING_ALWAYS_ON_MODELS = ("claude-fable-5-1",)
+# These models reject `thinking: {type: "disabled"}` outright — thinking is
+# always on and cannot be turned off at all (`budget_tokens` is likewise a
+# 400). On claude-opus-5-5 that holds at EVERY effort level, unlike
+# claude-opus-5, which accepts "disabled" at effort high or below. The client
+# never attempts to disable thinking for these models regardless of
+# translation.anthropic.thinking.enabled; effort is the only control.
+THINKING_ALWAYS_ON_MODELS = ("claude-fable-5-1", "claude-opus-5-5")
 
 # Display spelling -> wire id. Anthropic model ids never contain a dot: the
 # marketing name is "Claude Fable 5.1", the request body takes
@@ -53,6 +62,7 @@ MODEL_ID_ALIASES = {
     "claude-fable-5": "claude-fable-5-1",
     "claude-sonnet-5.0": "claude-sonnet-5",
     "claude-opus-5.0": "claude-opus-5",
+    "claude-opus-5.5": "claude-opus-5-5",
 }
 
 
@@ -70,6 +80,12 @@ def normalize_model_id(model: str) -> str:
 # most restrictive row -- only Fable 5.1 / Mythos 5.1 may advise it -- which is
 # why claude-opus-4-8 (the plaintext-readable default validated in Runs 8-11)
 # requires a claude-sonnet-5 executor, not claude-opus-5.
+#
+# claude-opus-5-5 is deliberately ABSENT, in both directions: re-checked
+# 2026-09-23, the compatibility table carries no row for it as executor and
+# never lists it as an advisor. An undocumented pairing is not assumed valid
+# because a sibling's is -- Proofreading Mode stays off on an Opus 5.5
+# executor until Anthropic's table says otherwise.
 ADVISOR_COMPATIBILITY: Dict[str, tuple] = {
     "claude-sonnet-5": (
         "claude-mythos-5-1", "claude-fable-5-1", "claude-mythos-5", "claude-fable-5",
@@ -119,7 +135,7 @@ class AnthropicClient:
     ):
         cfg = get_anthropic_config()
         self._cfg = cfg
-        configured_model = str(model or cfg.get("model", "claude-sonnet-5"))
+        configured_model = str(model or cfg.get("model", "claude-opus-5-5"))
         self.model = normalize_model_id(configured_model)
         if self.model != configured_model:
             logger.info(
@@ -197,6 +213,14 @@ class AnthropicClient:
         if advisor_enabled:
             advisor_model = normalize_model_id(str(advisor_cfg.get("model", "claude-opus-4-8")))
             valid_advisors = ADVISOR_COMPATIBILITY.get(self.model, ())
+            if not valid_advisors:
+                # A generic "valid advisors: ()" reads like a bug in this table;
+                # the truth is that Anthropic documents no pairing at all.
+                raise ValueError(
+                    f"Anthropic's advisor-tool compatibility table documents no advisor for "
+                    f"executor {self.model!r}; set translation.anthropic.advisor.enabled: false "
+                    "(or choose an executor the table lists)."
+                )
             if advisor_model not in valid_advisors:
                 raise ValueError(
                     f"translation.anthropic.advisor.model={advisor_model!r} is not a valid advisor "

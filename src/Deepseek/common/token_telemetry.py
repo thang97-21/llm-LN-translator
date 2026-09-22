@@ -94,9 +94,10 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
     "qwen3.7-max":  {"cache_hit": 0.25, "cache_miss": 1.25, "cache_write": 1.5625, "output": 3.75},
     "qwen3.7-plus": {"cache_hit": 0.064, "cache_miss": 0.32, "cache_write": 0.4, "output": 1.28},
     "qwen3.7-flash":{"cache_hit": 0.006,"cache_miss": 0.03,"cache_write": 0.038,"output": 0.13},
-    # OpenAI GPT-6 Astra pricing (USD / 1M tokens), verified against the
-    # official model page. GPT-5.6 family rows follow below.
+    # OpenAI GPT-6 Standard short-context pricing (USD / 1M tokens).
     "gpt-6-astra":   {"cache_hit": 1.00, "cache_miss": 10.00, "cache_write": 12.50, "output": 50.00},
+    "gpt-6-sol":     {"cache_hit": 0.20, "cache_miss": 2.00,  "cache_write": 2.50,  "output": 10.00},
+    "gpt-6-luna":    {"cache_hit": 0.01, "cache_miss": 0.10,  "cache_write": 0.125, "output": 0.50},
     # OpenAI GPT-5.6 family text pricing (USD / 1M tokens), verified 2026-08-17
     # against https://developers.openai.com/api/docs/pricing. Sol/Terra/Luna
     # are the three snapshot tiers; the long-context surcharge above 272K
@@ -126,6 +127,13 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
     "claude-sonnet-5":  {"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50,  "cache_write_1h": 4.00,  "output": 10.00},
     "claude-opus-5":    {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25,  "cache_write_1h": 10.00, "output": 25.00},
     "claude-fable-5-1": {"cache_hit": 0.25, "cache_miss": 10.00, "cache_write": 12.50, "cache_write_1h": 20.00, "output": 50.00},
+    # claude-opus-5-5 verified 2026-09-23 against
+    # https://platform.claude.com/docs/en/about-claude/pricing. Its cache read
+    # is 0.05x input -- $0.20/MTok, half the family's 0.1x -- another per-model
+    # rate that must be read from this row and never derived from cache_miss
+    # (deriving it would double every cached token on the default route).
+    # Writes follow the standard 1.25x / 2x rule: $5 at 5m, $8 at 1h.
+    "claude-opus-5-5":  {"cache_hit": 0.20, "cache_miss": 4.00, "cache_write": 5.00,  "cache_write_1h": 8.00,  "output": 20.00},
     # Proofreading Mode's plaintext-advisor default. Verified 2026-09-14
     # against platform.claude.com/docs/en/about-claude/pricing: byte-identical
     # to claude-opus-5's row above. Before this entry existed, an advisor
@@ -155,7 +163,7 @@ _BATCH_DISCOUNT = 0.5
 # The exact model set src/Anthropic is built and verified against. Kept here
 # so the conservative fallback below is derived from the table rather than
 # from a hand-picked row that can silently stop being the priciest one.
-_ANTHROPIC_MODELS = ("claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
+_ANTHROPIC_MODELS = ("claude-opus-5-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
 
 _QWEN_EXPLICIT_CACHE_READ_PER_MTOK = {
     "qwen3.8-max": 0.17,
@@ -206,8 +214,9 @@ def _rates_for_model(
     cache_pricing_mode: str = "implicit",
 ) -> Dict[str, float]:
     name = str(model_name or "").strip().lower()
-    if name.startswith("gpt-6-astra"):
-        rates = PRICING_PER_MTOK["gpt-6-astra"]
+    if any(name.startswith(model) for model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna")):
+        model = next(model for model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna") if name.startswith(model))
+        rates = PRICING_PER_MTOK[model]
         if int(input_tokens) > 272_000:
             return {
                 "cache_hit": rates["cache_hit"] * 2,

@@ -9,28 +9,9 @@ from typing import Any, Dict, Optional
 _SEMANTIC_METADATA_PLACEHOLDER = "SEMANTIC_METADATA_PLACEHOLDER"
 _CHARACTER_VOICE_SLOT_COMMENT = "<!-- CHARACTER_VOICE_SLOT -->"
 
-# Keep the literary contract in the shared master prompt. Astra's documented
-# tendency to ask for clarification and produce more formatting is handled by
-# this deliberately small, model-scoped overlay instead of forking the entire
-# prompt and silently letting the two routes drift apart.
-_ASTRA_OVERLAY = """<astra_execution_policy>
-Treat the supplied source, canon locks, and project context as sufficient
-working authority for routine translation decisions. Proceed autonomously:
-do not ask clarification questions during a translation turn. Resolve ordinary
-ambiguity with the authority order above and preserve ambiguity only when the
-source leaves it unresolved. Return the requested translation directly, with
-no expanded explanation, process commentary, or extra formatting.
-
-This extends to dialogue evasion and prose economy specifically, since both
-run against your documented instincts above: an evasive or deflecting line is
-a translation decision already made, not an ambiguity to clarify or resolve —
-render the gap, do not fill it. A concise sentence is not an incomplete one;
-do not pad a line toward the shape of a fuller explanation.
-</astra_execution_policy>"""
-
-
 def prompt_profile_version(model: Optional[str] = None) -> str:
-    return "astra-v1" if str(model or "").strip().lower() == "gpt-6-astra" else "openai-legacy-v1"
+    """A shared prompt version; the model still partitions cache accounting."""
+    return "gpt-6-shared-v1"
 
 
 def load_master_prompt(prompt_path: Path) -> str:
@@ -54,8 +35,6 @@ def build_system_instruction(
 ) -> str:
     prompt = load_master_prompt(prompt_path)
     prompt = inject_character_voices(inject_context_xml(prompt, context_xml), voice_block)
-    if prompt_profile_version(model) == "astra-v1":
-        prompt = f"{prompt.rstrip()}\n\n{_ASTRA_OVERLAY}\n"
     return prompt
 
 

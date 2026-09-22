@@ -52,8 +52,8 @@ const XTC_FORMAT_LABELS = ['XTC — 1-bit mono', 'XTCH — 2-bit grayscale, ~2×
 // is out of scope by design, so it is never offered here.
 // Wire ids, not display names: Anthropic model ids never contain a dot, so
 // the id is 'claude-fable-5-1' while the label reads 'Claude Fable 5.1'.
-const ANTHROPIC_MODEL_CHOICES = ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1'] as const;
-const ANTHROPIC_MODEL_LABELS = ['Claude Sonnet 5', 'Claude Opus 5', 'Claude Fable 5.1'] as const;
+const ANTHROPIC_MODEL_CHOICES = ['claude-opus-5-5', 'claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1'] as const;
+const ANTHROPIC_MODEL_LABELS = ['Claude Opus 5.5', 'Claude Sonnet 5', 'Claude Opus 5', 'Claude Fable 5.1'] as const;
 const ANTHROPIC_DISPLAY_CHOICES = ['summarized', 'omitted'] as const;
 const ANTHROPIC_EFFORT_CHOICES = ['max', 'xhigh', 'high', 'medium', 'low'] as const;
 const ANTHROPIC_TTL_CHOICES = ['5m', '1h'] as const;
@@ -63,6 +63,9 @@ const ANTHROPIC_TTL_CHOICES = ['5m', '1h'] as const;
 // claude-sonnet-5 as executor is the only one of the three executor choices
 // that accepts every one of these four; switching the executor away from it
 // narrows which of these remain valid (client.py fails fast on a bad pairing).
+// claude-opus-5-5 is absent on purpose: Anthropic's compatibility table lists
+// no row for it, as executor or advisor, so an Opus 5.5 executor runs with
+// Proofreading Mode off.
 const ADVISOR_MODEL_CHOICES = ['claude-opus-4-8', 'claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1'] as const;
 const ADVISOR_MODEL_LABELS = [
   'Claude Opus 4.8 — plaintext, validated default',
@@ -75,7 +78,7 @@ const PREP_PROVIDER_LABELS = ['MiniMax — official Anthropic API', 'DeepSeek �
 const MINIMAX_MODEL_CHOICES = ['MiniMax-M3', 'MiniMax-M3-highspeed', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] as const;
 const MINIMAX_MODEL_LABELS = ['MiniMax M3', 'MiniMax M3 High Speed', 'MiniMax M2.7 — explicit cache capable', 'MiniMax M2.7 High Speed — explicit cache capable'] as const;
 const MINIMAX_CACHE_MODE_CHOICES = ['passive', 'explicit'] as const;
-const OPENAI_PREP_MODEL_CHOICES = ['gpt-6-astra', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const;
+const OPENAI_MODEL_CHOICES = ['gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra'] as const;
 
 export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
 // ─── Project ─────────────────────────────────────────────────────────────────────
@@ -116,7 +119,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'prep.glm.reasoning_effort', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Reasoning Effort', kind: 'enum', choices: ['low', 'high', 'max'], description: 'GLM reasoning depth for structured prep blocks.' },
   { path: 'prep.glm.http_timeout_seconds', menu: 'Prep', section: 'GLM — Model & Cache', label: 'Request Timeout', kind: 'integer', min: 1, description: 'Per-block Z.AI request timeout in seconds.' },
   { path: 'prep.glm.fallback_to_deepseek', menu: 'Prep', section: 'GLM — Model & Cache', label: 'DeepSeek Recovery', kind: 'boolean', description: 'Off by default: failed GLM prep does not silently spend a second provider.' },
-  { path: 'prep.openai.model', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Model', kind: 'enum', choices: OPENAI_PREP_MODEL_CHOICES, description: 'OpenAI Responses model used for every prep block.' },
+  { path: 'prep.openai.model', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Model', kind: 'enum', choices: OPENAI_MODEL_CHOICES, description: 'OpenAI Responses model used for every prep block.' },
   { path: 'prep.openai.endpoint', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Endpoint', kind: 'text', description: 'OpenAI Responses API base URL.' },
   { path: 'prep.openai.api_key_env', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'API Key Variable', kind: 'text', description: 'Environment variable holding the OpenAI API key.' },
   { path: 'prep.openai.prompt', menu: 'Prep', section: 'OpenAI — Responses & Batch', label: 'Prompt File', kind: 'text', description: 'Prep prompt whose DeepSeek-derived block schemas are reused verbatim.' },
@@ -245,8 +248,8 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Enable Qwen prompt caching behavior.' },
   { path: 'translation.qwen.caching.explicit', menu: 'Translation', section: 'Qwen — Caching', label: 'Explicit Cache Markers', kind: 'boolean',
     description: 'Place Qwen ephemeral cache markers on the stable system prompt. Cache validity is provider-controlled and short-lived.' },
-  { path: 'translation.openai.model', menu: 'Translation', section: 'OpenAI — Model & Connection', label: 'Model', kind: 'text',
-    description: 'Native Responses model ID. Free text preserves support for new OpenAI model snapshots without a menu release.' },
+  { path: 'translation.openai.model', menu: 'Translation', section: 'OpenAI — Model & Connection', label: 'Model', kind: 'enum', choices: OPENAI_MODEL_CHOICES,
+    description: 'GPT-6 Responses model. Sol is the default; Luna is the operational fallback; Astra remains selectable.' },
   { path: 'translation.openai.endpoint', menu: 'Translation', section: 'OpenAI — Model & Connection', label: 'Endpoint', kind: 'text',
     description: 'Native OpenAI API base URL used by the Responses client.' },
   { path: 'translation.openai.api_key_env', menu: 'Translation', section: 'OpenAI — Model & Connection', label: 'API Key Variable', kind: 'text',
@@ -260,9 +263,9 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'translation.openai.master_prompt', menu: 'Translation', section: 'OpenAI — Model & Connection', label: 'Primary Translation Prompt', kind: 'text',
     description: 'Hybrid Markdown/XML prompt used only by the OpenAI Responses route.' },
   { path: 'translation.openai.fallback.enabled', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Status', kind: 'boolean',
-    description: 'Allow an eligible Astra availability failure to use the configured GPT-5.6 route.' },
-  { path: 'translation.openai.fallback.model', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Fallback Model', kind: 'text',
-    description: 'Existing GPT-5.6 model used after retryable Astra access or transport failures.' },
+    description: 'Allow an eligible primary-model availability failure to use the configured GPT-6 fallback.' },
+  { path: 'translation.openai.fallback.model', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Fallback Model', kind: 'enum', choices: OPENAI_MODEL_CHOICES,
+    description: 'GPT-6 model used after retryable primary access or transport failures.' },
   { path: 'translation.openai.fallback.master_prompt', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Fallback Prompt', kind: 'text',
     description: 'Prompt path for the fallback profile; keep it pinned to the established translation contract.' },
   { path: 'translation.openai.fallback.allow_mixed_model_volume', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Allow Mixed-Model Volume', kind: 'boolean',
@@ -271,10 +274,8 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Explicitly resume a volume recorded as fallback_pending using the fallback model.' },
   { path: 'translation.openai.routing.persistence_file', menu: 'Translation', section: 'OpenAI — Fallback', label: 'Route State Path', kind: 'text',
     description: 'Per-volume route decision ledger used to pin the selected model across restarts.' },
-  { path: 'translation.openai.batch.enabled', menu: 'Translation', section: 'OpenAI — Batch', label: 'Enable for GPT-5.6', kind: 'boolean',
-    description: 'Opt in to asynchronous Batch processing for GPT-5.6-family routes. Astra batches automatically when auto_for_astra is enabled.' },
-  { path: 'translation.openai.batch.auto_for_astra', menu: 'Translation', section: 'OpenAI — Batch', label: 'Auto-Batch Astra', kind: 'boolean',
-    description: 'Use Batch by default when the selected model is GPT-6 Astra; disable to force synchronous Astra calls.' },
+  { path: 'translation.openai.batch.enabled', menu: 'Translation', section: 'OpenAI — Batch', label: 'Batch Enabled', kind: 'boolean',
+    description: 'Submit GPT-6 translation waves through Batch by default; disable for synchronous Responses calls.' },
   { path: 'translation.openai.batch.wave_size', menu: 'Translation', section: 'OpenAI — Batch', label: 'Wave Size', kind: 'integer', min: 1,
     description: 'Chapters submitted per frozen-prefix wave. Smaller waves preserve more chapter awareness; larger waves improve throughput.' },
   { path: 'translation.openai.batch.seed_chapters', menu: 'Translation', section: 'OpenAI — Batch', label: 'Seed Chapters', kind: 'integer', min: 0,
@@ -304,7 +305,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'translation.openai.caching.mode', menu: 'Translation', section: 'OpenAI — Caching', label: 'Cache Mode', kind: 'enum', choices: OPENAI_CACHE_MODE_CHOICES,
     description: 'Explicit places an OpenAI cache breakpoint; implicit uses the provider default; disabled omits cache options.' },
   { path: 'translation.openai.caching.ttl', menu: 'Translation', section: 'OpenAI — Caching', label: 'Cache TTL', kind: 'text',
-    description: 'Explicit prompt-cache lifetime. GPT-6 Astra and GPT-5.6 accept 30m.' },
+    description: 'Explicit prompt-cache lifetime. GPT-6 Astra, Sol, and Luna support 30m.' },
   { path: 'translation.openai.caching.cache_monitor.enabled', menu: 'Translation', section: 'OpenAI — Caching — Cache Monitor', label: 'Status', kind: 'boolean',
     description: 'Track breakpoint health, total coverage, and cache economics across translation calls.' },
   { path: 'translation.openai.caching.cache_monitor.warn_threshold_breakpoint_success_rate', menu: 'Translation', section: 'OpenAI — Caching — Cache Monitor', label: 'Breakpoint Success Threshold', kind: 'float', min: 0, max: 1,
@@ -363,7 +364,7 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Inject only active-character voice fingerprints into the current translation turn.' },
 
   { path: 'translation.anthropic.model', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'Model', kind: 'enum', choices: ANTHROPIC_MODEL_CHOICES, choiceLabels: ANTHROPIC_MODEL_LABELS,
-    description: 'Claude-5 family model. Scoped to claude-sonnet-5/opus-5/fable-5-1 — all three share one adaptive-thinking, 1M-context, 128K-output capability profile.' },
+    description: 'Claude-5 family model. Scoped to claude-opus-5-5 (default)/sonnet-5/opus-5/fable-5-1 — all four share one adaptive-thinking, 1M-context, 128K-output capability profile. Opus 5.5 has no documented advisor, so Proofreading Mode must be off with it.' },
   { path: 'translation.anthropic.endpoint', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'Endpoint', kind: 'text',
     description: 'Anthropic Messages API base URL.' },
   { path: 'translation.anthropic.api_key_env', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'API Key Variable', kind: 'text',
@@ -375,13 +376,13 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
   { path: 'translation.anthropic.master_prompt', menu: 'Translation', section: 'Anthropic — Model & Connection', label: 'Primary Translation Prompt', kind: 'text',
     description: 'Hybrid Markdown/XML prompt used only by the Anthropic Messages route.' },
   { path: 'translation.anthropic.generation.max_output_tokens', menu: 'Translation', section: 'Anthropic — Generation', label: 'Maximum Output Tokens', kind: 'integer', min: 1,
-    description: '128K is the shared output ceiling across claude-sonnet-5/opus-5/fable-5-1. temperature/top_p/top_k are never sent — non-default values are a hard 400 on every model this route supports.' },
+    description: '128K is the shared output ceiling across all four supported models, and thinking counts toward it even when not returned. temperature/top_p/top_k are never sent — non-default values are a hard 400 on every model this route supports.' },
   { path: 'translation.anthropic.thinking.enabled', menu: 'Translation', section: 'Anthropic — Thinking', label: 'Status', kind: 'boolean',
-    description: 'Master toggle for adaptive thinking. claude-fable-5-1 rejects thinking:{type:"disabled"} outright (thinking is always on), so the client keeps it on for that model regardless of this setting.' },
+    description: 'Master toggle for adaptive thinking. claude-fable-5-1 and claude-opus-5-5 reject thinking:{type:"disabled"} outright (thinking is always on), so the client keeps it on for those models regardless of this setting — lower Effort instead.' },
   { path: 'translation.anthropic.thinking.display', menu: 'Translation', section: 'Anthropic — Thinking', label: 'Thinking Display', kind: 'enum', choices: ANTHROPIC_DISPLAY_CHOICES,
     description: 'Summarized returns readable thinking text into THINKING/*.md logs; omitted returns an empty thinking field for faster time-to-first-text-token. Billed identically either way.' },
   { path: 'translation.anthropic.thinking.effort', menu: 'Translation', section: 'Anthropic — Thinking', label: 'Effort', kind: 'enum', choices: ANTHROPIC_EFFORT_CHOICES,
-    description: 'output_config.effort — steers adaptive-thinking depth and overall response thoroughness. Default on the API is high.' },
+    description: 'output_config.effort — steers adaptive-thinking depth and overall response thoroughness. Always sent explicitly. The API default is high, except medium on claude-opus-5-5 — which also thinks more per turn than Opus 5 at the same level.' },
   { path: 'translation.anthropic.caching.enabled', menu: 'Translation', section: 'Anthropic — Caching', label: 'Status', kind: 'boolean',
     description: 'Place an ephemeral cache_control breakpoint on the system prompt.' },
   { path: 'translation.anthropic.caching.ttl', menu: 'Translation', section: 'Anthropic — Caching', label: 'Cache TTL', kind: 'enum', choices: ANTHROPIC_TTL_CHOICES,
@@ -406,9 +407,9 @@ export const CONFIG_FIELDS: readonly ConfigFieldSpec[] = [
     description: 'Anthropic Batch API completion-window setting.' },
 
   { path: 'translation.anthropic.advisor.enabled', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Status', kind: 'boolean',
-    description: 'On-the-fly cultural validation and proofreading: a second, higher-intelligence model the executor consults mid-generation on its own judgment of need — real-world reference checks (does a named subculture reference or public figure actually check out) and craft calls (name-form drift, locked-anchor collisions, em-dash/register discipline) in one consult. On by default; eleven manual dry runs validated it before this shipped.' },
+    description: 'On-the-fly cultural validation and proofreading: a second, higher-intelligence model the executor consults mid-generation on its own judgment of need — real-world reference checks (does a named subculture reference or public figure actually check out) and craft calls (name-form drift, locked-anchor collisions, em-dash/register discipline) in one consult. Off by default since the executor default moved to claude-opus-5-5, which has no documented advisor; eleven manual dry runs validated it with a claude-sonnet-5 executor. Gated: refused on an Opus 5.5 executor, on any advisor outside Anthropic\'s official pairing table, and below Effort "high" — also toggled from the Dashboard with p.' },
   { path: 'translation.anthropic.advisor.model', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Advisor Model', kind: 'enum', choices: ADVISOR_MODEL_CHOICES, choiceLabels: ADVISOR_MODEL_LABELS,
-    description: 'Must be on the executor/advisor compatibility table for the Model chosen above (client.py fails fast at startup if not) — Opus 4.8 requires a claude-sonnet-5 executor.' },
+    description: 'Must be on the executor/advisor compatibility table for the Model chosen above (client.py fails fast at startup if not) — Opus 4.8 requires a claude-sonnet-5 executor, and a claude-opus-5-5 executor has no documented advisor at all.' },
   { path: 'translation.anthropic.advisor.max_tokens', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Advisor Output Ceiling', kind: 'integer', min: 1,
     description: 'Output ceiling for each advisor consult, not the executor turn itself. 24,000 is the validated default.' },
   { path: 'translation.anthropic.advisor.max_uses', menu: 'Translation', section: 'Anthropic — Proofreading Mode', label: 'Maximum Consults Per Request', kind: 'integer', min: 1,

@@ -48,6 +48,8 @@ def classify_exception(exc: BaseException) -> OpenAIAPIError:
     """Normalize SDK and HTTP errors without importing the SDK at module load."""
     if isinstance(exc, OpenAIAPIError):
         return exc
+    if isinstance(exc, TypeError):
+        return OpenAIInvalidRequestError(str(exc), code="client_type_error")
     status = _extract_status(exc)
     text = str(exc)
     lower = text.lower()

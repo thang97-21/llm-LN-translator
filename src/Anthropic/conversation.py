@@ -19,11 +19,16 @@ _THINKING_BLOCK_TYPES = ("thinking", "redacted_thinking")
 # The models that bind a thinking block's signature to the conversation
 # prefix that produced it, and reject a replay after that prefix changed.
 # Introduced with Claude Fable 5.1 (2026-09-01) and shared by its Project
-# Glasswing counterpart. claude-opus-5 and claude-sonnet-5 accept an edited
-# history without complaint, so they are deliberately absent: nothing below
-# alters their behaviour. Anthropic has said later models will enforce the
-# check for every account — when one lands on this route, add its id here.
-PREFIX_BOUND_THINKING_MODELS = ("claude-fable-5-1", "claude-mythos-5-1")
+# Glasswing counterpart; claude-opus-5-5 (2026-09-22) enforces the same check,
+# by default for accounts created on or after 2026-08-31. claude-opus-5 and
+# claude-sonnet-5 accept an edited history without complaint, so they are
+# deliberately absent: nothing below alters their behaviour.
+#
+# Cross-model note (Opus 5.5 migration guide): Opus 5.5 reads thinking blocks
+# from Opus 5 / Sonnet models but not from Fable or Mythos. A volume switched
+# from claude-fable-5-1 to claude-opus-5-5 mid-run has the old blocks dropped
+# by the API before the model sees them -- the request succeeds, unbilled.
+PREFIX_BOUND_THINKING_MODELS = ("claude-fable-5-1", "claude-mythos-5-1", "claude-opus-5-5")
 
 
 class AnthropicConversationManager:
@@ -35,8 +40,9 @@ class AnthropicConversationManager:
     stored assistant turn are passed back byte-exact — never re-synthesized
     — per Anthropic's "Preserving thinking blocks" contract.
 
-    PRESERVED THINKING (claude-fable-5-1 / claude-mythos-5-1 ONLY — see
-    PREFIX_BOUND_THINKING_MODELS). A Fable 5.1 thinking block's
+    PRESERVED THINKING (claude-fable-5-1 / claude-mythos-5-1 /
+    claude-opus-5-5 ONLY — see PREFIX_BOUND_THINKING_MODELS). A Fable 5.1
+    (or Opus 5.5) thinking block's
     signature binds the conversation prefix that produced it: the top-level
     ``system`` prompt, the tool set, and every message ahead of the block.
     Replaying a block whose prefix has since changed is a 400 decided before

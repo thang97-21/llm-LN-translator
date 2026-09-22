@@ -36,6 +36,12 @@ def response_to_llm_response(
     # previously believed safe after one clean sample (Run 8). This is a
     # required filter, not optional hardening -- see
     # docs/anthropic-advisor-mode-spec.md §7.3.
+    #
+    # Dormant, not broken, on claude-opus-5-5 / claude-fable-5-1: those models
+    # return text written between tool calls as progress-update `thinking`
+    # blocks rather than `text` blocks, so the fragment never reaches
+    # visible_text in the first place (visible_text below is built from `text`
+    # blocks only, selected by type -- never by position).
     leaked_indices = {
         i for i, block in enumerate(raw_content)
         if isinstance(block, dict) and block.get("type") == "text"
@@ -52,6 +58,19 @@ def response_to_llm_response(
     blocks = normalize_anthropic_content(raw_content)
     stop_reason = str(raw.get("stop_reason") or "")
     termination = normalize_termination(stop_reason, provider="anthropic")
+    # stop_details is populated only on a refusal. The category separates a
+    # content decline (e.g. "cyber", "bio") from "reasoning_extraction" --
+    # new on claude-opus-5-5 -- which means the PROMPT pushed the model to
+    # write its reasoning into the response: a prompt defect to fix, not
+    # source content to route around.
+    refusal_category = None
+    if stop_reason == "refusal":
+        stop_details = as_dict(raw.get("stop_details") or {})
+        refusal_category = stop_details.get("category")
+        logger.warning(
+            "[ANTHROPIC-SAFETY] refusal category=%s explanation=%s",
+            refusal_category, stop_details.get("explanation"),
+        )
 
     usage_raw = as_dict(raw.get("usage") or {})
     usage = LLMUsage(
@@ -88,6 +107,7 @@ def response_to_llm_response(
         "raw_content": raw_content,
         "streamed": streamed,
         "stop_reason": stop_reason,
+        "refusal_category": refusal_category,
         "cache_creation": as_dict(usage_raw.get("cache_creation") or {}),
     }
     # The advisor sub-inference is billed at its OWN model's rate, tracked

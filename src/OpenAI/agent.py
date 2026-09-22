@@ -66,10 +66,10 @@ class OpenAITranslator:
         self._config = deepcopy(config if config is not None else get_openai_config())
         self._active_config = deepcopy(self._config)
         self.dry_run = dry_run
-        self.primary_model = str(self._config.get("model", "gpt-5.6-luna") or "gpt-5.6-luna")
+        self.primary_model = str(self._config.get("model", "gpt-6-sol") or "gpt-6-sol")
         fallback_cfg = self._config.get("fallback", {}) or {}
         self.fallback_enabled = bool(fallback_cfg.get("enabled", False))
-        self.fallback_model = str(fallback_cfg.get("model", "gpt-5.6-terra") or "gpt-5.6-terra")
+        self.fallback_model = str(fallback_cfg.get("model", "gpt-6-luna") or "gpt-6-luna")
         self.allow_mixed_model_volume = bool(fallback_cfg.get("allow_mixed_model_volume", False))
         self.resume_pending = bool(fallback_cfg.get("resume_pending", False))
         self.batch_config = get_openai_batch_config(self._config)
@@ -133,8 +133,7 @@ class OpenAITranslator:
         # wired in client.py, config'd via translation.openai.reasoning.summary
         # — (b) the API account has completed OpenAI's organization
         # verification, and (c) the configured model tier supports summaries
-        # at all (gpt-5.6-luna's own model page lists no summary support,
-        # unlike plain gpt-5.6). None of (b)/(c) are detectable from this
+        # at all on a selected tier. None of (b)/(c) are detectable from this
         # codebase. When unmet, `response.thinking_content` is empty and
         # `_maybe_write_thinking_log` correctly no-ops — no crash, just no
         # file, every chapter, and that silence is NOT a bug to "fix" here.
@@ -377,8 +376,8 @@ class OpenAITranslator:
         return result
 
     def _configuration_update_for(self, signal_record: Optional[Dict[str, Any]]) -> Optional[str]:
-        """Return the next Astra effort, if this chapter changes the applied tier."""
-        if not self._chapter_signals_enabled or self.client.model.lower() != "gpt-6-astra":
+        """Return the next GPT-6 effort, if this chapter changes the applied tier."""
+        if not self._chapter_signals_enabled or self.client.model.lower() not in {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}:
             return None
         reasoning_cfg = self._active_config.get("reasoning", {}) or {}
         mode = str(reasoning_cfg.get("mode", "standard") or "standard").strip().lower()
@@ -406,7 +405,7 @@ class OpenAITranslator:
         explicit = result.get("persistence_file")
         if model != self.primary_model:
             explicit = fallback_cfg.get("persistence_file")
-        if not explicit or (model.lower() == "gpt-6-astra" and explicit == ".context/openai_conversation.json"):
+        if not explicit or (model.lower() in {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"} and explicit == ".context/openai_conversation.json"):
             slug = re.sub(r"[^a-zA-Z0-9]+", "_", model).strip("_").lower()
             explicit = f".context/openai_conversation_{slug}.json"
         result["persistence_file"] = str(explicit)

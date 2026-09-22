@@ -55,7 +55,7 @@ class OpenAIClient:
     ):
         cfg = copy.deepcopy(config if config is not None else get_openai_config())
         self._cfg = cfg
-        self.model = model or str(cfg.get("model", "gpt-5.6-luna"))
+        self.model = model or str(cfg.get("model", "gpt-6-sol"))
         self.prompt_profile = prompt_profile_version(self.model)
         self.api_key_env = str(cfg.get("api_key_env", "OPENAI_API_KEY"))
         self.api_key = api_key or os.getenv(self.api_key_env)
@@ -147,17 +147,17 @@ class OpenAIClient:
         base_input = _base_input(system_instruction, prompt)
         request_input = base_input if dry_run else (input_items or base_input)
         mode = str(reasoning_cfg.get("mode", "standard") or "standard").lower()
-        if configuration_update and _is_astra_model(self.model) and mode == "standard":
+        if configuration_update and _is_gpt6_model(self.model) and mode == "standard":
             request_input = _insert_configuration_update(request_input, configuration_update)
         elif configuration_update:
-            if not _is_astra_model(self.model):
+            if not _is_gpt6_model(self.model):
                 logger.warning(
-                    "[OPENAI-CONFIGURATION] ignoring configuration_update for non-Astra model %s",
+                    "[OPENAI-CONFIGURATION] ignoring configuration_update for non-GPT-6 model %s",
                     self.model,
                 )
             else:
                 logger.warning(
-                    "[OPENAI-CONFIGURATION] ignoring configuration_update for Astra mode=%s; "
+                    "[OPENAI-CONFIGURATION] ignoring configuration_update for GPT-6 mode=%s; "
                     "standard mode is required",
                     mode,
                 )
@@ -257,10 +257,10 @@ class OpenAIClient:
         )
 
     def _generate_blocking(self, request: Dict[str, Any]) -> LLMResponse:
-        return response_to_llm_response(self._client.responses.create(**request), model=self.model, streamed=False)
+        return response_to_llm_response(self._client.responses.create(**_sdk_request(request)), model=self.model, streamed=False)
 
     def _generate_streaming(self, request: Dict[str, Any]) -> LLMResponse:
-        stream = self._client.responses.create(**request, stream=True)
+        stream = self._client.responses.create(**_sdk_request(request), stream=True)
         final_response = None
         text_parts: List[str] = []
         for event in stream:
@@ -396,6 +396,20 @@ def _configured_env(cfg: Dict[str, Any], key: str) -> Optional[str]:
     return os.getenv(variable) if variable else None
 
 
+def _sdk_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep Batch JSONL wire fields intact while supporting older SDK signatures.
+
+    The installed SDK has ``extra_body`` but not a typed
+    ``prompt_cache_options`` argument. The server receives the same top-level
+    field either way; only the Python call signature differs.
+    """
+    prepared = dict(request)
+    cache_options = prepared.pop("prompt_cache_options", None)
+    if cache_options is not None:
+        prepared["extra_body"] = {"prompt_cache_options": cache_options}
+    return prepared
+
+
 def _prompt_cache_key(model: str, system_instruction: str) -> str:
     digest = hashlib.sha256(
         (str(model) + "\0" + str(system_instruction)).encode("utf-8")
@@ -404,12 +418,12 @@ def _prompt_cache_key(model: str, system_instruction: str) -> str:
 
 
 def _reasoning_effort(model: str, configured: Any) -> str:
-    """Map legacy disabled/minimal values to Astra's lowest supported effort."""
+    """Map unsupported effort values to a documented GPT-6 effort."""
     return normalize_reasoning_effort(model, configured or "max")
 
 
-def _is_astra_model(model: str) -> bool:
-    return str(model).strip().lower() == "gpt-6-astra"
+def _is_gpt6_model(model: str) -> bool:
+    return str(model).strip().lower() in {"gpt-6-astra", "gpt-6-sol", "gpt-6-luna"}
 
 
 def configuration_update_item(effort: str) -> Dict[str, Any]:
@@ -424,7 +438,7 @@ def _insert_configuration_update(
     items: List[Dict[str, Any]],
     effort: str,
 ) -> List[Dict[str, Any]]:
-    """Insert an Astra update immediately before the next user message."""
+    """Insert a GPT-6 update immediately before the next user message."""
     prepared = list(items)
     update = configuration_update_item(effort)
     user_index = next(

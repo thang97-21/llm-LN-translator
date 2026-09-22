@@ -48,16 +48,6 @@ def get_openai_batch_config(source_config: Optional[Dict[str, Any]] = None) -> D
 
 
 def openai_batch_enabled(source_config: Optional[Dict[str, Any]] = None, model: Optional[str] = None) -> bool:
-    """Resolve the batch policy without making Astra opt-in by accident.
-
-    ``batch.enabled`` is the explicit switch for GPT-5.6-family routes. Astra
-    uses ``auto_for_astra`` (true by default) because its published Batch rate
-    is materially lower than Standard processing. Operators can still disable
-    Astra batching explicitly with ``auto_for_astra: false``.
-    """
+    """Use the configured Batch policy for every OpenAI model."""
     cfg = get_openai_batch_config(source_config)
-    if bool(cfg.get("enabled", False)):
-        return True
-    auto_for_astra = bool(cfg.get("auto_for_astra", True))
-    selected = str(model or get_openai_config(source_config).get("model", "") or "").strip().lower()
-    return auto_for_astra and selected == "gpt-6-astra"
+    return bool(cfg.get("enabled", True))

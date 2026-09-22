@@ -48,6 +48,16 @@ const PRICING: Readonly<Record<string, ModelPricing>> = {
     standardRates: { input: 10, cacheRead: 1, cacheWrite: 12.5, output: 50 },
     note: 'For requests over 272K input tokens: input/cache/write 2×; output 1.5×. Batch and Flex are 50% of Standard rates.',
   },
+  'gpt-6-sol': {
+    providerLabel: 'OpenAI', displayName: 'GPT-6 Sol', source: 'https://developers.openai.com/api/docs/models/gpt-6-sol', sourceLabel: 'OpenAI Docs',
+    standardRates: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+    note: 'For requests over 272K input tokens: input/cache/write 2×; output 1.5×.',
+  },
+  'gpt-6-luna': {
+    providerLabel: 'OpenAI', displayName: 'GPT-6 Luna', source: 'https://developers.openai.com/api/docs/models/gpt-6-luna', sourceLabel: 'OpenAI Docs',
+    standardRates: { input: 0.1, cacheRead: 0.01, cacheWrite: 0.125, output: 0.5 },
+    note: 'For requests over 272K input tokens: input/cache/write 2×; output 1.5×.',
+  },
   'deepseek-v4-flash': {
     providerLabel: 'DeepSeek', displayName: 'DeepSeek-V4-Flash', source: 'https://api-docs.deepseek.com/quick_start/pricing/', sourceLabel: 'DeepSeek API pricing docs',
     standardRates: { input: 0.14, cacheRead: 0.0028, cacheWrite: null, output: 0.28 },
@@ -119,20 +129,23 @@ const PRICING: Readonly<Record<string, ModelPricing>> = {
     standardRates: { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 },
     note: 'For requests over 272K input tokens: input/cache/write 2×; output 1.5×.',
   },
+  'claude-opus-5-5': {
+    providerLabel: 'Anthropic', displayName: 'Claude Opus 5.5', source: 'https://platform.claude.com/docs/en/models/opus-5-5/overview', sourceLabel: 'Anthropic Opus 5.5 model page',
+    standardRates: { input: 4, cacheRead: 0.2, cacheWrite: 5, output: 20 },
+    note: 'Cache read is 5% of input ($0.20/MTok) — half the family 10% multiplier, a per-model rate. Cache write is the 5-minute TTL rate (125% of input); the 1h TTL rate is $8/MTok. Batch: $2 / $10.',
+  },
+  // The $2/$10 launch price became the standard price: Anthropic's pricing
+  // page states the increase scheduled for 2026-09-01 "will not occur". The
+  // old card flipped to $3/$15 on that date and over-quoted by 50% since.
   'claude-sonnet-5': {
-    providerLabel: 'Anthropic', displayName: 'Claude Sonnet 5', source: 'https://www.anthropic.com/research/claude-sonnet-5', sourceLabel: 'Anthropic Sonnet 5 announcement',
-    standardRates: { input: 3, cacheRead: 0.3, cacheWrite: 3.75, output: 15 },
-    promotion: {
-      label: 'Introductory launch pricing', startsAt: '2026-01-01T00:00:00Z', endsAt: '2026-09-01T00:00:00Z',
-      description: 'Active through 31 August 2026 UTC; standard pricing applies afterwards.',
-      rates: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
-    },
-    note: 'Cache read is 10% of input; cache write is the 5-minute TTL rate (125% of input).',
+    providerLabel: 'Anthropic', displayName: 'Claude Sonnet 5', source: 'https://platform.claude.com/docs/en/about-claude/pricing', sourceLabel: 'Anthropic pricing page',
+    standardRates: { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+    note: 'Cache read is 10% of input; cache write is the 5-minute TTL rate (125% of input); the 1h TTL rate is $4/MTok.',
   },
   'claude-opus-5': {
     providerLabel: 'Anthropic', displayName: 'Claude Opus 5', source: 'https://www.anthropic.com/news/claude-opus-5', sourceLabel: 'Anthropic Opus 5 announcement',
     standardRates: { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 25 },
-    note: 'Cache read is 10% of input; cache write is the 5-minute TTL rate (125% of input).',
+    note: 'Cache read is 10% of input; cache write is the 5-minute TTL rate (125% of input); the 1h TTL rate is $10/MTok.',
   },
   'claude-fable-5-1': {
     providerLabel: 'Anthropic', displayName: 'Claude Fable 5.1', source: 'https://platform.claude.com/docs/en/models/fable-5-1/overview', sourceLabel: 'Anthropic Fable 5.1 model page',
@@ -170,12 +183,19 @@ export function translationPricingStatus(fields: readonly ConfigFieldState[], cl
   }
   const promotion = currentPromotion(pricing, clock);
   const explicitQwenCache = provider === 'qwen' && configuredValue(fields, 'translation.qwen.caching.explicit') === 'true';
-  const rates = promotion?.rates ?? pricing.standardRates;
+  const batch = (provider === 'openai' || provider === 'anthropic') && configuredValue(fields, `translation.${provider}.batch.enabled`) === 'true';
+  const baseRates = promotion?.rates ?? pricing.standardRates;
+  const rates = batch ? {
+    input: baseRates.input * 0.5,
+    cacheRead: baseRates.cacheRead === null ? null : baseRates.cacheRead * 0.5,
+    cacheWrite: baseRates.cacheWrite === null ? null : baseRates.cacheWrite * 0.5,
+    output: baseRates.output * 0.5,
+  } : baseRates;
   const explicitCacheRead = promotion?.explicitCacheRead ?? pricing.explicitCacheRead;
   return {
     provider, model, providerLabel: pricing.providerLabel, displayName: pricing.displayName,
     rates: explicitQwenCache && explicitCacheRead !== undefined ? { ...rates, cacheRead: explicitCacheRead } : rates,
-    rateLabel: promotion?.label ?? 'Standard API pricing',
+    rateLabel: batch ? 'Batch API pricing' : promotion?.label ?? 'Standard API pricing',
     condition: promotion?.description ?? null,
     cacheReadLabel: provider === 'glm' ? 'cached input' : explicitQwenCache ? 'explicit cache read' : provider === 'qwen' ? 'implicit cache read' : 'cache read',
     cacheWriteLabel: provider === 'glm' ? 'cache storage' : 'cache write',

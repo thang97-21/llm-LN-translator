@@ -212,6 +212,66 @@ def anchors_in_source(anchors: Sequence[Anchor], jp_source: str) -> List[Tuple[A
     return found
 
 
+# Punctuation that carries house style, not meaning. The lock, the bible and
+# the shipped chapter are written by different passes -- a prep model emits
+# U+2026 where the translator emits three periods, and a curly apostrophe where
+# the chapter has a straight one -- so a literal compare turns a typography
+# preference into a fidelity verdict. Measured on volume a6cbaa before this
+# fix: 2 of 4 anchors came back ``missing``/``partial``; both were present,
+# correct and verbatim in the shipped chapter, differing from their lock by a
+# single ellipsis character. Same disease as the -after-punctuation bug
+# below, one layer out.
+_ELLIPSIS_RUN_RE = re.compile(r"\s*(?:…+|\.{2,})\s*")
+_DASH_RUN_RE = re.compile(r"\s*(?:[—–―─━]+|-{2,})\s*")
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+_SINGLE_QUOTES = "'’‘‛`"
+_DOUBLE_QUOTES = '"“”„‟'
+_ELLIPSIS_ALT = r"\s*(?:…+|\.{2,})\s*"
+_DASH_ALT = r"\s*(?:[—–―─━]+|-{2,})\s*"
+_SINGLE_QUOTE_ALT = "['’‘‛`]"
+_DOUBLE_QUOTE_ALT = '["“”„‟]'
+
+
+def _typography_agnostic_body(surface: str) -> str:
+    """The regex body for a surface, blind to punctuation house style.
+
+    An ellipsis matches an ellipsis however it is spelled, a dash run matches a
+    dash run, a quote matches its curly twin, and a run of whitespace matches
+    any run of whitespace. Everything else is escaped and matched literally, so
+    the lock still reserves its actual words -- this widens punctuation only,
+    never vocabulary. Whitespace around an ellipsis or dash is optional on both
+    sides because the two spellings disagree about it ("I… like you" against
+    "I ... like you"), and that disagreement is never what the lock is for.
+    """
+    parts: List[str] = []
+    index = 0
+    while index < len(surface):
+        match = _ELLIPSIS_RUN_RE.match(surface, index)
+        if match:
+            parts.append(_ELLIPSIS_ALT)
+            index = match.end()
+            continue
+        match = _DASH_RUN_RE.match(surface, index)
+        if match:
+            parts.append(_DASH_ALT)
+            index = match.end()
+            continue
+        match = _WHITESPACE_RUN_RE.match(surface, index)
+        if match:
+            parts.append(r"\s+")
+            index = match.end()
+            continue
+        char = surface[index]
+        if char in _SINGLE_QUOTES:
+            parts.append(_SINGLE_QUOTE_ALT)
+        elif char in _DOUBLE_QUOTES:
+            parts.append(_DOUBLE_QUOTE_ALT)
+        else:
+            parts.append(re.escape(char))
+        index += 1
+    return "".join(parts)
+
+
 def _surface_pattern(surface: str) -> re.Pattern:
     """Case-insensitive matcher for an English surface.
 
@@ -233,7 +293,7 @@ def _surface_pattern(surface: str) -> re.Pattern:
     letter. A fidelity check that cries missing on a phrase in plain sight
     does not merely fail — it teaches its operator to stop reading it.
     """
-    escaped = re.escape(surface)
+    escaped = _typography_agnostic_body(surface)
     if not surface:
         return re.compile(escaped, re.IGNORECASE)
     prefix = r"\b" if _WORD_EDGE_RE.match(surface[0]) else ""

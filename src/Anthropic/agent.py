@@ -72,7 +72,7 @@ from src.Deepseek.common.structural_fidelity import (
 from src.Deepseek.common.safety_fallback import fallback_translate_chapter
 from src.Deepseek.common.token_telemetry import cost_breakdown_usd, log_call
 from src.Deepseek.translator.config import get_thinking_log_config
-from src.Deepseek.translator.thinking_output import merge_thinking_log, split_thinking_from_output
+from src.Deepseek.translator.thinking_output import merge_thinking_log, sanitize_chapter_output
 
 logger = logging.getLogger(__name__)
 _CJK_LEAK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿＀-￯]")
@@ -619,7 +619,11 @@ class AnthropicTranslator:
         # escalation block, not a separate trigger -- "" on a chapter with
         # nothing to reinforce.
         advisor_nudge = (
-            build_advisor_guidance(eps_band, self._chapter_signals.get(chapter_id))
+            build_advisor_guidance(
+                eps_band,
+                self._chapter_signals.get(chapter_id),
+                self._preceding_chapter_id(chapter_id),
+            )
             if self._advisor_cfg.get("enabled", False)
             else ""
         )
@@ -746,7 +750,7 @@ class AnthropicTranslator:
                 self._log_usage(continuation_label, response)
 
         raw_text = "\n".join(part for part in parts if part)
-        text, leaked_blocks = split_thinking_from_output(raw_text)
+        text, leaked_blocks = sanitize_chapter_output(raw_text)
         text = _CJK_LEAK_RE.sub("", text)
         if not text.strip():
             raise AnthropicAPIError(f"Anthropic returned no visible translation text for {chapter_id}.")
@@ -970,6 +974,9 @@ class AnthropicTranslator:
                 "[ANTHROPIC-FIDELITY] %s: %d fidelity problem(s); written to %s but NOT marked "
                 "completed, so it will be re-translated on the next run: %s",
                 chapter_id, len(blocking), output_path, "; ".join(blocking),
+            )
+            _update_manifest_after_translation(
+                self.work_dir, set(), {chapter_id: "; ".join(blocking)}
             )
             return output_path
         _update_manifest_after_translation(self.work_dir, {chapter_id})
@@ -1228,8 +1235,8 @@ class AnthropicTranslator:
         return written
 
     def _finish_batch_run(self, written: Dict[str, Path], unfinished: Dict[str, str]) -> None:
-        if written:
-            _update_manifest_after_translation(self.work_dir, set(written))
+        if written or unfinished:
+            _update_manifest_after_translation(self.work_dir, set(written), unfinished)
         if unfinished:
             logger.warning(
                 "[ANTHROPIC-BATCH] %d chapter(s) left pending: %s",
@@ -1429,7 +1436,7 @@ class AnthropicTranslator:
                 continue
 
             raw_text = "\n".join(part for part in (*extra_content_parts, response.content) if part)
-            text, leaked_blocks = split_thinking_from_output(raw_text)
+            text, leaked_blocks = sanitize_chapter_output(raw_text)
             text = _CJK_LEAK_RE.sub("", text)
             if not text.strip():
                 unfinished[chapter_id] = "no visible translation text"
@@ -1523,6 +1530,21 @@ class AnthropicTranslator:
         guidance = build_chapter_guidance(
             eps_band, active_characters, get_anthropic_optimization_config(), self._volume_type
         )
+        # The batch path never carried the Layer 2 advisor nudge at all -- a
+        # pre-existing gap, not one the review request introduced. Both paths
+        # attach the same advisor tool, so both need the same envelope, or a
+        # batch run silently loses the previous-chapter review (plan §6.4).
+        advisor_nudge = (
+            build_advisor_guidance(
+                eps_band,
+                self._chapter_signals.get(chapter_id),
+                self._preceding_chapter_id(chapter_id),
+            )
+            if self._advisor_cfg.get("enabled", False)
+            else ""
+        )
+        if advisor_nudge:
+            guidance = "\n\n".join(part for part in (guidance, advisor_nudge) if part)
         return build_chapter_message(
             chapter_id,
             jp_source,
@@ -1657,7 +1679,26 @@ def _chunk(items: List[Path], size: int) -> Iterator[List[Path]]:
         yield items[start : start + size]
 
 
-def _update_manifest_after_translation(work_dir: Path, translated_stems: set[str]) -> None:
+def _update_manifest_after_translation(
+    work_dir: Path,
+    translated_stems: set[str],
+    blocked: Optional[Dict[str, str]] = None,
+) -> None:
+    """Stamp the manifest from one run's outcome.
+
+    ``blocked`` maps a chapter stem to why it did not finish. That reason used
+    to be logged and thrown away, which left the manifest with only two words
+    for three situations: a chapter that succeeded, a chapter never attempted,
+    and a chapter translated and then rejected by the fidelity gate. The last
+    two both read "pending", so nothing downstream -- and no human -- could
+    tell a 47KB rendering awaiting review from an empty slot.
+
+    Recording the reason changes no policy: only "completed" is filtered out of
+    the next run, so a blocked chapter is still offered again exactly as before.
+    The status is "blocked" only where a rendering actually exists on disk;
+    where nothing was persisted (a truncated max_output fragment, a paused
+    request) it stays "pending", because that is the truthful word for it.
+    """
     path = Path(work_dir) / "manifest.json"
     if not path.exists():
         return
@@ -1665,10 +1706,19 @@ def _update_manifest_after_translation(work_dir: Path, translated_stems: set[str
         manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
+    blocked = blocked or {}
     chapters = manifest.get("chapters", [])
     for entry in chapters if isinstance(chapters, list) else []:
-        if isinstance(entry, dict) and Path(str(entry.get("source_file", ""))).stem in translated_stems:
+        if not isinstance(entry, dict):
+            continue
+        stem = Path(str(entry.get("source_file", ""))).stem
+        if stem in translated_stems:
             entry["translation_status"] = "completed"
+            entry.pop("last_failure", None)
+        elif stem in blocked:
+            rendered = (Path(work_dir) / "EN" / (stem + "_EN.md")).exists()
+            entry["translation_status"] = "blocked" if rendered else "pending"
+            entry["last_failure"] = blocked[stem]
     completed = sum(1 for entry in chapters if isinstance(entry, dict) and entry.get("translation_status") == "completed")
     manifest.setdefault("pipeline_state", {})["translator"] = {
         "status": "completed" if chapters and completed == len(chapters) else "in_progress",
@@ -1678,6 +1728,141 @@ def _update_manifest_after_translation(work_dir: Path, translated_stems: set[str
     }
     atomic_write_json(path, manifest)
 
+
+def reconcile_manifest_from_disk(work_dir: Path) -> Dict[str, str]:
+    """Re-derive chapter status from the renderings actually present in EN/.
+
+    The manifest is stamped from a run's in-memory success set, and a chapter
+    the fidelity gate rejects is deliberately left un-stamped so the next run
+    offers it again (see translate_and_persist_chapter). What was missing is any
+    later re-examination: once the CAUSE of a block is fixed, the chapter stays
+    un-stamped forever, and the next run pays full API price to re-translate a
+    rendering that has been correct on disk the whole time.
+
+    Measured on volume a6cbaa: CHAPTER_04 sat "pending" beside a 47,673-byte
+    translation because anchor a11 was reported missing -- a lock stored with
+    U+2026 tested literally against prose written with three periods, fixed in
+    verbatim_anchors._surface_pattern. The rendering was never wrong; only the
+    verdict was, and nothing revisited it. The volume was then built anyway,
+    which is how a 6/7 translator state produced a 7-chapter EPUB.
+
+    This replays the gate against the text on disk, with no API call. A chapter
+    already stamped "completed" is never examined, so a pass that cannot see
+    bible-sourced forbidden synonyms can only clear a stale block or record a
+    live one -- it can never silently downgrade a finished chapter.
+
+    Returns {chapter_id: reason} for the chapters that still fail.
+    """
+    path = Path(work_dir) / "manifest.json"
+    if not path.exists():
+        return {}
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    chapters = manifest.get("chapters", [])
+    if not isinstance(chapters, list):
+        return {}
+
+    try:
+        context_xml = (Path(work_dir) / "context.xml").read_text(encoding="utf-8")
+    except OSError:
+        context_xml = ""
+    anchors = parse_anchors(context_xml)
+
+    cfg = get_anthropic_fidelity_config()
+    block_on = {
+        str(item).strip().lower()
+        for item in (cfg.get("block_on") or ["missing", "drifted", "structural"])
+    }
+    try:
+        tolerance = float(cfg.get("ratio_tolerance", DEFAULT_RATIO_TOLERANCE) or DEFAULT_RATIO_TOLERANCE)
+    except (TypeError, ValueError):
+        tolerance = DEFAULT_RATIO_TOLERANCE
+
+    pairs: Dict[str, Tuple[str, str]] = {}
+    for entry in chapters:
+        if not isinstance(entry, dict):
+            continue
+        stem = Path(str(entry.get("source_file", ""))).stem
+        jp_path = Path(work_dir) / "JP" / (stem + ".md")
+        en_path = Path(work_dir) / "EN" / (stem + "_EN.md")
+        if not (jp_path.exists() and en_path.exists()):
+            continue
+        try:
+            pairs[stem] = (
+                jp_path.read_text(encoding="utf-8"),
+                en_path.read_text(encoding="utf-8"),
+            )
+        except OSError:
+            continue
+
+    healed: List[str] = []
+    still_blocked: Dict[str, str] = {}
+    for entry in chapters:
+        if not isinstance(entry, dict) or entry.get("translation_status") == "completed":
+            continue
+        stem = Path(str(entry.get("source_file", ""))).stem
+        if stem not in pairs:
+            continue  # nothing rendered; "pending" is already the honest word
+        jp_source, en_text = pairs[stem]
+        peers = [
+            ratio
+            for other, (other_jp, other_en) in pairs.items()
+            if other != stem
+            for ratio in [length_ratio(other_jp, other_en)]
+            if ratio is not None
+        ]
+        reasons = [
+            "anchor %s %s" % (row.get("anchor_id"), row.get("status"))
+            for row in reconcile_chapter(
+                anchors, chapter_id=stem, jp_source=jp_source, en_text=en_text
+            )
+            if str(row.get("status")) in ("missing", "drifted")
+            and str(row.get("status")) in block_on
+        ]
+        if "structural" in block_on:
+            reasons.extend(
+                "illustration parity: source %s, output %s"
+                % (row.get("jp_count"), row.get("en_count"))
+                for row in structural_report(jp_source, en_text, peers, tolerance=tolerance)
+                if row.get("check") == "illustration_parity"
+                and str(row.get("status")) == "mismatch"
+            )
+        if reasons:
+            entry["translation_status"] = "blocked"
+            entry["last_failure"] = "; ".join(reasons)
+            still_blocked[stem] = entry["last_failure"]
+        else:
+            entry["translation_status"] = "completed"
+            entry.pop("last_failure", None)
+            healed.append(stem)
+
+    if not (healed or still_blocked):
+        return {}
+
+    completed = sum(
+        1 for entry in chapters if isinstance(entry, dict) and entry.get("translation_status") == "completed"
+    )
+    manifest.setdefault("pipeline_state", {})["translator"] = {
+        "status": "completed" if chapters and completed == len(chapters) else "in_progress",
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "chapters_completed": completed,
+        "chapters_total": len(chapters),
+    }
+    atomic_write_json(path, manifest)
+    if healed:
+        logger.info(
+            "[ANTHROPIC-MANIFEST] reconciled from disk: %d chapter(s) stamped completed (%s)",
+            len(healed), ", ".join(sorted(healed)),
+        )
+    if still_blocked:
+        logger.warning(
+            "[ANTHROPIC-MANIFEST] %d rendering(s) on disk still fail the gate: %s",
+            len(still_blocked),
+            "; ".join("%s (%s)" % (cid, reason) for cid, reason in sorted(still_blocked.items())),
+        )
+    return still_blocked
 
 def _filter_completed_chapters(work_dir: Path, chapter_files: List[Path]) -> List[Path]:
     path = Path(work_dir) / "manifest.json"
@@ -1710,6 +1895,7 @@ def translate_volume(
         wanted = set(chapters)
         chapter_files = [path for path in chapter_files if path.stem in wanted or path.stem.split("_")[-1] in wanted]
     if not dry_run:
+        reconcile_manifest_from_disk(work_dir)
         chapter_files = _filter_completed_chapters(work_dir, chapter_files)
     translator = AnthropicTranslator(work_dir, volume_id, thinking_log_enabled=thinking_log_enabled, dry_run=dry_run)
     batch_cfg = translator._config.get("batch", {}) or {}

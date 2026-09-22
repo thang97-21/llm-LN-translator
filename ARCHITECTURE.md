@@ -175,8 +175,8 @@ rationale and a step-by-step guide to adding/debugging a route).
 |---|---|---|---|---|
 | DeepSeek | `src/Deepseek/translator/` | `deepseek-v4-pro` | `thinking.budget_tokens` + DRDI (prose-injected CoT scaffolding — no native effort knob) | `deepseek_optimization.py` (DRDI/DOVB/CCT), `thinking_density.py` (density-map telemetry) |
 | Qwen | `src/Qwen/` | `qwen3.8-max` | Native hybrid thinking | `safety_fallback.py` (moderation-refusal → DeepSeek inheritance) |
-| OpenAI | `src/OpenAI/` | `gpt-5.6-terra` (Astra-ready) | `reasoning.summary` (opt-in, model-generated paraphrase — **not** raw CoT; requires org verification + model-tier support, neither detectable from this codebase) | `response.py` (lossless Responses-payload decoder), model-scoped fallback ledgers |
-| Anthropic | `src/Anthropic/` | `claude-sonnet-5` (`claude-opus-5`/`claude-fable-5` also selectable) | Adaptive thinking (`thinking.enabled`), 128K max output uniform across all three models | `batch.py` (extra module no other route has), `response.py` (Messages-payload decoder) |
+| OpenAI | `src/OpenAI/` | `gpt-6-sol` (Luna fallback; Astra selectable; Batch default) | `reasoning.summary` (opt-in, model-generated paraphrase — **not** raw CoT; requires org verification + model-tier support, neither detectable from this codebase) | `response.py` (lossless Responses-payload decoder), model-scoped fallback ledgers |
+| Anthropic | `src/Anthropic/` | `claude-opus-5-5` (`claude-sonnet-5`/`claude-opus-5`/`claude-fable-5-1` also selectable) | Adaptive thinking (always on for Opus 5.5 / Fable 5.1), explicit effort, 128K max output uniform across all four models | `batch.py` (extra module no other route has), `response.py` (Messages-payload decoder) |
 | GLM | `src/GLM/` | `glm-5.3-flash` (`glm-5.3` for the flagship tier) | Native thinking with `reasoning_effort` (`low`/`high`/`max`), implicit prefix caching, cannot be fully disabled | GLM-owned prompt, context, conversation, and moderation handling |
 
 Shared infrastructure every provider's `agent.py` imports from `src/Deepseek/`

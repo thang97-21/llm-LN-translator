@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 _BATCH_ENDPOINT = "/v1/responses"
 _ARTIFACT_DIR_NAME = "openai_prep"
-_DEFAULT_MODEL = "gpt-6-astra"
+_DEFAULT_MODEL = "gpt-6-sol"
 _DEFAULT_ENDPOINT = "https://api.openai.com/v1"
 _DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
 

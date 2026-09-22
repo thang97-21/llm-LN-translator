@@ -4,6 +4,7 @@ import stringWidth from 'string-width';
 import type { ConfigLine } from '../core/types.js';
 import type { ConfigFieldState } from '../core/configFile.js';
 import { activeProvider, buildConfigRenderLines, formatConfigValue } from '../core/configSchema.js';
+import { PROOFREADING_PATHS, proofreadingState } from '../core/proofreading.js';
 import { translationPricingStatus, usdPerMillion } from '../core/pricing.js';
 import { boolStateColor, toneColor } from './components.js';
 import { padCell } from './table.js';
@@ -48,6 +49,27 @@ export function TranslationPricingPanel({ fields }: { fields: readonly ConfigFie
     {status.condition ? <Text color="yellow">  {status.condition}</Text> : null}
     {status.note ? <Text color="gray">  {status.note}</Text> : null}
     {status.source ? <Text color="gray">  Source: {status.sourceLabel} · {status.source}</Text> : null}
+  </Box>;
+}
+
+// Unlike DeveloperPanel below, this one IS persisted: `p` writes
+// translation.anthropic.advisor.enabled, because that is what the Python
+// route reads. It lives on the Dashboard because the Configuration screen
+// hides every translation.anthropic.* field unless Anthropic is the active
+// provider — which made the switch unreachable on any other route.
+export function ProofreadingPanel({ fields, notice }: { fields: readonly ConfigFieldState[]; notice: { message: string; ok: boolean } | null }) {
+  const state = proofreadingState(fields);
+  const provider = activeProvider(fields);
+  const label = (path: string, raw: string) => { const field = fields.find((item) => item.path === path); return field ? formatConfigValue(field, raw) : raw; };
+  const status = state.enabled ? (state.blocker ? 'ON — INVALID' : 'ON') : state.locked ? 'LOCKED' : 'off';
+  const tone = state.enabled ? (state.blocker ? 'bad' : 'good') : state.locked ? 'warn' : 'neutral';
+  return <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={toneColor(tone)} paddingX={1}>
+    <Text bold>Proofreading Mode · <Text color={toneColor(tone)}>{status}</Text></Text>
+    <Text wrap="truncate-end">  Executor: {label(PROOFREADING_PATHS.executor, state.executor) || '—'} · Advisor: {label(PROOFREADING_PATHS.advisor, state.advisor) || '—'}</Text>
+    {state.blocker ? <Text color="yellow" wrap="truncate-end">  {state.blocker}</Text> : null}
+    {provider !== 'anthropic' ? <Text color="gray" wrap="truncate-end">  Anthropic route only. The current provider is {provider || 'unset'}; the setting is kept for when you switch.</Text> : null}
+    {notice ? <Text color={toneColor(notice.ok ? 'good' : 'bad')} wrap="truncate-end">  {notice.message}</Text> : null}
+    <Text color="gray">  Press p to toggle. Saved to config.yaml; Anthropic's official pairings only.</Text>
   </Box>;
 }
 
