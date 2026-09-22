@@ -42,6 +42,7 @@ from src.Anthropic.prompt_loader import (
 )
 from src.Anthropic.client import (
     THINKING_ALWAYS_ON_MODELS,
+    build_advisor_tool,
     build_cache_control,
     build_system_blocks,
     normalize_model_id,
@@ -54,6 +55,7 @@ from src.Deepseek.common.chapter_signals import (
     parse_chapter_signals,
 )
 from src.Deepseek.common.config import PIPELINE_ROOT, WORK_DIR, get_safety_fallback_config
+from src.Deepseek.common.illustration_reinjection import reinject
 from src.Deepseek.common.verbatim_anchors import (
     anchors_in_source,
     merge_bible_anchors,
@@ -360,6 +362,51 @@ class AnthropicTranslator:
             if ratio:
                 ratios.append(ratio)
         return ratios
+
+    def _reinject_illustrations(self, chapter_id: str, en_text: str) -> str:
+        """Restore illustration tags the model dropped, before the gate counts them.
+
+        Nothing in this route instructs the model to carry `![illustration](...)`
+        tags through -- `<formatting>` now states the rule, but a stated rule is not
+        a guarantee, and this failure is silent when it happens (volume 646941 lost
+        5 of 10 plates; 6e63bc lost 2). Running here, between generation and
+        `_check_chapter_fidelity`, turns a blocking `illustration_parity` mismatch
+        into a self-healing one -- while leaving the gate fully able to fail loudly
+        on anything re-injection refused to place.
+
+        Placement is proven, never approximated: see
+        docs/illustration-reinjection-spec.md. A refusal returns the text unchanged
+        rather than guessing, and the gate then blocks the chapter as before.
+        """
+        try:
+            jp_source = (self.work_dir / "JP" / f"{chapter_id}.md").read_text(encoding="utf-8")
+        except OSError:
+            return en_text  # _check_chapter_fidelity reports the unreadable source
+
+        assets_dir = self.work_dir / "assets" / "illustrations"
+        assets = {p.name for p in assets_dir.iterdir()} if assets_dir.is_dir() else None
+
+        repaired, plan = reinject(jp_source, en_text, available_assets=assets)
+        if plan.nothing_to_do:
+            return en_text
+        if plan.ok:
+            logger.warning(
+                "[ANTHROPIC-ILLUSTRATION] %s: model dropped %d plate(s); re-injected at "
+                "aligned positions (ratio %.3f): %s",
+                chapter_id,
+                len(plan.plates),
+                plan.ratio,
+                ", ".join(p.target for p in plan.plates),
+            )
+            return repaired
+        logger.error(
+            "[ANTHROPIC-ILLUSTRATION] %s: plate(s) dropped and re-injection REFUSED "
+            "(ratio %.3f) -- placement could not be proven, so nothing was written: %s",
+            chapter_id,
+            plan.ratio,
+            "; ".join(plan.refusals),
+        )
+        return en_text
 
     def _check_chapter_fidelity(self, chapter_id: str, en_text: str) -> List[str]:
         """Verify a finished chapter against its source. Returns blocking reasons.
@@ -909,6 +956,7 @@ class AnthropicTranslator:
             return self.work_dir / "DRY_RUN"
         output_path = self.work_dir / "EN" / f"{chapter_id}_EN.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        text = self._reinject_illustrations(chapter_id, text)
         output_path.write_text(text, encoding="utf-8")
         blocking = self._check_chapter_fidelity(chapter_id, text)
         if blocking:
@@ -1493,6 +1541,7 @@ class AnthropicTranslator:
         """
         output_path = self.work_dir / "EN" / f"{chapter_id}_EN.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        text = self._reinject_illustrations(chapter_id, text)
         output_path.write_text(text, encoding="utf-8")
         return output_path, self._check_chapter_fidelity(chapter_id, text)
 
@@ -1554,12 +1603,11 @@ class AnthropicTranslator:
         )
         tools: List[Dict[str, Any]] = []
         if advisor_enabled:
-            tools.append({
-                "type": "advisor_20260301",
-                "name": "advisor",
-                "model": normalize_model_id(str(self._advisor_cfg.get("model", "claude-opus-4-8"))),
-                "max_tokens": int(self._advisor_cfg.get("max_tokens", 24000) or 24000),
-            })
+            tools.append(
+                build_advisor_tool(
+                    self._advisor_cfg, route_caching_cfg=get_anthropic_caching_config()
+                )
+            )
         if websearch_enabled:
             tools.append({
                 "type": str(self._websearch_cfg.get("type", "web_search_20250305")),

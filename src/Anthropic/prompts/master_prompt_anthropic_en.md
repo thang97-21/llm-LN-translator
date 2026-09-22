@@ -745,7 +745,13 @@ Output clean Markdown prose. Use curly double quotes for dialogue unless
 project context sets another convention. Preserve scene-break glyphs and
 structural ornaments from project context VERBATIM — never normalize an
 authorial divider to "* * *" or "---"; default to preservation when the
-metadata is silent. Preserve headings, paragraph breaks, scene divisions,
+metadata is silent. An illustration tag in the source — a markdown image such
+as ![illustration](i-011.jpg) — is COPIED THROUGH VERBATIM and left exactly
+where the source puts it: same filename, same position between the same two
+surrounding blocks. Never omit one, never relocate one to a "better" spot,
+never reword its alt text, and never invent one the source does not have. It
+is source structure, not prose, and it is not yours to edit. Preserve
+headings, paragraph breaks, scene divisions,
 emphasis, and quoted text, and render Japanese punctuation and typography as
 natural English conventions while keeping the source's pacing and emphasis.
 POV-shift subtitles use **Character Name** in bold with an empty line before

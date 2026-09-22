@@ -310,12 +310,7 @@ class AnthropicClient:
 
         tools: List[Dict[str, Any]] = []
         if advisor_enabled:
-            tools.append({
-                "type": "advisor_20260301",
-                "name": "advisor",
-                "model": normalize_model_id(str(advisor_cfg.get("model", "claude-opus-4-8"))),
-                "max_tokens": int(advisor_cfg.get("max_tokens", 24000) or 24000),
-            })
+            tools.append(build_advisor_tool(advisor_cfg, route_caching_cfg=caching_cfg))
             request["betas"] = ["advisor-tool-2026-03-01"]  # web_search needs no beta header of its own
         if websearch_enabled:
             tools.append({
@@ -515,6 +510,57 @@ def build_cache_control(*, enabled: bool, ttl: str) -> Optional[Dict[str, Any]]:
     if ttl == "1h":
         cache_control["ttl"] = "1h"
     return cache_control
+
+
+def build_advisor_tool(
+    advisor_cfg: Dict[str, Any], *, route_caching_cfg: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """The one place the advisor tool block is spelled.
+
+    It was previously spelled twice -- once in the streaming path here and once
+    in agent.py's batch path -- and both copies silently omitted `caching` and
+    `max_uses`, so two documented config keys were inert. Field names and types
+    follow `BetaAdvisorTool20260301Param` in the installed SDK:
+
+      caching:   Optional[BetaCacheControlEphemeralParam] -- "Caching for the
+                 advisor's own prompt. When set, each advisor call writes a
+                 cache entry at the given TTL so subsequent calls in the same
+                 conversation read the stable prefix. When omitted, the advisor
+                 prompt is not cached." Omitted (not null) when disabled.
+      max_uses:  Optional[int] -- per-request cap.
+
+    TTL resolution: `advisor.caching.ttl` when set, else the route's own
+    `caching.ttl`. The advisor conversation spans a whole volume (15 calls in
+    volume 646941), so it wants the route's long TTL rather than a 5m default.
+
+    Deliberately NOT set: the sibling `cache_control` field, which places a
+    breakpoint on this tool block inside the executor's request prefix. The
+    executor's prefix caching already works (430k cache-read tokens by the end
+    of a 17-chapter volume); adding a breakpoint there would move existing ones
+    for no measured gain. `caching` is the field that was actually broken.
+    """
+    caching_cfg = advisor_cfg.get("caching", {}) or {}
+    route_caching_cfg = route_caching_cfg or {}
+    ttl = str(
+        caching_cfg.get("ttl")
+        or route_caching_cfg.get("ttl", "5m")
+        or "5m"
+    )
+    tool: Dict[str, Any] = {
+        "type": "advisor_20260301",
+        "name": "advisor",
+        "model": normalize_model_id(str(advisor_cfg.get("model", "claude-opus-4-8"))),
+        "max_tokens": int(advisor_cfg.get("max_tokens", 24000) or 24000),
+    }
+    max_uses = advisor_cfg.get("max_uses")
+    if max_uses is not None:
+        tool["max_uses"] = int(max_uses)
+    caching = build_cache_control(
+        enabled=bool(caching_cfg.get("enabled", False)), ttl=ttl
+    )
+    if caching is not None:
+        tool["caching"] = caching
+    return tool
 
 
 def build_system_blocks(

@@ -995,7 +995,7 @@ translation:
       #                       quality lift on a Sonnet executor; the only
       #                       advisor valid against ANY of this route's three
       #                       supported executors.
-      model: claude-opus-4-8
+      model: claude-sonnet-5
       max_tokens: 24000          # validated in Run 8
       max_uses: 2                # per-request cap (the tool has no per-conversation cap)
       max_pause_resumes: 2       # resend budget for stop_reason: pause_turn
@@ -1008,22 +1008,35 @@ translation:
                                   # the uneconomical "any WARM/HOT chapter" gate
                                   # this session's evidence measured and rejected.
       caching:
-        enabled: true            # NOTE: inert today -- client.py's advisor tool
-                                  # definition never sends Anthropic's `caching`
-                                  # field, so this flag currently changes nothing
-                                  # either way. Left on deliberately so the wiring,
-                                  # once added, starts in the intended state.
-                                  # Economics when it does take effect: Anthropic
-                                  # puts the break-even at ~3 advisor calls per
-                                  # conversation, and this route calls it 0-2
-                                  # times per chapter.
+        enabled: true            # LIVE as of the client.py::build_advisor_tool
+                                  # fix. Sends Anthropic's `caching` field on the
+                                  # advisor tool block: each advisor call writes a
+                                  # cache entry at the TTL below, so later calls in
+                                  # the same conversation read the stable prefix.
+                                  # Omitted entirely when false (per the SDK:
+                                  # "when omitted, the advisor prompt is not
+                                  # cached") -- never sent as null.
+                                  #
+                                  # Why this matters here: before the fix, every
+                                  # advisor call in volume 646941 logged ZERO
+                                  # cache-read tokens across 15 consults while its
+                                  # fresh-token count climbed 75k -> 232k, so the
+                                  # advisor cost MORE than the translation it was
+                                  # advising ($2.31 vs $2.04). Anthropic puts the
+                                  # break-even at ~3 advisor calls per
+                                  # conversation; a volume-length conversation
+                                  # makes 15+, well past it.
+        # ttl: 1h                 # optional override. Unset = inherit the route's
+                                  # caching.ttl (currently 1h), which is what a
+                                  # volume-spanning advisor conversation wants --
+                                  # a 5m default would expire between chapters.
 
     # ── web_search (basic version, no beta header) ──────────────────────────
     # Independent of advisor.enabled -- a chapter can need one, the other,
     # both, or neither (Run 9). Opt-in: its $10/1,000-search cost and the
     # query-level-economy guardrail (spec §2.5) are unvalidated.
     web_search:
-      enabled: false
+      enabled: true
       type: web_search_20250305  # validated in Run 9; later versions
                                   # (web_search_20260209+) add dynamic
                                   # filtering via code execution -- untested here
