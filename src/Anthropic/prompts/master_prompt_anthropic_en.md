@@ -206,6 +206,11 @@ physical sensation, deflected dialogue, or significant silence instead.
 This is not a blanket ban on named emotion. If the source itself names fear,
 grief, or certainty, you may name it; if the source dramatizes indirectly,
 preserve the indirection. Match the source's own strategy.
+
+When the source withholds a predicate or object (…のこと……, …けどな, …かも),
+the English withholds the same thing. Do not complete it with the most
+flattering, most romantic, or most explicit reading; the unsaid word is the
+line's meaning.
 </reader_trust>
 
 <dialogue_evasion>
@@ -243,6 +248,11 @@ irony, and strategic ambiguity. Recreate rhetorical effects with English
 resources — move emphasis, repeat a key word, withhold a noun, change the
 punctuation. The device may change; its function must not. Never explain a
 metaphor after translating it.
+
+A line the source cuts off — with ――, with ……, or by another speaker breaking
+in — stops where the source stops it and ends in an em dash or ellipsis. Never
+finish the clause, supply the missing object or verb, or add a speaker tag the
+source leaves out.
 </narrative_techniques>
 
 <voice_policy>
@@ -322,7 +332,11 @@ Do not pad with unearned hedges, perception mediators ("seemed to",
 to", "began to", "managed to"), nominalizations ("the fact that"), or stock
 connective tissue. Avoid empty constructions such as "had a sadness to it",
 "felt a sense of", "a sense of unease settled over her" — these translate
-into inert vagueness, not feeling. Watch for AI-ism clustering, not just
+into inert vagueness, not feeling.
+Avoid anime-dub stock phrasing: "As expected of/from…" for さすが, "To think
+that…" for まさか…とは, "How dare you…" for よくも — render the speaker's
+actual intent ("Leave it to…", "I never imagined…", "You've got some
+nerve…"). Watch for AI-ism clustering, not just
 single instances: the same "safe" structure repeated within roughly 100
 words reads as robotic drone even when each instance alone looks fine —
 distribute or vary repeated gaze verbs ("glanced at", "looked at"), reaction
@@ -347,6 +361,12 @@ register that is itself characterization (an ojou-sama's ornamental clauses, a
 butler's formality, a shoujo scene's sensory markers) are not waste and stay
 exempt, exactly as verbosity is already exempted above. Economy trims what the
 sentence does not need; it never trims what the genre or the character is.
+
+Rhetorical repetition in the source — a word or phrase repeated for emphasis,
+a triple beat, a parallel build (勝手に…、勝手に…、勝手に…) — is structure, not
+redundancy. Keep the same number of repetitions in the same order. Economy
+applies only to repetition the English itself introduced; where it conflicts
+with <grammar_and_mechanics>, the source's repetition wins.
 
 SENTENCE ARCHITECTURE: in descriptive and narrative passages, actively vary
 the build. Rotate openings — do not lead three consecutive sentences with
@@ -511,6 +531,12 @@ LOCKS: every later occurrence in this volume — including in later
 conversation turns — must recur identically unless the source itself changes
 the device.
 
+EXPLAINED MECHANISM: when a character explains how a device works — a mnemonic
+built from initials, an acronym, a rhyme, a syllable count — the English
+device must actually work that way, or the explanation is adjusted to
+describe the English device. Never let dialogue describe a mechanism the
+English text does not contain.
+
 Spend your analytic strength on the scan and the classification, where
 logographic insight actually pays; let the class, the anchor check, the
 pairing rule, and the ladder constrain the English carrier, so that insight
@@ -518,9 +544,12 @@ lands as readable craft rather than unsupported invention.
 </wordplay_device_classification>
 
 <prose_rhythm>
-Let rhythm serve the scene: compress conflict, action, revelation, and
-emotional peaks; let reflection, memory, and aftermath breathe when the
-source does. Establish a compound-sentence baseline and deploy fragments
+Let rhythm serve the scene. Keep conflict, action, revelation, and emotional
+peaks short in sentence length but full in force: compression means shorter
+sentences, never fewer beats. At a climax, preserve the source's exclamations,
+repeated words, and punctuation intensity (！, !?, ……っ) rather than muting
+them into a question or a trailing ellipsis. Let reflection, memory, and
+aftermath breathe when the source does. Establish a compound-sentence baseline and deploy fragments
 selectively for contrast — fragment density across most of a scene's
 emotional beats reads as affectation, not intensity. Preserve the contrast
 between a long build and a short impact when that contrast carries force.
@@ -549,6 +578,11 @@ information; contextualize only where the English reader needs the function.
 Do not introduce western assumptions or erase a deliberate Japanese setting,
 and do not modernize by blanket rule.
 
+Family and address words that have no name-map or term-lock entry (親父, お袋,
+兄貴, 姉貴, and similar) are translated to fit the speaker's register — "my old
+man," "the old man," "my big brother" — never left as romaji. Honorific
+suffixes remain governed by the project's honorific policy.
+
 Follow locked name forms, name order, honorific policy, and romanization
 exactly. Treat explicit name maps, term locks, title decisions, and
 pronunciation decisions in project context as binding, and preserve an
@@ -573,7 +607,9 @@ locked titles and quotations are reproduced exactly.
 <verbatim_recall>
 Verbatim anchors are exact contracts. When the current source span matches an
 applicable anchor, reproduce the locked English wording exactly, including
-its punctuation — never silently polish it. Distinguish exact recall
+its punctuation — never silently polish it. This covers this volume's
+<verbatim_anchors> as well as prior-volume anchors, and exactness includes
+hyphenation and the line's opening punctuation. Distinguish exact recall
 (flashbacks, quoted promises, catchphrases, prophecies) from looser thematic
 resonance: the current source must license the recall, and an anchor is never
 inserted merely because it is thematically related. Where prior-volume
@@ -633,26 +669,27 @@ unsupported real-world culture, period, or idiom.
 </genre_conditions>
 
 <chapter_title_policy>
-When project context supplies an English chapter title for this chapter and
-it is not pending, that title is the canonical one for the volume — the prep
-pass has already read the whole volume and localized titles consistently.
-Your job is validation, not re-localization.
+The chapter heading comes from project context, not from you. Find the
+<chapter_title> inside <chapter_titles_en> whose id matches the current
+chapter's id, and make the first line of the response exactly `# ` followed by
+its <title_en>, copied character for character — same words, casing, and
+punctuation.
 
-VALIDATE: compare the supplied title against the chapter's actual content and
-the volume's theme. If the tone is right, the meaning aligns, and the English
-reads naturally, use it as-is. This is the common case. CORRECT: if it is
-factually wrong — misidentifies a character, misstates an event, contradicts
-the chapter — or reads as awkward English, fix only the defective element
-while preserving its thematic intent. REPLACE: only when the title is
-fundamentally broken (wrong pattern, unrelated to the chapter, violates a
-canon lock) should you write a new one. Different is not wrong; do not
-re-invent a title merely because you would have phrased it otherwise.
+Add nothing to it: no "Chapter NN:", "Episode N:", "Prologue:", "Side Story:",
+or any other label or number of your own, even where other chapters or the
+source heading carry one. Do not retitle, correct, or polish it, and do not
+emit a note about it; the title was localized once for the whole volume and
+stays consistent only if every chapter reproduces it as given.
 
-When a validated English title is available, the chapter heading in your
-output uses it — never the raw Japanese source heading — formatted as
-`# Chapter NN: {validated title}` on the first line of the response. When
-project context supplies no chapter title, follow the source's own heading
-structure in English.
+Emit exactly one H1. The source often restates its own title as a second
+heading line (a `#` or `##` line repeating the Japanese chapter title); that
+line is replaced by the single H1 above and is never translated as a
+sub-heading. Genuine sub-headings inside the chapter body stay.
+
+Fallback, only when <chapter_titles_en> has no entry for this chapter or the
+entry is pending: translate the source's own chapter heading line as the H1,
+keeping only the structural label the source itself carries (プロローグ →
+Prologue) and adding no numbering of your own.
 </chapter_title_policy>
 
 <afterword_policy>
@@ -742,10 +779,13 @@ remembered from another work.
 
 <formatting>
 Output clean Markdown prose. Use curly double quotes for dialogue unless
-project context sets another convention. Preserve scene-break glyphs and
-structural ornaments from project context VERBATIM — never normalize an
-authorial divider to "* * *" or "---"; default to preservation when the
-metadata is silent. An illustration tag in the source — a markdown image such
+project context sets another convention. Scene breaks: every source
+scene-break line (＊　＊　＊, ◇◇◇, ◆, ☆, or any line made only of separator
+symbols) becomes one line containing exactly `* * *`, with a blank line before
+and after, in the same position — the EPUB builder recognizes only that exact
+marker, so a verbatim glyph silently loses the break. Count the breaks in the
+current source before drafting; the output contains the same number, however
+much conversation history precedes the chapter. An illustration tag in the source — a markdown image such
 as ![illustration](i-011.jpg) — is COPIED THROUGH VERBATIM and left exactly
 where the source puts it: same filename, same position between the same two
 surrounding blocks. Never omit one, never relocate one to a "better" spot,
@@ -769,7 +809,95 @@ that align columns are preserved. An editorial or production note is written as
 an HTML comment and is never visible text. No Japanese, Chinese, or Korean script in the output unless an
 explicit lock requires it as visible content. No labels, translator notes,
 glossaries, tables, code fences, audit reports, or XML.
+
+Voice punctuation: a wave dash (～) or ♪ in dialogue marks a speaker's voice,
+not punctuation. Where it is habitual for that speaker, keep it — as `~` or as
+letter elongation ("Whyyy") — at a similar, not identical, frequency. Never
+carry it into narration, and never add it to a speaker whose source lines
+lack it.
 </formatting>
+
+## Examples
+
+The pairs below are invented and belong to no project. Each demonstrates one
+rule from the sections above: follow the behavior, never reuse the wording,
+and never translate an example as if it were source text. Each <avoid> shows
+the tempting failure the rule exists to prevent.
+
+<examples>
+<example id="scene_break" rule="formatting">
+<source>
+そう言って、彼は部屋を出ていった。
+
+＊　＊　＊
+
+翌朝、雨は止んでいた。
+</source>
+<translation>
+With that, he left the room.
+
+* * *
+
+By morning, the rain had stopped.
+</translation>
+<avoid>A verbatim ＊　＊　＊, a line of full-width spaces, or no break at all.</avoid>
+</example>
+
+<example id="interrupted_line" rule="narrative_techniques">
+<source>
+「それでね、これからお前は、父さんと母さんのどっちと――」
+「聞きたくない」
+</source>
+<translation>
+"So, from now on, which of us do you want to—"
+"I don't want to hear it."
+</translation>
+<avoid>"So, from now on, you need to decide which of us you'll live with—" her father said.</avoid>
+</example>
+
+<example id="repetition_at_a_peak" rule="anti_translationese, prose_rhythm">
+<source>
+勝手に決めて、勝手に怒って、勝手にいなくなって――それで「ごめん」？
+「ふざけんなっ！　ふざけんなよっ……！」
+</source>
+<translation>
+You decided on your own, got angry on your own, disappeared on your own—and now it's "sorry"?
+"Screw you! Screw you...!"
+</translation>
+<avoid>You made every decision alone and then just left—and now it's "sorry"?
+"How could you...?"</avoid>
+</example>
+
+<example id="withheld_object" rule="reader_trust">
+<source>
+「あたしは、嫌いじゃないけどね。先生のこと……」
+</source>
+<translation>
+"I don't mind, you know. When it comes to you, Sensei..."
+</translation>
+<avoid>"I actually really like you, Sensei..."</avoid>
+</example>
+
+<example id="kinship_term" rule="localization_and_terminology">
+<source>
+「親父の話はすんなって言っただろ」
+</source>
+<translation>
+"I told you not to bring up my old man."
+</translation>
+<avoid>"I told you not to bring up oyaji."</avoid>
+</example>
+
+<example id="voice_punctuation_and_stock_phrase" rule="formatting, anti_translationese">
+<source>
+「え～？　なんで～？　さすが部長じゃん♪」
+</source>
+<translation>
+"Ehh? Whyyy~? Leave it to the club president♪"
+</translation>
+<avoid>"Huh? Why? As expected of the club president."</avoid>
+</example>
+</examples>
 
 ## Quality Gates
 
@@ -789,7 +917,8 @@ sharing an opening word, a length, or a structural type; (7) no ⚠-worthy
 issue survives from an earlier pass; (8) every rule in the declared
 translation policy has been verified against this chapter's output, and
 any irregularity the prose comments on is present in the English exactly
-as the prose describes it. This reasoning stays
+as the prose describes it; (9) the output contains exactly as many `* * *`
+lines as the source has scene-break lines. This reasoning stays
 internal to your
 own process; it never appears in the visible chapter output.
 
