@@ -12,10 +12,10 @@ tests/
 docs/
 dsh/
 
-# ── Agent/Skill Authoring (local only — never pushed) ──────────────────────
-# Vendored third-party API docs, agent/skill definitions, and QC calibration
-# samples that include full-text commercial ebook extracts. None of this is
-# the tool's own source code.
+# ── Agent/Skill Authoring (local by default) ────────────────────────────────
+# Explicitly tracked translation-evaluator instructions and thin adapters are
+# the exception. Vendored API docs, QC calibration excerpts, and full-text
+# commercial ebook extracts remain local and must not be staged.
 .agents/
 .codex/
 .grok/
@@ -80,11 +80,12 @@ cache/*
 raw/
 work/
 
-# ── IDE-Workspace / Agent Authoring (local only — never pushed) ────────────
+# ── IDE-Workspace / Agent Authoring (local by default) ─────────────────────
 # Only src/ (the actual DeepSeek MTLS source) and src/prompt/ (the shipped
 # translation prompts) go to the remote. Everything that configures how an
 # AI agent develops or operates this repo stays local: subagent/skill
-# definitions, the orchestrator persona, and dev planning notes.
+# definitions, the orchestrator persona, and dev planning notes. The tracked
+# evaluator entrypoint and mtl-qc adapter are narrow exceptions.
 .github/
 /AGENTS.md
 /PLANNING.md

@@ -124,7 +124,16 @@ PRICING_PER_MTOK: Dict[str, Dict[str, float]] = {
     # model page; the other two follow the documented 2x rule. Selected by
     # translation.anthropic.caching.ttl, so a 1h run is not costed at the 5m
     # rate and understated by 40%.
+    #
     "claude-sonnet-5":  {"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50,  "cache_write_1h": 4.00,  "output": 10.00},
+    # claude-sonnet-5-5 added 2026-09-29 ALONGSIDE claude-sonnet-5 above, not
+    # in place of it -- claude-sonnet-5 stays live as the plaintext Advisor
+    # Mode executor (see client.py::SUPPORTED_MODELS). Every rate below is
+    # byte-identical to the sonnet-5 row: verified 2026-09-29 against
+    # https://platform.claude.com/docs/en/models/sonnet-5-5/overview, which
+    # states outright "Claude Sonnet 5.5 has the same prices as Claude Sonnet
+    # 5" in its own migration guide.
+    "claude-sonnet-5-5":{"cache_hit": 0.20, "cache_miss": 2.00, "cache_write": 2.50,  "cache_write_1h": 4.00,  "output": 10.00},
     "claude-opus-5":    {"cache_hit": 0.50, "cache_miss": 5.00, "cache_write": 6.25,  "cache_write_1h": 10.00, "output": 25.00},
     "claude-fable-5-1": {"cache_hit": 0.25, "cache_miss": 10.00, "cache_write": 12.50, "cache_write_1h": 20.00, "output": 50.00},
     # claude-opus-5-5 verified 2026-09-23 against
@@ -163,7 +172,9 @@ _BATCH_DISCOUNT = 0.5
 # The exact model set src/Anthropic is built and verified against. Kept here
 # so the conservative fallback below is derived from the table rather than
 # from a hand-picked row that can silently stop being the priciest one.
-_ANTHROPIC_MODELS = ("claude-opus-5-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
+_ANTHROPIC_MODELS = (
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1"
+)
 
 _QWEN_EXPLICIT_CACHE_READ_PER_MTOK = {
     "qwen3.8-max": 0.17,

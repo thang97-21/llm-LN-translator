@@ -42,6 +42,15 @@ def response_to_llm_response(
     # blocks rather than `text` blocks, so the fragment never reaches
     # visible_text in the first place (visible_text below is built from `text`
     # blocks only, selected by type -- never by position).
+    #
+    # claude-sonnet-5-5 is only PARTIALLY dormant for this filter -- per its
+    # migration guide (fetched 2026-09-29): "notes longer than a sentence or
+    # two... come back as progress-update thinking blocks... Shorter remarks
+    # stay text." The pre-consult scoping sentence this filter exists for
+    # ("I'll consult the advisor on...") is exactly the short-remark shape,
+    # so on this model it can still land as a `text` block immediately before
+    # `server_tool_use` -- this filter stays ACTIVE, not dormant, for
+    # claude-sonnet-5-5.
     leaked_indices = {
         i for i, block in enumerate(raw_content)
         if isinstance(block, dict) and block.get("type") == "text"
@@ -101,6 +110,14 @@ def response_to_llm_response(
         if block.type == "text" and i not in leaked_indices
     )
     thinking_text = "\n".join(block.text for block in blocks if block.type == "reasoning" and block.text) or None
+    # Plain `thinking` blocks only: `redacted_thinking` is textless by design
+    # and would make every such response look like a dropped summary. The
+    # caller compares these against the requested display to tell "the API
+    # withheld the summary" apart from "the model chose not to think".
+    raw_thinking_blocks = [
+        block for block in raw_content
+        if isinstance(block, dict) and block.get("type") == "thinking"
+    ]
 
     provider_metadata: Dict[str, Any] = {
         "raw_response": raw,
@@ -109,6 +126,10 @@ def response_to_llm_response(
         "stop_reason": stop_reason,
         "refusal_category": refusal_category,
         "cache_creation": as_dict(usage_raw.get("cache_creation") or {}),
+        "thinking_blocks": {
+            "total": len(raw_thinking_blocks),
+            "with_text": sum(1 for block in raw_thinking_blocks if block.get("thinking")),
+        },
     }
     # The advisor sub-inference is billed at its OWN model's rate, tracked
     # separately from the executor's usage in usage.iterations (type:

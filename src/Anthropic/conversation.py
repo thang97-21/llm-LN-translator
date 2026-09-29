@@ -19,16 +19,22 @@ _THINKING_BLOCK_TYPES = ("thinking", "redacted_thinking")
 # The models that bind a thinking block's signature to the conversation
 # prefix that produced it, and reject a replay after that prefix changed.
 # Introduced with Claude Fable 5.1 (2026-09-01) and shared by its Project
-# Glasswing counterpart; claude-opus-5-5 (2026-09-22) enforces the same check,
-# by default for accounts created on or after 2026-08-31. claude-opus-5 and
-# claude-sonnet-5 accept an edited history without complaint, so they are
+# Glasswing counterpart; claude-opus-5-5 (2026-09-22) and claude-sonnet-5-5
+# (2026-09-28) enforce the same check, by default for accounts created on or
+# after 2026-08-31. claude-opus-5 and claude-sonnet-5 (the plaintext-advisor
+# executor, kept live alongside claude-sonnet-5-5 -- see client.py's
+# SUPPORTED_MODELS) accept an edited history without complaint, so they are
 # deliberately absent: nothing below alters their behaviour.
 #
-# Cross-model note (Opus 5.5 migration guide): Opus 5.5 reads thinking blocks
-# from Opus 5 / Sonnet models but not from Fable or Mythos. A volume switched
-# from claude-fable-5-1 to claude-opus-5-5 mid-run has the old blocks dropped
-# by the API before the model sees them -- the request succeeds, unbilled.
-PREFIX_BOUND_THINKING_MODELS = ("claude-fable-5-1", "claude-mythos-5-1", "claude-opus-5-5")
+# Cross-model note (Opus 5.5 / Sonnet 5.5 migration guides): Opus 5.5 reads
+# thinking blocks from Opus 5 / Sonnet models but not from Fable or Mythos.
+# Sonnet 5.5 reads blocks from Sonnet 5, Opus 4.8, Haiku 4.5, and earlier
+# models, but NOT from Opus 5, Opus 5.5, or any Fable/Mythos model. A volume
+# switched between families mid-run (e.g. claude-fable-5-1 to
+# claude-opus-5-5, or claude-opus-5-5 to claude-sonnet-5-5) has the old
+# blocks dropped by the API before the model sees them -- the request
+# succeeds, unbilled.
+PREFIX_BOUND_THINKING_MODELS = ("claude-fable-5-1", "claude-mythos-5-1", "claude-opus-5-5", "claude-sonnet-5-5")
 
 
 class AnthropicConversationManager:
@@ -41,8 +47,9 @@ class AnthropicConversationManager:
     — per Anthropic's "Preserving thinking blocks" contract.
 
     PRESERVED THINKING (claude-fable-5-1 / claude-mythos-5-1 /
-    claude-opus-5-5 ONLY — see PREFIX_BOUND_THINKING_MODELS). A Fable 5.1
-    (or Opus 5.5) thinking block's
+    claude-opus-5-5 / claude-sonnet-5-5 ONLY — see
+    PREFIX_BOUND_THINKING_MODELS). A Fable 5.1 (or Opus 5.5, or Sonnet 5.5)
+    thinking block's
     signature binds the conversation prefix that produced it: the top-level
     ``system`` prompt, the tool set, and every message ahead of the block.
     Replaying a block whose prefix has since changed is a 400 decided before
@@ -66,8 +73,8 @@ class AnthropicConversationManager:
     translation needs: the chapter's visible English is what carries
     continuity forward, and it is kept intact.
 
-    None of this applies to claude-opus-5 or claude-sonnet-5. They do not
-    enforce the conversation-prefix check, so their ledgers keep every
+    None of this applies to claude-opus-5 or claude-sonnet-5. Neither
+    enforces the conversation-prefix check, so their ledgers keep every
     thinking block across a compaction exactly as they did before this route
     moved to Fable 5.1. The gate is the model id, not the route.
     """

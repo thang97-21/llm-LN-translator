@@ -7,11 +7,14 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_AGENTS = ROOT / ".github" / "agents"
 SOURCE_ROOT_AGENT = ROOT / ".github" / "mirei-orchestrator.agent.md"
 SOURCE_SKILLS = ROOT / ".github" / "skills"
+EVALUATOR = "translation-evaluator"
+OBSOLETE = {"mtl-quality-evaluator", "qc-structural", "qc-names", "qc-linguistic", "qc-prose", "qc-prose-character", "qc-prose-narrator", "qc-prose-emotional-peak"}
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -104,8 +107,9 @@ def main() -> int:
     for root_name in (".agents/skills", ".claude/skills", ".grok/skills"):
         root = ROOT / root_name
         actual = {path.parent.name for path in root.glob("*/SKILL.md")}
-        if actual != expected_skills:
-            fail(f"{root_name}: expected {len(expected_skills)} root skills, got {len(actual)}", failures)
+        wanted = expected_skills if root_name != ".grok/skills" else expected_skills - {EVALUATOR}
+        if actual != wanted:
+            fail(f"{root_name}: expected {sorted(wanted)}, got {sorted(actual)}", failures)
         if any(path.name == "SKILL.md" and path.parent.name == "references" for path in root.rglob("SKILL.md")):
             fail(f"{root_name}: nested references/SKILL.md would be discovered as a skill", failures)
         for path in root.glob("*/SKILL.md"):
@@ -116,13 +120,58 @@ def main() -> int:
             if ".github/skills/" in text or ".github/agents/reference/" in text:
                 fail(f"{path}: stale source path", failures)
 
+    authoritative = ROOT / ".agents" / "skills" / EVALUATOR
+    claude_entry = ROOT / ".claude" / "skills" / EVALUATOR / "SKILL.md"
+    vscode_entry = SOURCE_SKILLS / EVALUATOR / "SKILL.md"
+    for entry in (authoritative / "SKILL.md", claude_entry, vscode_entry):
+        if not entry.is_file():
+            fail(f"missing evaluator entrypoint: {entry}", failures)
+            continue
+        fields, body = split_frontmatter(entry.read_text(encoding="utf-8"))
+        if frontmatter_value(fields.get("name", "")) != EVALUATOR or not fields.get("description"):
+            fail(f"{entry}: invalid evaluator frontmatter", failures)
+        if any(key in fields for key in ("model", "agents", "thinkingBudget")):
+            fail(f"{entry}: model/delegation pinned in frontmatter", failures)
+        if entry != authoritative / "SKILL.md" and "../../../.agents/skills/translation-evaluator/SKILL.md" not in body:
+            fail(f"{entry}: does not load authoritative skill", failures)
+    optional_samples = authoritative / "references" / "golden-samples"
+    optional_corpus = authoritative / "references" / "Seven_Seas_REPO"
+    evaluator_docs = [authoritative / "SKILL.md", claude_entry, vscode_entry, *sorted((authoritative / "references").glob("*.md"))]
+    for doc in evaluator_docs:
+        if not doc.is_file():
+            continue
+        for link in re.findall(r"\]\(([^)]+)\)", doc.read_text(encoding="utf-8")):
+            target = unquote(link.split("#", 1)[0].strip().strip("<>"))
+            if not target or re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I):
+                continue
+            resolved = (doc.parent / target).resolve()
+            if not resolved.exists() and not (resolved.is_relative_to(optional_samples.resolve()) or resolved.is_relative_to(optional_corpus.resolve())):
+                fail(f"{doc}: broken relative link {target}", failures)
+    index = optional_samples / "golden-samples-index.md"
+    if not index.is_file():
+        fail(f"missing shared golden-sample index: {index}", failures)
+    elif any(path.name != index.name for path in optional_samples.glob("*.md")) and not all((index.parent / target).is_file() for target in re.findall(r"\]\(([^)#]+\.md)\)", index.read_text(encoding="utf-8"))):
+        fail(f"{index}: broken sample link", failures)
+    if optional_corpus.is_dir() and not any(optional_corpus.iterdir()):
+        fail(f"empty optional raw corpus: {optional_corpus}", failures)
+    for root in (ROOT / ".claude" / "skills", ROOT / ".grok" / "skills"):
+        if any(root.rglob("Seven_Seas_REPO")):
+            fail(f"duplicate raw corpus under {root}", failures)
+    for root in (ROOT / ".agents", ROOT / ".claude", ROOT / ".codex", ROOT / ".grok"):
+        for name in OBSOLETE:
+            if any(root.rglob(f"{name}.md")) or any(root.rglob(f"{name}.toml")) or any(root.rglob(f"{name}/SKILL.md")):
+                fail(f"{root}: obsolete evaluator asset {name}", failures)
+    for root in (ROOT / ".agents" / "agent-reference", ROOT / ".claude" / "agents" / "reference", ROOT / ".grok" / "agents" / "reference", ROOT / ".codex" / "agent-reference"):
+        if root.exists():
+            fail(f"duplicate agent reference tree: {root}", failures)
+
+    # Host-level agent enablement is a user setting, not an asset invariant.
     config = ROOT / ".codex" / "config.toml"
-    try:
-        agents_config = tomllib.loads(config.read_text(encoding="utf-8")).get("agents", {})
-        if agents_config.get("enabled") is not True:
-            fail(".codex/config.toml: agents.enabled is not true", failures)
-    except (FileNotFoundError, tomllib.TOMLDecodeError) as exc:
-        fail(f".codex/config.toml: invalid or missing: {exc}", failures)
+    if config.exists():
+        try:
+            tomllib.loads(config.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError as exc:
+            fail(f".codex/config.toml: invalid TOML: {exc}", failures)
 
     if failures:
         print(json.dumps({"status": "failed", "failures": failures}, indent=2))

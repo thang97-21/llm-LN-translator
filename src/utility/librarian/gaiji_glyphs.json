@@ -1,0 +1,13 @@
+{
+  "_comment": "Known gaiji glyph images keyed by SHA-256 of the image bytes. Filenames like gaiji-0001.png are renumbered per book, so the bytes are the only stable key. Add an entry whenever the Librarian logs an unresolved gaiji; the warning prints the exact line to paste.",
+  "by_sha256": {
+    "b9cd6f62c52ebb4ec0744e44a06fd79c857d21e5a29566149a6f10bf49efbc79": {
+      "glyph": "芦",
+      "source": "KADOKAWA, オタクに堕ちないギャルなんていない！ vol 1 (29917f) gaiji-0001.png — 芦田 surname"
+    },
+    "2735c68a7991c804d91727ce9ded75674930b3f0bccd84349e539c46e0dfd548": {
+      "glyph": "№",
+      "source": "KADOKAWA, オタクに堕ちないギャルなんていない！ vol 1 (29917f) gaiji-0002.png — 業界№１"
+    }
+  }
+}

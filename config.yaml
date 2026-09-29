@@ -511,11 +511,11 @@ translation:
     # ── Post-Processing ─────────────────────────────────────────────────────
     post_processing:
       # Format scene breaks (＊  ＊  ＊ → centered asterism, etc.).
-      scene_break_formatting: true
+      scene_break_formatting: false
 
       # Strip CJK artifact characters that leak into EN output (fullwidth
       # parentheses, CJK punctuation, ideographic spaces).
-      cjk_cleanup: true
+      cjk_cleanup: false
 
       # Salvage chapters accidentally emitted into reasoning_content
       # instead of content (known DeepSeek API edge case).
@@ -705,7 +705,7 @@ translation:
       # Keep the standard model mode unless an operator explicitly selects
       # pro. Effort is independent and defaults to the maximum literary pass.
       mode: standard                 # standard | pro
-      effort: high                    # none | minimal | low | medium | high | xhigh | max
+      effort: max                    # none | minimal | low | medium | high | xhigh | max
       context: all_turns             # auto | current_turn | all_turns
       include_encrypted_content: true
 
@@ -797,12 +797,13 @@ translation:
   # (not an Anthropic-compatible passthrough the way DeepSeek/Qwen do).
   #
   # Scoped, deliberately, to the current Claude-5 family that shares one
-  # capability profile end to end: claude-opus-5-5 (default), claude-sonnet-5,
-  # claude-opus-5, claude-fable-5-1 — all four adaptive-thinking-only, 1M context, 128K max
-  # output, and a hard 400 on any non-default temperature/top_p/top_k
-  # regardless of thinking state. Claude Haiku 4.5 (the one current-family
-  # model still on manual budget_tokens thinking, 200K context, 64K output)
-  # is out of scope for this route by design, not omission.
+  # capability profile end to end: claude-opus-5-5 (default), claude-sonnet-5-5,
+  # claude-sonnet-5, claude-opus-5, claude-fable-5-1 — all five adaptive-thinking-only,
+  # 1M context, 128K max output, and a hard 400 on any non-default
+  # temperature/top_p/top_k regardless of thinking state. Claude Haiku 4.5
+  # (the one current-family model still on manual budget_tokens thinking,
+  # 200K context, 64K output) is out of scope for this route by design, not
+  # omission.
   #
   # claude-fable-5 was retired here on 2026-09-03 for claude-fable-5-1
   # (released 2026-09-01): same input/output price, same tokenizer, and cache
@@ -810,30 +811,48 @@ translation:
   # NOT the family's usual 10%-of-input multiplier, so the telemetry table
   # states it per-model rather than deriving it.
   #
-  # Fable 5.1 and Opus 5.5 add "preserved thinking": a thinking block's signature
-  # binds the system prompt and every message ahead of it, so replaying one
-  # after that prefix changed is a 400 before any output. The conversation
-  # ledger handles this by stripping thinking from retained turns at each
-  # compaction boundary — gated on the model id, so claude-opus-5 and
-  # claude-sonnet-5 keep every block exactly as they did before.
+  # Fable 5.1, Opus 5.5, and Sonnet 5.5 add "preserved thinking": a thinking
+  # block's signature binds the system prompt and every message ahead of it,
+  # so replaying one after that prefix changed is a 400 before any output.
+  # The conversation ledger handles this by stripping thinking from retained
+  # turns at each compaction boundary — gated on the model id, so
+  # claude-opus-5 and claude-sonnet-5 keep every block exactly as they did
+  # before.
   #
   # claude-opus-5-5 (released 2026-09-22, default here since 2026-09-23):
   # $4/$20 per MTok, cache reads $0.20 (0.05x input), batch $2/$10. Thinking
   # cannot be disabled at any effort, and its default effort is "medium", not
   # "high" — so thinking.effort below is always sent explicitly. Source:
   # platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5
+  #
+  # claude-sonnet-5-5 (released 2026-09-28, added here 2026-09-29 ALONGSIDE
+  # claude-sonnet-5, not in place of it): same $2/$10 per MTok and tokenizer
+  # as claude-sonnet-5. Thinking still turns off, but "disabled" itself is
+  # now a 400 — the replacement is thinking:{type:"between_tools"}, which
+  # only accepts effort low/medium/high (xhigh/max 400s). Its Advisor Mode
+  # compatibility is narrower than claude-sonnet-5's AND mandatorily
+  # encrypted regardless of advisor chosen — the plaintext advisor route
+  # (claude-opus-4-8 or claude-sonnet-5 as advisor) only works against the
+  # claude-sonnet-5 executor. Source: platform.claude.com/docs/en/models/
+  # sonnet-5-5/migration-guide (fetched 2026-09-29)
   # ════════════════════════════════════════════════════════════════════════
   anthropic:
     # Wire id, not the display name: Anthropic model ids never contain a dot.
     # "claude-fable-5.1" is a hard 404 at request time; the client normalises
     # it, but write the real id here.
     # claude-opus-5-5 is the default. Anthropic's advisor-tool compatibility
-    # table documents NO advisor for it (checked 2026-09-23), so Proofreading
-    # Mode is off below and client.py fails fast if it is re-enabled against
-    # this executor. To run Proofreading Mode, switch to claude-sonnet-5 --
-    # the executor Runs 1-11 validated the advisor against -- and set
-    # advisor.enabled: true.
-    model: claude-opus-5-5      # claude-opus-5-5 | claude-sonnet-5 | claude-opus-5 | claude-fable-5-1
+    # table still documents no advisor for it (checked 2026-09-23), but the
+    # Opus 5.5 -> Opus 5.5 pairing was confirmed working by live use on
+    # 2026-09-24, so client.py admits exactly that pairing (and no other
+    # advisor) for this executor. claude-sonnet-5-5 (added 2026-09-29
+    # ALONGSIDE claude-sonnet-5, not in place of it) is the executor this
+    # route runs by default here, but its Advisor Mode compatibility is
+    # narrower and mandatorily encrypted -- see ADVISOR_COMPATIBILITY in
+    # client.py. If you want the plaintext advisor route Runs 1-11 validated
+    # (claude-opus-4-8 or claude-sonnet-5 as advisor, readable
+    # advisor_result), set this to claude-sonnet-5 instead: that executor is
+    # still fully supported and untouched by the sonnet-5-5 migration.
+    model: claude-sonnet-5-5      # claude-opus-5-5 | claude-sonnet-5-5 | claude-sonnet-5 | claude-opus-5 | claude-fable-5-1
     endpoint: https://api.anthropic.com
     api_key_env: ANTHROPIC_API_KEY
     anthropic_version: "2023-06-01"
@@ -856,6 +875,12 @@ translation:
       # thinking:{type:"disabled"} outright (and budget_tokens likewise) —
       # thinking is always on and the client keeps it on for those models
       # even if this is set to false. Lower effort instead.
+      #
+      # claude-sonnet-5-5 is different: setting this false does turn thinking
+      # off, but the client sends thinking:{type:"between_tools"} instead of
+      # "disabled" ("disabled" is itself a 400 on this model) -- and that
+      # only works at effort high or below. See BETWEEN_TOOLS_ONLY_MODELS in
+      # client.py if you ever set this false with effort: xhigh or max.
       enabled: true
 
       # "summarized" returns readable thinking text (billed the same either
@@ -871,7 +896,7 @@ translation:
       # Opus 5's "high" over: at a given level Opus 5.5 thinks more per turn.
       # PROVISIONAL until the low/medium/high sweep on this route's own
       # chapters settles it. Advisor mode requires "high" (client.py).
-      effort: medium                   # max | xhigh | high | medium | low
+      effort: high                   # max | xhigh | high | medium | low
 
     # ── Prompt Caching ───────────────────────────────────────────────────────
     caching:
@@ -989,24 +1014,38 @@ translation:
     # drift, locked-anchor collisions, register calls) in a single consult —
     # not two separate advisor pairings.
     advisor:
-      enabled: false            # OFF: the default executor (claude-opus-5-5)
-                                  # has no row in Anthropic's advisor
-                                  # compatibility table. Re-enable only with a
-                                  # claude-sonnet-5 executor (validated in Runs
-                                  # 1-11), or once Anthropic documents a pairing.
+      enabled: true            # ON for the claude-opus-5-5 executor with a
+                                  # claude-opus-5-5 advisor -- a pairing confirmed
+                                  # by live use (2026-09-24), not by Anthropic's
+                                  # compatibility table. First test volume: 3e35fe.
       # The advisor model. Must be on Anthropic's executor/advisor
       # compatibility table for whichever `model` above is configured (see
       # ADVISOR_COMPATIBILITY in client.py) -- fails fast at startup if not.
       #   claude-opus-4-8  -- plaintext advisor_result (readable), validated
-      #                       in Runs 8-11. Requires executor claude-sonnet-5.
-      #   claude-sonnet-5  -- same-tier peer; valid with claude-sonnet-5 executor.
-      #   claude-opus-5    -- encrypted advisor_redacted_result.
+      #                       in Runs 8-11. Requires executor claude-sonnet-5
+      #                       (still fully supported, kept for exactly this).
+      #                       claude-sonnet-5-5's migration guide (fetched
+      #                       2026-09-29) explicitly 400s an Opus 4.8 advisor
+      #                       -- so this pairing works ONLY against the
+      #                       claude-sonnet-5 executor, not the -5-5 one.
+      #   claude-sonnet-5  -- same-tier peer; valid with claude-sonnet-5
+      #                       executor (self-pairing, plaintext). NOT valid
+      #                       as an advisor against claude-sonnet-5-5.
+      #   claude-opus-5    -- encrypted advisor_redacted_result; valid for
+      #                       every executor this route supports.
       #   claude-fable-5-1 -- encrypted; Anthropic's own pick for maximizing
       #                       quality lift on a Sonnet executor; valid against
       #                       every documented executor this route supports.
-      #   claude-opus-5-5  -- NOT listed in the table as an advisor; rejected.
-      model: claude-sonnet-5
-      max_tokens: 24000          # validated in Run 8
+      #   claude-opus-5-5  -- not in Anthropic's table; admitted ONLY for a
+      #                       claude-opus-5-5 executor (live-confirmed 2026-09-24),
+      #                       and ALSO valid for a claude-sonnet-5-5 executor
+      #                       per that model's own migration guide.
+      # On a claude-sonnet-5-5 executor specifically, advice comes back
+      # encrypted no matter which of these is chosen -- that executor forces
+      # advisor_redacted_result unconditionally (see ADVISOR_COMPATIBILITY's
+      # comment in client.py).
+      model: claude-opus-5-5
+      max_tokens: 5900          # validated in Run 8
       max_uses: 2                # per-request cap (the tool has no per-conversation cap)
       max_pause_resumes: 2       # resend budget for stop_reason: pause_turn
       require_signal: true       # wire the tool in only for a chapter carrying
@@ -1074,8 +1113,16 @@ translation:
       #   missing    -- a locked anchor the source carried is absent from the English
       #   drifted    -- a forbidden synonym was used and the locked surface is absent
       #   structural -- illustration-plate parity between JP and EN broke
-      # Set to [] to record findings without ever blocking.
-      block_on: [missing, drifted, structural]
+      # missing/drifted are deliberately OUT: a single dropped anchor phrase
+      # among dozens is not worth burning the whole chapter's cache-warmed
+      # advisor consult and re-translating from scratch (volume 25-9's
+      # CHAPTER_02/05/07 all held back for exactly one non-critical anchor
+      # miss each). They are still recorded -- every anchor finding regardless
+      # of blocking status is written to QC/anchor_warnings.md for the QC
+      # pass to weigh -- just no longer fatal on their own. structural stays
+      # blocking: a dropped illustration plate is real content loss, not a
+      # phrasing call. Set to [] to record findings without ever blocking.
+      block_on: [structural]
       # Advisory-only sentinel (never blocks): how far a chapter's
       # JP-chars-per-EN-word may stray from the volume's own median before it
       # is logged as worth a look. Loose on purpose -- translation density
@@ -1297,87 +1344,15 @@ mcp_harness:
       harness_managed: true   # DeepSeekClient owns its config (translation.deepseek)
 
     qc:
-      enabled: true            # Agent-managed — see top-level §qc for model config
+      enabled: true            # Agent-managed; evaluator model comes from the host
 
     bible_writer:
       enabled: true            # Filesystem-only, no LLM call
 
 # ── QC Gate Configuration ───────────────────────────────────────────────────
-# Model, thinking, and token parameters for the QC agent family.
-# Pro uses max reasoning for semantic literary analysis (voice differentiation,
-# emotional fidelity, SSP calibration, exemplar generation). Flash is reserved
-# for lightweight pre-flight checks only — never literary evaluation.
-#
-# Per-agent thinking budgets are in each agent's YAML frontmatter
-# (thinkingBudget: 36000 for prose sub-agents). This section defines the
-# ceiling and the model routing. The frontmatter budget cannot exceed
-# the max_output_tokens defined here.
+# Translation-evaluator skill uses the active Codex or Claude host model.
+# This block only locates optional calibration material; it never routes
+# evaluator calls to a translation provider.
 qc:
-  # ── Model Selection ──────────────────────────────────────────────────────
-  # Primary model for all semantic QC analysis. Pro tier is mandatory for
-  # literary evaluation — Flash cannot perform the structured comparison
-  # and forensic reasoning required by the §E.4 exemplar chain.
-  model: deepseek-v4-pro
-
-  # Lightweight model for pre-flight structural checks only.
-  # qc-structural uses this when invoked standalone (Mode A).
-  # Never used for prose, names, or linguistic analysis.
-  flash_model: deepseek-v4-flash
-
-  # ── Endpoint ──────────────────────────────────────────────────────────────
-  endpoint: https://api.deepseek.com/anthropic
-  api_key_env: DEEPSEEK_API_KEY
-  http_timeout_seconds: 900             # 15 minutes for worst-case volume scan
-
-  # ── Context & Output Ceilings ────────────────────────────────────────────
-  # Maxed at DeepSeek V4 Pro's documented limits. The full 1M context is
-  # needed to hold agent instructions + context.xml + all EN/JP chapters +
-  # golden samples simultaneously. 384K output ensures room for the full
-  # locked-format audit with 9+ exemplars.
-  context_window: 1000000
-  max_output_tokens: 384000
-
-  # ── Thinking / Reasoning ──────────────────────────────────────────────────
-  thinking:
-    enabled: true
-    # Pro ceiling. The YAML frontmatter per-agent thinkingBudget (currently
-    # 36000 for prose sub-agents) must not exceed this value. Orchestrator
-    # agents (mtl-qc, qc-prose) use a lower budget since they aggregate
-    # rather than analyze — defined in their respective frontmatter.
-    budget_tokens: 64000                # PRO ceiling — per-agent budgets ≤ this
-    effort: xhigh                       # max | high | medium | low
-
-  # ── Agent-Specific Budget Overrides ───────────────────────────────────────
-  # These override the per-agent YAML frontmatter thinkingBudget when the
-  # agent is invoked through the MCP harness. Frontmatter values are
-  # authoritative when agents run as VS Code sub-agents.
-  agent_budgets:
-    # Orchestrators — aggregation, not analysis
-    mtl-qc: 16000                       # mode detection + dispatch + gate decision
-    qc-prose: 16000                     # provenance detection + sub-agent aggregation
-
-    # Tier 1 — mechanical/pattern checks (lower reasoning demand)
-    qc-structural: 8000                 # file integrity, headings, encoding
-    qc-names: 12000                     # name drift, honorifics, term locks
-    qc-linguistic: 16000                # CJK residue, calques, grammar, W4W errors
-
-    # Tier 2 — semantic literary analysis (highest reasoning demand)
-    qc-prose-character: 36000           # voice distinctiveness, contamination, archetypes
-    qc-prose-narrator: 36000            # sentence variety, repetition, filter words, POV
-    qc-prose-emotional-peak: 36000      # emotional fidelity, subtext, SSP beat comparison
-
-  # ── SSP Golden Sample Routing ─────────────────────────────────────────────
   golden_samples:
-    # Directory containing extracted SSP calibration passages.
-    # Indexed by golden-samples-index.md with LCI dimension mapping.
-    registry_dir: .github/agents/reference/
-
-    # Auto-detect Mode B-Deep when golden samples exist for the volume's
-    # series. When true, any QC invocation against a volume with matching
-    # golden samples automatically runs the full literary craft scan.
-    auto_deep_scan: true
-
-    # Load all matching series samples, not just the primary match.
-    # Required for §E.0 Register Provenance — composite calibration
-    # needs cross-series comparison data.
-    load_all_matching: true
+    registry_dir: .agents/skills/translation-evaluator/references/golden-samples/

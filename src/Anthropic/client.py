@@ -2,18 +2,47 @@
 
 Scoped, per the operator's explicit choice, to the current Claude-5 family
 that shares one capability profile end to end: claude-opus-5-5 (the route's
-default since 2026-09-23), claude-sonnet-5, claude-opus-5, claude-fable-5-1.
-All four use adaptive thinking only (no budget_tokens manual mode), share a
-1M-token context window and 128K max output, and reject non-default
-temperature/top_p/top_k with a hard 400 regardless of thinking state. Claude
-Haiku 4.5 — the one current-family model still on manual extended thinking —
-is deliberately out of scope for this route.
+default since 2026-09-23), claude-sonnet-5-5, claude-opus-5, claude-fable-5-1
+-- plus claude-sonnet-5, kept online DELIBERATELY, not as a leftover. Unlike
+claude-fable-5 below, claude-sonnet-5 is not being retired: it is the only
+executor this route can still pair with a PLAINTEXT advisor
+(claude-opus-4-8 or claude-sonnet-5 itself as the advisor model, validated in
+Runs 8-11 -- see ADVISOR_COMPATIBILITY). All five use adaptive thinking only
+(no budget_tokens manual mode), share a 1M-token context window and 128K max
+output, and reject non-default temperature/top_p/top_k with a hard 400
+regardless of thinking state. Claude Haiku 4.5 — the one current-family model
+still on manual extended thinking — is deliberately out of scope for this
+route.
 
 claude-opus-5-5 (released 2026-09-22) shares Fable 5.1's two constraints that
 matter here: thinking cannot be disabled at any effort level, and its thinking
 blocks bind the conversation prefix. It also defaults to effort "medium" rather
 than "high", so the route always sends effort explicitly. Sources:
 platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5.
+
+claude-sonnet-5-5 (released 2026-09-28) became this route's default
+sonnet-tier executor on 2026-09-29, keeping sonnet-5's exact price and
+tokenizer -- but it is an ADDITION alongside claude-sonnet-5, not a
+replacement of it: set config.yaml's `model` to claude-sonnet-5 to keep
+running the validated plaintext-advisor route, or claude-sonnet-5-5 for the
+new default. The two executors are NOT interchangeable for Advisor Mode --
+claude-sonnet-5-5's own migration guide states outright that its advice comes
+back encrypted (advisor_redacted_result) no matter which advisor is chosen,
+and that Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, and Sonnet 4.6 advisors
+return a 400 against it. See the two separate rows in ADVISOR_COMPATIBILITY.
+
+Unlike opus-5-5/fable-5-1, claude-sonnet-5-5 is NOT unconditionally
+always-thinking: thinking still turns off, but the request shape changed --
+`thinking:{type:"disabled"}` is now a 400 ("Use thinking.type.between_tools
+for the lowest thinking setting"), and the replacement, `between_tools`, only
+works at effort high or below (a 400 at xhigh/max) and rejects `display`,
+`budget_tokens`, or `block_binding` alongside it. See BETWEEN_TOOLS_ONLY_MODELS
+below and its use in generate(). claude-sonnet-5-5 also gains fable-5-1/
+opus-5-5's "preserved thinking" conversation-prefix binding, which plain
+claude-sonnet-5 does NOT have -- see
+conversation.py::PREFIX_BOUND_THINKING_MODELS. Source:
+platform.claude.com/docs/en/models/sonnet-5-5/migration-guide (fetched
+2026-09-29).
 
 claude-fable-5 was retired from this route on 2026-09-03 in favour of
 claude-fable-5-1 (released 2026-09-01), which carries the same input/output
@@ -40,8 +69,13 @@ from src.Deepseek.common.llm_types import LLMApiFamily, LLMResponse, LLMUsage
 
 logger = logging.getLogger(__name__)
 
-# The only models this route is built and verified against.
-SUPPORTED_MODELS = ("claude-opus-5-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1")
+# The only models this route is built and verified against. claude-sonnet-5
+# stays here deliberately alongside claude-sonnet-5-5 -- it is the sole
+# executor the plaintext Advisor Mode route (claude-opus-4-8 / claude-sonnet-5
+# as advisor) still works against, per ADVISOR_COMPATIBILITY below.
+SUPPORTED_MODELS = (
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1"
+)
 
 # These models reject `thinking: {type: "disabled"}` outright — thinking is
 # always on and cannot be turned off at all (`budget_tokens` is likewise a
@@ -49,7 +83,21 @@ SUPPORTED_MODELS = ("claude-opus-5-5", "claude-sonnet-5", "claude-opus-5", "clau
 # claude-opus-5, which accepts "disabled" at effort high or below. The client
 # never attempts to disable thinking for these models regardless of
 # translation.anthropic.thinking.enabled; effort is the only control.
+#
+# claude-sonnet-5-5 is deliberately NOT here: it can turn thinking off, just
+# not via "disabled" -- see BETWEEN_TOOLS_ONLY_MODELS below.
 THINKING_ALWAYS_ON_MODELS = ("claude-fable-5-1", "claude-opus-5-5")
+
+# claude-sonnet-5-5's equivalent of "disabled" is `thinking: {type:
+# "between_tools"}` -- sending "disabled" itself is a 400 on this model.
+# between_tools only works at effort low/medium/high; xhigh/max is a 400
+# (use adaptive thinking instead, i.e. leave thinking.enabled: true). It also
+# rejects `display`, `budget_tokens`, or `block_binding` sent alongside it, so
+# generate() sends `{"type": "between_tools"}` bare, with effort still living
+# in the sibling output_config field. Source: platform.claude.com/docs/en/
+# models/sonnet-5-5/migration-guide -> "Turn off up-front thinking" (fetched
+# 2026-09-29).
+BETWEEN_TOOLS_ONLY_MODELS = ("claude-sonnet-5-5",)
 
 # Display spelling -> wire id. Anthropic model ids never contain a dot: the
 # marketing name is "Claude Fable 5.1", the request body takes
@@ -60,7 +108,11 @@ THINKING_ALWAYS_ON_MODELS = ("claude-fable-5-1", "claude-opus-5-5")
 MODEL_ID_ALIASES = {
     "claude-fable-5.1": "claude-fable-5-1",
     "claude-fable-5": "claude-fable-5-1",
+    # claude-sonnet-5 is NOT aliased forward -- it is a live, supported
+    # executor (SUPPORTED_MODELS above), kept for the plaintext advisor
+    # route, not a retired id. Only the dotted/typo spellings normalise.
     "claude-sonnet-5.0": "claude-sonnet-5",
+    "claude-sonnet-5.5": "claude-sonnet-5-5",
     "claude-opus-5.0": "claude-opus-5",
     "claude-opus-5.5": "claude-opus-5-5",
 }
@@ -77,23 +129,55 @@ def normalize_model_id(model: str) -> str:
 # advisor-tool documentation's Model compatibility table (fetched 2026-09-13),
 # not inferred: "the advisor must be Claude Sonnet 4.6 or a more capable model,
 # and it must be at least as capable as the executor." claude-fable-5-1 is the
-# most restrictive row -- only Fable 5.1 / Mythos 5.1 may advise it -- which is
-# why claude-opus-4-8 (the plaintext-readable default validated in Runs 8-11)
-# requires a claude-sonnet-5 executor, not claude-opus-5.
+# most restrictive row -- only Fable 5.1 / Mythos 5.1 may advise it.
 #
-# claude-opus-5-5 is deliberately ABSENT, in both directions: re-checked
-# 2026-09-23, the compatibility table carries no row for it as executor and
-# never lists it as an advisor. An undocumented pairing is not assumed valid
-# because a sibling's is -- Proofreading Mode stays off on an Opus 5.5
-# executor until Anthropic's table says otherwise.
+# claude-opus-5-5 is the one row NOT sourced from Anthropic's table (which,
+# re-checked 2026-09-23, still carries no row for it). The Opus 5.5 advisor
+# was confirmed working against an Opus 5.5 executor by live use on
+# 2026-09-24, so exactly that pairing is admitted -- and nothing wider. Other
+# advisors for this executor stay rejected until the table or a live test
+# vouches for them; a sibling row is not evidence.
+#
+# TWO SEPARATE ROWS FOR TWO SEPARATE EXECUTORS -- do not merge them. Both
+# claude-sonnet-5 and claude-sonnet-5-5 are live, supported executors
+# (SUPPORTED_MODELS above), and their advisor rules do not agree with each
+# other:
+#
+#   "claude-sonnet-5" (unchanged since 2026-09-13) -- the PLAINTEXT route.
+#   claude-opus-4-8 (the plaintext-readable default validated in Runs 8-11)
+#   and claude-sonnet-5 itself (self-pairing) both work here and return the
+#   readable advisor_result variant. This is the only executor in this table
+#   where that is true.
+#
+#   "claude-sonnet-5-5" (added 2026-09-29, sourced from ITS OWN migration
+#   guide, fetched that date) -- names exactly these seven, and states
+#   plainly that Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, and Sonnet 4.6
+#   advisors now return a 400 AGAINST THIS EXECUTOR. Opus 4.8 and
+#   claude-sonnet-5 remain perfectly valid -- just not here, and not as
+#   advisors to this one. On top of that, the guide states this executor's
+#   advice "comes back encrypted as an advisor_redacted_result block"
+#   unconditionally: unlike every other row in this table (including
+#   claude-sonnet-5's), plaintext-vs-encrypted is NOT a property of the
+#   advisor chosen here -- the executor itself forces encryption regardless
+#   of which of these seven is picked. build_advisor_tool doesn't need to
+#   change for this (the request shape is identical either way); it only
+#   changes what agent.py::_advisor_consult_texts will ever find in the
+#   response for THIS executor specifically.
 ADVISOR_COMPATIBILITY: Dict[str, tuple] = {
+    "claude-opus-5-5": (
+        "claude-opus-5-5", "claude-mythos-5-1", "claude-fable-5-1"
+    ),
+    "claude-sonnet-5-5": (
+        "claude-opus-5", "claude-opus-5-5", "claude-sonnet-5-5",
+        "claude-fable-5", "claude-fable-5-1", "claude-mythos-5", "claude-mythos-5-1",
+    ),
     "claude-sonnet-5": (
         "claude-mythos-5-1", "claude-fable-5-1", "claude-mythos-5", "claude-fable-5",
-        "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5",
+        "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5", "claude-opus-5-5"
     ),
     "claude-opus-5": (
         "claude-mythos-5-1", "claude-fable-5-1", "claude-mythos-5", "claude-fable-5",
-        "claude-opus-5",
+        "claude-opus-5","claude-opus-5-5"
     ),
     "claude-fable-5-1": (
         "claude-mythos-5-1", "claude-fable-5-1",
@@ -308,6 +392,25 @@ class AnthropicClient:
                 "display": str(thinking_cfg.get("display", "summarized") or "summarized"),
             }
             request["output_config"] = {"effort": str(thinking_cfg.get("effort", "high") or "high")}
+        elif self.model in BETWEEN_TOOLS_ONLY_MODELS:
+            # thinking.enabled: false on this model doesn't mean "disabled" --
+            # that request shape is itself a 400 here. between_tools is the
+            # lowest thinking setting this model accepts, and it only works at
+            # effort high or below (xhigh/max is a 400); it also rejects
+            # `display` sent alongside it, so this branch omits that field
+            # entirely rather than reusing the display default above.
+            effort = str(thinking_cfg.get("effort", "high") or "high")
+            if effort in ("xhigh", "max"):
+                raise ValueError(
+                    f"{self.model} rejects thinking.type=between_tools at "
+                    f"output_config.effort={effort!r} (400 at the wire). "
+                    "between_tools only accepts low/medium/high. Either raise "
+                    "translation.anthropic.thinking.enabled to true (adaptive "
+                    "thinking, which does support xhigh/max), or lower "
+                    "thinking.effort to high or below."
+                )
+            request["thinking"] = {"type": "between_tools"}
+            request["output_config"] = {"effort": effort}
         else:
             request["thinking"] = {"type": "disabled"}
 

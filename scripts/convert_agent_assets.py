@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_AGENTS = ROOT / ".github" / "agents"
 SOURCE_ROOT_AGENT = ROOT / ".github" / "mirei-orchestrator.agent.md"
 SOURCE_SKILLS = ROOT / ".github" / "skills"
+EVALUATOR_AGENTS = {"qc-structural", "qc-names", "qc-linguistic", "qc-prose", "qc-prose-character", "qc-prose-narrator", "qc-prose-emotional-peak"}
+SHARED_EVALUATOR = ROOT / ".agents" / "skills" / "translation-evaluator"
 
 AGENT_TARGETS = {
     "claude": ROOT / ".claude" / "agents",
@@ -80,7 +82,7 @@ def parse_list(value: str) -> list[str]:
 
 
 def source_agents() -> list[Path]:
-    files = sorted(SOURCE_AGENTS.rglob("*.agent.md"))
+    files = sorted(path for path in SOURCE_AGENTS.rglob("*.agent.md") if agent_name(path) not in EVALUATOR_AGENTS)
     if SOURCE_ROOT_AGENT.exists():
         files.append(SOURCE_ROOT_AGENT)
     return files
@@ -109,7 +111,7 @@ def portable_body(body: str, target: str, fields: dict[str, str]) -> str:
         "codex": ".codex/agent-reference",
     }[target]
     body = body.replace(".github/skills/", f"{skill_root}/")
-    body = body.replace(".github/agents/reference/", f"{reference_root}/")
+    body = body.replace(".github/agents/reference/", ".agents/skills/translation-evaluator/references/golden-samples/")
     body = body.replace(".github/agents/", f"{reference_root.rsplit('/', 1)[0]}/")
 
     source_tools = parse_list(fields.get("tools", ""))
@@ -203,10 +205,18 @@ def codex_agent(path: Path, fields: dict[str, str], body: str) -> str:
     )
 
 
+def remove_generated_tree(target: Path) -> None:
+    resolved_root = ROOT.resolve()
+    resolved_target = target.resolve()
+    if resolved_target == resolved_root or not resolved_target.is_relative_to(resolved_root):
+        raise ValueError(f"Refusing to remove path outside workspace: {resolved_target}")
+    shutil.rmtree(resolved_target)
+
+
 def copy_tree(source: Path, target: Path, replacements: dict[str, str]) -> int:
     count = 0
     if target.exists():
-        shutil.rmtree(target)
+        remove_generated_tree(target)
     for item in source.rglob("*"):
         relative = item.relative_to(source)
         if item.is_file() and item.name == "SKILL.md" and relative.parent.name == "references":
@@ -236,7 +246,14 @@ def main() -> None:
     for target in SKILL_TARGETS.values():
         target.mkdir(parents=True, exist_ok=True)
 
+    if not (SHARED_EVALUATOR / "SKILL.md").is_file():
+        raise SystemExit("Shared translation-evaluator skill is missing")
     agents = source_agents()
+    # Obsolete evaluator stubs must not survive a regeneration.
+    for root in AGENT_TARGETS.values():
+        for name in EVALUATOR_AGENTS:
+            for suffix in (".md", ".toml"):
+                (root / f"{name}{suffix}").unlink(missing_ok=True)
     for path in agents:
         fields, body = split_frontmatter(path.read_text(encoding="utf-8"))
         name = agent_name(path)
@@ -255,40 +272,31 @@ def main() -> None:
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(rendered, encoding="utf-8", newline="\n")
 
-    replacements = {
-        ".github/skills/": ".agents/skills/",
-        ".github/agents/reference/": ".agents/agent-reference/",
-    }
-    skill_files = copy_tree(SOURCE_SKILLS, SKILL_TARGETS["portable"], replacements)
-    copy_tree(
-        SOURCE_SKILLS,
-        SKILL_TARGETS["claude"],
-        {".github/skills/": ".claude/skills/", ".github/agents/reference/": ".claude/agents/reference/"},
-    )
-    copy_tree(
-        SOURCE_SKILLS,
-        SKILL_TARGETS["grok"],
-        {".github/skills/": ".grok/skills/", ".github/agents/reference/": ".grok/agents/reference/"},
-    )
-
-    for target_name, reference_root in {
-        "claude": ROOT / ".claude" / "agents" / "reference",
-        "grok": ROOT / ".grok" / "agents" / "reference",
-        "codex": ROOT / ".codex" / "agent-reference",
-        "portable": ROOT / ".agents" / "agent-reference",
-    }.items():
-        copy_tree(
-            SOURCE_AGENTS / "reference",
-            reference_root,
-            {
-                ".github/skills/": {
-                    "claude": ".claude/skills/",
-                    "grok": ".grok/skills/",
-                    "codex": ".agents/skills/",
-                    "portable": ".agents/skills/",
-                }[target_name],
-            },
-        )
+    skill_files = 0
+    for source in sorted(SOURCE_SKILLS.iterdir()):
+        if not source.is_dir() or source.name in {"mtl-quality-evaluator", "translation-evaluator"}:
+            continue
+        for target_name, target_root in SKILL_TARGETS.items():
+            target = target_root / source.name
+            count = copy_tree(source, target, {
+                ".github/skills/": f"{target_root.relative_to(ROOT).as_posix()}/",
+                ".github/agents/reference/": ".agents/skills/translation-evaluator/references/golden-samples/",
+            })
+            if target_name == "portable":
+                skill_files += count
+    for root in SKILL_TARGETS.values():
+        stale = root / "mtl-quality-evaluator"
+        if stale.exists():
+            remove_generated_tree(stale)
+    # Other agent references are not copied: the indexed sample corpus has one home.
+    for stale in (
+        ROOT / ".agents" / "agent-reference",
+        ROOT / ".claude" / "agents" / "reference",
+        ROOT / ".grok" / "agents" / "reference",
+        ROOT / ".codex" / "agent-reference",
+    ):
+        if stale.exists():
+            remove_generated_tree(stale)
 
     print(f"converted_agents={len(agents)}")
     print(f"copied_skill_files={skill_files}")

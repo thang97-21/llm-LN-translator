@@ -25,7 +25,9 @@ from src.Deepseek.translator.config import get_thinking_log_config
 from src.Deepseek.translator.thinking_output import merge_thinking_log, split_thinking_from_output
 
 logger = logging.getLogger(__name__)
-_CJK_LEAK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿＀-￯]")
+# Japanese script only; the rest of U+FF00-FFEF (e.g. a policy-required ＊) is
+# kept. See src/Anthropic/agent.py for the incident.
+_CJK_LEAK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
 
 
 class QwenTranslator:

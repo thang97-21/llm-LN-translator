@@ -75,7 +75,12 @@ from src.Deepseek.translator.config import get_thinking_log_config
 from src.Deepseek.translator.thinking_output import merge_thinking_log, sanitize_chapter_output
 
 logger = logging.getLogger(__name__)
-_CJK_LEAK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿＀-￯]")
+# Japanese script only (kana, CJK ideographs, halfwidth katakana). The rest of
+# the U+FF00-FFEF block is NOT stripped: it holds glyphs a translation_policy
+# can require verbatim -- volume 3e35fe lost its ＊ (U+FF0A) POV hand-off here
+# after the model had deliberately kept it. Stray fullwidth Latin/punctuation
+# is the QC structural lane's to flag, not this filter's to delete silently.
+_CJK_LEAK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
 # Chapter ids in this pipeline are CHAPTER_NN, zero-padded to a width the
 # librarian fixes per volume. Splitting the trailing run of digits lets the
 # predecessor be derived exactly, and re-padded to the same width.
@@ -493,6 +498,10 @@ class AnthropicTranslator:
             for row in anchor_flagged
             if str(row.get("status")) in block_on
         )
+        # Recorded regardless of block_on -- an anchor miss that does not hold
+        # the chapter back still deserves a durable, QC-readable trail. Console
+        # warnings scroll past; this survives the run.
+        self._write_anchor_warnings(existing.get("chapters") or {})
 
         for row in structural_rows:
             status = str(row.get("status") or "")
@@ -525,6 +534,51 @@ class AnthropicTranslator:
             )
             return []
         return blocking
+
+    def _write_anchor_warnings(self, chapters: Dict[str, Any]) -> None:
+        """Render every chapter's non-honoured anchors to QC/anchor_warnings.md.
+
+        Rebuilt from anchor_reconciliation.json's full chapter map on every
+        call, not appended -- a chapter that gets re-translated and clears its
+        anchor miss on retry must have its old entry disappear here too,
+        rather than leaving a stale warning about a problem that no longer
+        exists. This is the durable half of what used to be a console-only
+        `logger.warning`: block_on no longer fails a chapter over a single
+        anchor (see config.yaml's fidelity_gate.block_on), so without this
+        file that finding was never seen by anyone once the terminal scrolled
+        past it.
+        """
+        sections: List[str] = []
+        for chapter_id in sorted(chapters):
+            rows = [
+                row for row in (chapters[chapter_id].get("anchors") or [])
+                if str(row.get("status")) in ("missing", "drifted")
+            ]
+            if not rows:
+                continue
+            lines = [f"## {chapter_id}"]
+            for row in rows:
+                lines.append(
+                    f"- `{row.get('anchor_id')}` **{row.get('status')}** — JP: {row.get('jp')} | "
+                    f"expected EN: {row.get('en')!r} (source_occurrences={row.get('source_occurrences')}, "
+                    f"en_occurrences={row.get('en_occurrences')})"
+                )
+            sections.append("\n".join(lines))
+
+        path = self.work_dir / "QC" / "anchor_warnings.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not sections:
+            if path.exists():
+                path.unlink()
+            return
+        header = (
+            f"# Anchor Fidelity Warnings — {self.volume_id}\n\n"
+            "Non-blocking findings from the anchor-lock check "
+            "(`translation.anthropic.fidelity_gate`). These chapters were NOT held "
+            "back for them -- the QC pass should judge whether each is acceptable "
+            "drift or a real loss.\n"
+        )
+        path.write_text(header + "\n" + "\n\n".join(sections) + "\n", encoding="utf-8")
 
     def _preceding_chapter_id(self, chapter_id: str) -> Optional[str]:
         """The chapter id immediately before this one, or None.
@@ -700,6 +754,7 @@ class AnthropicTranslator:
         # written before the pause, so every response in the chain is folded
         # in, in order, not just the last.
         parts = [first_response.content] + [r.content for r in resumed]
+        chapter_responses = [first_response, *resumed]
         thinking_parts: List[str] = []
         advisor_texts: List[str] = []
         if first_response.thinking_content:
@@ -739,6 +794,7 @@ class AnthropicTranslator:
                 )
             parts.append(continuation_response.content)
             parts.extend(r.content for r in resumed)
+            chapter_responses.extend([continuation_response, *resumed])
             if continuation_response.thinking_content:
                 thinking_parts.append(str(continuation_response.thinking_content))
             advisor_texts.extend(_advisor_consult_texts(continuation_response))
@@ -759,6 +815,7 @@ class AnthropicTranslator:
             api_thinking="\n\n".join(thinking_parts) or None,
             leaked_blocks=leaked_blocks,
             advisor_texts=advisor_texts,
+            thinking_blocks=_thinking_tally(chapter_responses),
         )
         if manager is not None:
             manager.commit(
@@ -896,8 +953,16 @@ class AnthropicTranslator:
         api_thinking: Optional[str],
         leaked_blocks: List[str],
         advisor_texts: Optional[List[str]] = None,
+        thinking_blocks: Optional[Tuple[int, int]] = None,
     ) -> None:
         """Archive this chapter's thinking text to THINKING/<chapter_id>_THINKING.md.
+
+        ``thinking_blocks`` is ``(total, with_text)`` across every response the
+        chapter took. When display is "summarized" and the API returned
+        thinking blocks but none carried text, the skip below is not the
+        model declining to think -- the summary was withheld -- so it is
+        logged as a warning instead of passing silently (volume 3e35fe:
+        every block came back signature-only under display=summarized).
 
         Text is only present when translation.anthropic.thinking.display is
         "summarized" — with "omitted" the API returns an empty `thinking`
@@ -913,9 +978,26 @@ class AnthropicTranslator:
         advisor (claude-fable-5-1, claude-opus-5, and the Mythos family),
         whose guidance never reaches this file or any other, by Anthropic's
         own design (see docs/anthropic-advisor-mode-plan.md).
+
+        The plaintext variant is reachable ONLY under a claude-sonnet-5
+        executor (ADVISOR_COMPATIBILITY in client.py) -- config.yaml's
+        `model` must be claude-sonnet-5, not claude-sonnet-5-5, for this to
+        ever populate. A claude-sonnet-5-5 executor forces encrypted advice
+        unconditionally regardless of which advisor is chosen (its own
+        migration guide, fetched 2026-09-29), so this stays silently empty
+        there even with advisor.model: claude-opus-4-8 configured.
         """
         if not self.thinking_log_enabled:
             return
+        display = str(((self._config.get("thinking", {}) or {}).get("display", "summarized")) or "summarized")
+        total_blocks, text_blocks = thinking_blocks or (0, 0)
+        if display == "summarized" and total_blocks and not text_blocks:
+            logger.warning(
+                "[ANTHROPIC-THINKING] %s: requested display=summarized, but all %d thinking "
+                "block(s) came back signature-only (empty text) -- the API withheld the "
+                "summary; THINKING/%s_THINKING.md will hold advisor text only, if any.",
+                chapter_id, total_blocks, chapter_id,
+            )
         merged = merge_thinking_log(api_thinking, leaked_blocks, chapter_id=chapter_id)
         if advisor_texts:
             advisor_section = (
@@ -1169,11 +1251,25 @@ class AnthropicTranslator:
             # longer land mid-assembly - prepare_prefix takes that check once,
             # above - but it can still land in the previous wave's absorb, and
             # that is the case the pilot is for.
+            #
+            # The advisor tool's own `caching` breakpoint (client.py's
+            # build_advisor_tool) is a SEPARATE cache scope from the history
+            # breakpoint above, and this split above never warms it: every
+            # member of a wave calls the advisor independently, all racing to
+            # write that scope, and unlike the history breakpoint's race this
+            # one is not rare -- it happens on every multi-member wave, not
+            # just after a fold. Measured on volume 25-9: 0% advisor cache-hit
+            # across all three waves, cache-write growing from 78k to 320k
+            # tokens per consult by CHAPTER_08, with the fix already live and
+            # validated on the synchronous path (docs/anthropic-advisor-mode-plan.md
+            # §6.2) -- the synchronous path just never races. So "auto" pilots
+            # for the advisor's race unconditionally, not gated on prefix_reset.
             compactions_now = _compaction_count(manager)
             prefix_reset = compactions_now != compactions_seen
             compactions_seen = compactions_now
+            advisor_races = bool(self._advisor_cfg.get("enabled", False))
             use_pilot = len(requests) > 1 and (
-                pilot_mode == "always" or (pilot_mode == "auto" and prefix_reset)
+                pilot_mode == "always" or (pilot_mode == "auto" and (prefix_reset or advisor_races))
             )
             groups: List[List[Dict[str, Any]]] = (
                 [requests[:1], requests[1:]] if use_pilot else [requests]
@@ -1345,6 +1441,7 @@ class AnthropicTranslator:
             extra_content_parts: List[str] = []
             extra_thinking_parts: List[str] = []
             extra_advisor_texts: List[str] = []
+            extra_responses: List[Any] = []
             if response.termination == LLMTermination.PAUSED:
                 if messages_by_id is None or chapter_id not in messages_by_id:
                     # Recovery path: no record of the exact request this
@@ -1382,6 +1479,7 @@ class AnthropicTranslator:
                     unfinished[chapter_id] = f"still paused after {pause_count} resume attempt(s) — not persisted"
                     continue
                 extra_content_parts = [paused_response.content] + [r.content for r in resumed[:-1]]
+                extra_responses = [paused_response, *resumed[:-1]]
                 if paused_response.thinking_content:
                     extra_thinking_parts.append(str(paused_response.thinking_content))
                 extra_advisor_texts.extend(_advisor_consult_texts(paused_response))
@@ -1452,6 +1550,7 @@ class AnthropicTranslator:
                 api_thinking=combined_thinking,
                 leaked_blocks=leaked_blocks,
                 advisor_texts=combined_advisor_texts,
+                thinking_blocks=_thinking_tally([*extra_responses, response]),
             )
             if pause_count == 0:
                 # A paused-then-resolved response's final call was already
@@ -1921,14 +2020,29 @@ def _single_turn_messages(prompt: str) -> List[Dict[str, Any]]:
     return [_user_message(prompt)]
 
 
+def _thinking_tally(responses) -> Tuple[int, int]:
+    """Sum response_to_llm_response's thinking_blocks counts over a chapter's
+    responses as ``(total, with_text)``. Responses without the field count
+    as zero."""
+    total = with_text = 0
+    for response in responses:
+        counts = (getattr(response, "provider_metadata", None) or {}).get("thinking_blocks") or {}
+        total += int(counts.get("total", 0) or 0)
+        with_text += int(counts.get("with_text", 0) or 0)
+    return total, with_text
+
+
 def _advisor_consult_texts(response) -> List[str]:
     """Plaintext advisor consult text from one response, if any.
 
     ``block.text`` is populated only for the plaintext advisor_result variant
-    (e.g. claude-opus-4-8, claude-sonnet-5 as advisor); it is "" by
-    construction for the encrypted advisor_redacted_result variant
-    (claude-fable-5-1, claude-opus-5, and the Mythos family), so this is
-    naturally silent for those without any type-specific branching.
+    (e.g. claude-opus-4-8, claude-sonnet-5 as advisor, under a claude-sonnet-5
+    executor only); it is "" by construction for the encrypted
+    advisor_redacted_result variant (claude-fable-5-1, claude-opus-5, the
+    Mythos family, and ANY advisor at all under a claude-sonnet-5-5
+    executor), so this is naturally silent for those without any
+    type-specific branching. See the longer note in
+    ``_maybe_write_thinking_log`` above.
     """
     return [
         block.text for block in (response.content_blocks or [])

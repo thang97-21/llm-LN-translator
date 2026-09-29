@@ -12,9 +12,10 @@ import re
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple, Callable
 from dataclasses import dataclass, field
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
 from .config import REMOVE_RUBY_TAGS, SCENE_BREAK_MARKER
+from .gaiji import GAIJI_PLACEHOLDER, GaijiResolver
 
 
 @dataclass
@@ -31,6 +32,7 @@ class ConvertedChapter:
     raw_group_index: Optional[int] = None  # Original unsplit spine group index (for Builder re-merge)
     raw_group_title: Optional[str] = None  # Original unsplit spine group title
     split_strategy: Optional[str] = None  # e.g., "text_page_boundary"
+    unresolved_gaiji: List[str] = field(default_factory=list)  # Gaiji images emitted as 〓 (add them to gaiji_glyphs.json)
 
 
 class XHTMLToMarkdownConverter:
@@ -74,6 +76,8 @@ class XHTMLToMarkdownConverter:
         self.exclude_image_matcher = exclude_image_matcher
         # Per-file exclusions populated by raw XHTML header scan.
         self._runtime_excluded_images = set()
+        self.gaiji = GaijiResolver(content_dir)
+        self._chapter_unresolved_gaiji: List[str] = []
 
     def _is_excluded_image(self, image_filename: str) -> bool:
         """Check whether an image should be excluded from markdown output."""
@@ -201,6 +205,7 @@ class XHTMLToMarkdownConverter:
             ConvertedChapter with markdown content
         """
         soup = BeautifulSoup(html_content, 'xml')
+        self._chapter_unresolved_gaiji = []
 
         # Extract title if not provided
         if not chapter_title:
@@ -243,6 +248,7 @@ class XHTMLToMarkdownConverter:
             illustrations=illustrations,
             word_count=word_count,
             paragraph_count=paragraph_count,
+            unresolved_gaiji=list(dict.fromkeys(self._chapter_unresolved_gaiji)),
         )
 
     def _is_scene_break_icon(self, image_filename: str) -> bool:
@@ -345,6 +351,42 @@ class XHTMLToMarkdownConverter:
         
         return 'illustration'
 
+    def _gaiji_text(self, element: Tag) -> Optional[str]:
+        """
+        Text an inline gaiji image stands for, or None if the tag is not a gaiji.
+
+        Runs before the publisher exclusion check: profiles list gaiji[-_]*.png
+        as excluded assets, which is right for the image and wrong for the
+        character it draws.
+        - Named gaiji (filename or CSS class): resolved glyph, else 〓 so the
+          loss stays visible to prep and QC instead of silently shortening text.
+        - Small-file guesses: resolved glyph if known, else '' (the historical
+          drop), since most of those are decorative icons, not characters.
+        """
+        img = element
+        if (element.name or "").lower() == 'svg':
+            img = element.find('image') or element
+        img_name = self._extract_image_filename(img)
+        if not img_name:
+            return None
+
+        css_class = img.get('class', [])
+        if isinstance(css_class, str):
+            css_class = css_class.split()
+        named = img_name.lower().startswith(('gaiji', 'glyph-')) or any(
+            marker in c for c in css_class for marker in ('gaiji', 'glyph', 'inline-char')
+        )
+        if not named and self._classify_inline_image(img_name, css_class) != 'gaiji':
+            return None
+
+        glyph = self.gaiji.resolve(img_name, img.get('alt', ''), warn=named)
+        if glyph:
+            return glyph
+        if named:
+            self._chapter_unresolved_gaiji.append(img_name)
+            return GAIJI_PLACEHOLDER
+        return ''
+
     def _extract_title(self, soup: BeautifulSoup) -> str:
         """Extract chapter title from HTML."""
         # Try h1, h2, h3 in order
@@ -427,6 +469,11 @@ class XHTMLToMarkdownConverter:
                     elif child_name == 'rtc':
                         # Complex ruby container, rare. Skip for now.
                         pass
+                    elif child_name in ('img', 'image', 'svg'):
+                        # Gaiji as a direct ruby base (e.g. 芦 in 芦田{あしだ})
+                        glyph = self._gaiji_text(child)
+                        if glyph:
+                            all_base_chars.append(glyph)
                     else:
                         # Other formatting tags (em, strong, span) inside ruby
                         # Treat as part of the base text
@@ -445,6 +492,14 @@ class XHTMLToMarkdownConverter:
                 lines.append(combined_base)
             return
 
+        # Inline gaiji become the character they draw, before any exclusion
+        # rule gets a chance to discard them as assets.
+        if tag_name in ('img', 'image', 'svg'):
+            glyph = self._gaiji_text(element)
+            if glyph is not None:
+                lines.append(glyph)
+                return
+
         # Handle images
         if tag_name == 'img':
             src = element.get('src', element.get('xlink:href', ''))
@@ -453,14 +508,10 @@ class XHTMLToMarkdownConverter:
                 if self._is_excluded_image(img_name):
                     return
                 css_class = element.get('class', [])
-                
+
                 # Classify the image type
                 img_type = self._classify_inline_image(img_name, css_class)
-                
-                if img_type == 'gaiji':
-                    # Hard-filter gaiji inline glyph assets.
-                    return
-                
+
                 if img_type == 'scene_break':
                     # Scene break icon - convert to text marker
                     lines.append(f'\n{self.scene_break}\n')
@@ -481,11 +532,7 @@ class XHTMLToMarkdownConverter:
                 
                 # Classify the image type
                 img_type = self._classify_inline_image(img_name, css_class)
-                
-                if img_type == 'gaiji':
-                    # Hard-filter gaiji inline glyph assets.
-                    return
-                
+
                 if img_type == 'scene_break':
                     # Scene break icon
                     lines.append(f'\n{self.scene_break}\n')
@@ -509,11 +556,7 @@ class XHTMLToMarkdownConverter:
                     
                     # Classify the image type
                     img_type = self._classify_inline_image(img_name, css_class)
-                    
-                    if img_type == 'gaiji':
-                        # Hard-filter gaiji inline glyph assets.
-                        return
-                    
+
                     if img_type == 'scene_break':
                         lines.append(f'\n{self.scene_break}\n')
                         return
@@ -628,18 +671,25 @@ class XHTMLToMarkdownConverter:
             self._convert_element(child, lines, illustrations, in_paragraph)
 
     def _get_text(self, element) -> str:
-        """Get text content, handling ruby tags."""
-        if self.remove_ruby:
-            # Build text excluding rt (ruby text) elements
-            texts = []
-            for descendant in element.descendants:
-                if isinstance(descendant, NavigableString):
+        """Get text content, handling ruby tags and substituting gaiji glyphs."""
+        if isinstance(element, NavigableString):
+            return str(element)
+        texts = []
+        for descendant in element.descendants:
+            if isinstance(descendant, NavigableString):
+                if self.remove_ruby:
+                    # Exclude rt (ruby text) elements
                     parent = descendant.parent
                     if parent and parent.name not in ('rt', 'rp'):
                         texts.append(str(descendant))
-            return ''.join(texts)
-        else:
-            return element.get_text()
+                elif type(descendant) in (NavigableString, CData):
+                    # Same string types BeautifulSoup's get_text() keeps
+                    texts.append(str(descendant))
+            elif isinstance(descendant, Tag) and (descendant.name or '').lower() in ('img', 'image'):
+                glyph = self._gaiji_text(descendant)
+                if glyph:
+                    texts.append(glyph)
+        return ''.join(texts)
 
     def _is_scene_break(self, element: Tag, text: str) -> Optional[str]:
         """

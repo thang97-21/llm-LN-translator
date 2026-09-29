@@ -58,6 +58,47 @@ measured, not to a wish list:
    deliberately with clause 4, whose job is to counterweight the failure mode
    it introduces: an advisor talking a correct draft into a change. Measure
    this one specifically; see the plan's §4.
+
+AMENDMENT 2026-09-23 -- source-fidelity review, fallible context, tagged
+findings. Evidence: volume c2cbb4 Ch.1-5, audited line by line against the
+Japanese AND against a GPT-6-Sol control translation of the same chapters
+(the plan's §6.3 measured only whether directives were applied; this measured
+what shipped). Proofreading Mode shipped, unflagged by any consult:
+  - a misreading that inverts a plot beat (Ch.5, いっちゃダメ "mustn't tell"
+    rendered "not to go with"), and a reversed setup for the Prologue's closing
+    twist (Ch.1, the protagonist-as-"me" line turned into "him"/"me");
+  - a joke whose setup was dropped so the punchline had nothing to answer
+    (Ch.1, 女神様って人ですか), and recurring lines with no source trace
+    ("Otherwise it doesn't count.", "full stop", "No detours, no improvising.");
+  - drift in tense (present-tense narration against the prompt's past-tense
+    rule) and name form (Haruka where the narration says 久田).
+Observed consult behaviour behind it: no consult ever reviewed a previous
+chapter (see optimization.build_advisor_guidance / plan §6.4, Fix 1 -- built
+after this run); two consults opened by coaching the executor's question, and
+Ch.4's first was consumed doing only that before max_uses ran out; speaker
+attribution in Ch.4 was settled "straight from the voice fingerprints" with no
+source check, while Ch.2's consult shows project context itself misattributing
+a line. Project context is prep output from a third model and can be wrong.
+
+Three clauses added, one hypothesis flagged:
+1. Source-over-context, with voice profiles demoted to a tiebreaker and a lock
+   that misstates the source reported rather than trusted. Consistent with the
+   master prompt's authority order (source > locks > context); it names the
+   failure the order did not prevent.
+2. Tagged findings (SOURCE_DRIFT / VOICE_DRIFT / CONTEXT_ERROR) so they can be
+   grepped out of the conversation ledger by the volume-end QC pass the plan
+   §6.4 already recommends -- a destination, per §3.3.b's objection to flags
+   nobody reads.
+3. An advisor-addressed paragraph. UNVALIDATED HYPOTHESIS: the advisor tool has
+   no instruction field (BetaAdvisorTool20260301Param), but c2cbb4 consults quote
+   this system prompt back verbatim, so the advisor reads it. Whether it obeys
+   text addressed to it here is exactly what the next run must measure. The
+   review checklist itself lives in build_advisor_guidance's per-chapter
+   envelope, the channel Fix 1 made reliable.
+Deliberately NOT done: rolling back clause 5 under the plan's §4.2 criterion.
+Ch.6's consult did label one suggestion "invented", but as a carrier for an
+untranslatable pun, which the master prompt's intervention ladder permits --
+one ambiguous case is not the correlation §4.2 asks for.
 """
 
 from __future__ import annotations
@@ -133,6 +174,32 @@ English — a seam, an unintended repetition across a paragraph break, a registe
 died in the crossing, or any of the copyedit patterns the craft policy already lists. Findings only,
 each naming its line; you apply your own fix or record why you declined, and its wording never becomes
 yours. Nothing else in this pipeline reads finished English, so a defect nobody names here ships.
+
+That review is a check against the Japanese, not a read of the English alone. The defects that cost
+most are invisible to a reader who never looks at the source: a line, image, beat, or emotional claim
+with no source trace; English that says something the Japanese does not — a misread kana, a reversed
+referent, a joke or twist whose setup or payoff was lost or turned around; and drift from the source in
+tense, name form, or honorific. Any line that reads as unusually vivid, confident, or complete deserves
+its Japanese found in the conversation before it is accepted.
+
+Project context is prep output from another model: the best prior available, not ground truth. It can
+misattribute a speaker, assign a trait the text never shows, or carry a voice profile that contradicts
+how the character actually talks. Decide who is speaking and how they sound from the source first —
+speech markers, sentence-final forms, what the line says, who could know it — and let a voice profile
+break only a tie the source leaves open. Where source and project context disagree, the source governs
+the prose and the disagreement is itself a finding. A locked rendering that merely differs in style from
+what you would choose stays as locked; one whose English misstates what the source means is rendered to
+the source's meaning and reported.
+
+Report every finding under a fixed tag so it can be collected after the run: SOURCE_DRIFT for finished
+English that departs from its Japanese, VOICE_DRIFT for a line that breaks a speaker's voice where the
+source does not, CONTEXT_ERROR for project context that contradicts the source — naming the field and
+the source line. A finding that names no line is not a finding.
+
+If you are the advisor reading this conversation: answer the question you were asked before advising on
+how it was asked, and carry out the review above even when the request frames it narrowly. Anything you
+propose must trace to something in the Japanese — if you offer an English device that departs from the
+source's wording, name the source element it carries, and if you cannot name one, do not propose it.
 
 Not consulting is a real answer. If your own read is already correct, or the only open question is one
 the source or the project data settles, say so in your reasoning and draft — do not spend a call to

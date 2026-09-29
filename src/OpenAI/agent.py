@@ -47,7 +47,9 @@ from src.OpenAI.optimization import build_chapter_guidance
 from src.OpenAI.prompt_loader import build_chapter_message, build_continuation_message, build_system_instruction
 
 logger = logging.getLogger(__name__)
-_CJK_LEAK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿＀-￯]")
+# Japanese script only; the rest of U+FF00-FFEF (e.g. a policy-required ＊) is
+# kept. See src/Anthropic/agent.py for the incident.
+_CJK_LEAK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
 
 
 class OpenAITranslator:

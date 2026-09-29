@@ -60,8 +60,10 @@ logger = logging.getLogger(__name__)
 # master prompt's explicit "no CJK in output" instruction. This is a safety
 # net, not a detector — the full confidence-scored CJKArtifactCleaner lives
 # in the main pipeline's post_processor/, which is out of scope here.
+# Japanese script only; the rest of U+FF00-FFEF (e.g. a policy-required ＊) is
+# kept. See src/Anthropic/agent.py for the incident.
 _CJK_LEAK_RE = re.compile(
-    r"[぀-ヿ㐀-䶿一-鿿＀-￯]"
+    r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]"
 )
 
 
